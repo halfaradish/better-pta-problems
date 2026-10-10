@@ -1,0 +1,162 @@
+/* 更好的题目集 · 注入样式（浅色，对齐 PTA 默认主题） */
+
+.bps-root {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+/* 课程筛选条（吸顶） */
+.bps-chips {
+  position: sticky;
+  top: 8px;
+  z-index: 30;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 8px;
+  border-radius: 0.625rem;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08), 0 0 0 1px rgba(0, 0, 0, 0.03);
+}
+
+.bps-root a {
+  text-decoration: none;
+  color: inherit;
+}
+
+.bps-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 16em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 3px 10px;
+  border-radius: 9999px;
+  border: 1px solid #dee2e6;
+  background: #fff;
+  color: #495057;
+  font-size: 12px;
+  line-height: 18px;
+  cursor: pointer;
+}
+
+.bps-chip:hover {
+  border-color: #0a4991;
+  color: #0a4991;
+}
+
+.bps-chip.bps-on {
+  background: #0a4991;
+  border-color: #0a4991;
+  color: #fff;
+}
+
+.bps-mode {
+  margin-left: auto;
+}
+
+/* 分组 */
+.bps-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 4px 6px;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+}
+
+.bps-caret {
+  flex: none;
+  width: 0;
+  height: 0;
+  border-left: 5px solid #868e96;
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+  transform: rotate(90deg);
+  transition: transform 0.15s;
+}
+
+.bps-caret.bps-folded {
+  transform: rotate(0deg);
+}
+
+.bps-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 9999px;
+  background: hsl(var(--h, 210), 60%, 55%);
+}
+
+.bps-name {
+  max-width: 24em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 14px;
+  font-weight: 700;
+  color: #343a40;
+}
+
+.bps-count,
+.bps-deadline {
+  font-size: 12px;
+  color: #868e96;
+}
+
+.bps-space {
+  flex: 1;
+}
+
+.bps-items {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  padding: 2px 0 6px;
+}
+
+.bps-items.bps-hidden {
+  display: none;
+}
+
+/* 卡片内徽章 */
+.bps-badge {
+  flex: none;
+  display: inline-block;
+  max-width: 14em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: middle;
+  padding: 0 6px;
+  border-radius: 9999px;
+  font-size: 11px;
+  line-height: 17px;
+  font-weight: 500;
+  background: hsl(var(--h, 210), 65%, 91%);
+  color: hsl(var(--h, 210), 55%, 33%);
+}
+
+.bps-countdown {
+  flex: none;
+  font-size: 11px;
+  line-height: 17px;
+  font-weight: 500;
+  color: #868e96;
+}
+
+.bps-countdown[data-level="2"] {
+  color: #e8590c;
+}
+
+.bps-countdown[data-level="3"] {
+  color: #e03131;
+  font-weight: 700;
+}
