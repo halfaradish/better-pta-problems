@@ -1,0 +1,5 @@
+# 本地环境文件
+node_modules/
+*.log
+.DS_Store
+Thumbs.db
