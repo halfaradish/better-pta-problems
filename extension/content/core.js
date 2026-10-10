@@ -17,13 +17,20 @@
 
   const DEFAULTS = {
     enabled: true,          // 总开关
-    grouped: true,          // 分组视图（关闭 = 原始列表 + 徽章/倒计时）
     badge: true,            // 卡片上的课程徽章
     countdown: true,        // 截止倒计时（仅剩 ≤7 天时显示）
     separators: '--,｜,|',  // 课程名分隔符：取首个分隔符之前的部分作为课程名
     rules: '',              // 自定义规则，每行一条：关键词=>课程名（包含匹配，优先于自动识别）
     mergeSimilar: true,     // 同一教师下相似课程名自动归并为同一门课
+    settingsVersion: 0,     // 0 = 旧版设置；init 时迁移到 v4（移除 grouped，改为按路由的会话内状态）
   };
+
+  // 各路由的默认视图：所有列表页均默认「列表」（PTA 原生分页可用）；
+  // 分组视图通过筛选条上的 toggle 会话内切换。保留函数形式便于将来按路由定制。
+  function defaultGroupedFor() {
+    return false;
+  }
+  const PAGE_SIZE = 30;
 
   // 仅在这些列表页生效；题目集详情页、dashboard 等不受影响
   const LIST_PATH_RE = /^\/problem-sets(?:\/(active|all|finished|mine))?\/?$/;
@@ -336,7 +343,9 @@
     const path = location.pathname;
     if (path !== lastPath) {
       lastPath = path;
-      state.filter = 'ALL'; // 换页后筛选回到全部，避免上一页的筛选造成误解
+      state.filter = 'ALL';                       // 换页后筛选回到全部，避免上一页的筛选造成误解
+      state.grouped = defaultGroupedFor();        // 每个路由进入时恢复其默认视图
+      state.page = 1;
     }
     for (const e of performance.getEntriesByType('resource')) {
       if (e.startTime <= lastApiEntryTime || !API_URL_RE.test(e.name)) continue;
@@ -349,8 +358,8 @@
   }
 
   function currentRouteApiUrl() {
+    trackRouteApiUrl(); // 先记账/应用路由默认视图，再决定数据源
     if (window.__BPS_FORCE_LIST__ && window.__BPS_MOCK_API__) return 'mock://problem-sets'; // 预览页测试数据源
-    trackRouteApiUrl();
     return routeUrls.get(location.pathname)?.url || null;
   }
 
@@ -473,10 +482,12 @@
   let settings = { ...DEFAULTS };
   const state = {
     filter: 'ALL',
-    collapsed: new Set(),
+    grouped: false,         // 当前路由的视图模式（进入路由时取默认，会话内可切换，不持久化）
+    page: 1,                // 分组视图的当前页（整组分页）
+    collapsed: new Set(),   // 已折叠的课程名（仅分组视图）
     sig: '',
     root: null,
-    groupEls: new Map(),
+    bar: null,              // 原生列表模式下筛选条独立插入（不包在 .bps-root 里）
     items: [],
   };
 
@@ -499,25 +510,28 @@
       chip.className = 'bps-chip' + (state.filter === key ? ' bps-on' : '');
       chip.textContent = count == null ? label : `${label} ${count}`;
       chip.addEventListener('click', () => {
+        if (state.filter === key) return;
         state.filter = key;
-        [...bar.querySelectorAll('.bps-chip')].forEach(x => x.classList.remove('bps-on'));
-        chip.classList.add('bps-on');
-        applyFilter();
+        state.page = 1;
+        sync(true); // 内容按筛选重建：全部=列表/分组，具体课程=平铺
       });
       return chip;
     };
     bar.appendChild(mk('ALL', '全部', state.items.length));
     for (const [course, list] of groups) bar.appendChild(mk(course, course, list.length));
-    const toggle = document.createElement('button');
-    toggle.type = 'button';
-    toggle.className = 'bps-chip bps-mode';
-    toggle.textContent = '切换为列表';
-    toggle.addEventListener('click', async () => {
-      settings.grouped = false;
-      await storage.set(settings);
-      sync(true);
-    });
-    bar.appendChild(toggle);
+    // 列表/分组切换只影响「全部」：选中具体课程时不渲染 toggle
+    if (state.filter === 'ALL') {
+      const toggle = document.createElement('button');
+      toggle.type = 'button';
+      toggle.className = 'bps-chip bps-mode';
+      toggle.textContent = state.grouped ? '切换为列表' : '切换为分组';
+      toggle.addEventListener('click', () => {
+        state.grouped = !state.grouped;   // 会话内切换，不持久化；进入路由时恢复默认
+        state.page = 1;
+        sync(true);
+      });
+      bar.appendChild(toggle);
+    }
     return bar;
   }
 
@@ -569,47 +583,102 @@
     return sec;
   }
 
-  function renderGrouped(listEl, items) {
+  // 整组分页：按聚合顺序把整组装进页（页容量 PAGE_SIZE），组不跨页
+  function packPages(groups) {
+    const pages = [];
+    let cur = null;
+    for (const [course, list] of groups) {
+      if (!cur || cur.count + list.length > PAGE_SIZE) {
+        cur = { groups: [], count: 0 };
+        pages.push(cur);
+      }
+      cur.groups.push([course, list]);
+      cur.count += list.length;
+    }
+    return pages;
+  }
+
+  function buildPager(total, totalPages) {
+    const card = document.createElement('div');
+    card.className = 'bps-pager';
+    const summary = document.createElement('div');
+    summary.className = 'bps-pager-summary';
+    summary.textContent = `共 ${total} 条数据`;
+    const nav = document.createElement('div');
+    nav.className = 'bps-pager-nav';
+    const go = p => {
+      if (p < 1 || p > totalPages || p === state.page) return;
+      state.page = p;
+      sync(true);
+      // 翻页后回到列表顶部
+      const anchor = state.root;
+      if (anchor) anchor.scrollIntoView({ block: 'start', behavior: 'instant' });
+    };
+    const btn = (label, page, disabled) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'bps-pager-btn' + (page === state.page ? ' bps-on' : '');
+      b.textContent = label;
+      b.disabled = !!disabled;
+      b.addEventListener('click', () => go(page));
+      return b;
+    };
+    nav.append(btn('‹', state.page - 1, state.page <= 1));
+    for (let p = 1; p <= totalPages; p++) nav.append(btn(String(p), p, false));
+    nav.append(btn('›', state.page + 1, state.page >= totalPages));
+    card.append(summary, nav);
+    return card;
+  }
+
+  // 内容状态机：
+  //  - 全部 + 列表（活跃默认）：PTA 原生列表保持可见（徽章/倒计时已注入，分页可用），
+  //    筛选条直接插入列表容器旁——sticky 的包含块须覆盖整个列表高度才能全程吸附；
+  //  - 全部 + 分组（所有默认）：聚合分组区段，整组分页（PAGE_SIZE），隐藏原生列表与分页条；
+  //  - 选中具体课程：该课程聚合平铺（单课程无需分页），隐藏原生列表与分页条。
+  // 排序一律沿用 PTA 当前排序。
+  function renderContent(listEl, items) {
+    const groups = collectGroups(items);
+    const bar = buildChipBar(groups);
+    const nativeListMode = state.filter === 'ALL' && !state.grouped;
+
+    if (nativeListMode) {
+      bar.dataset.bpsBar = '1';
+      listEl.before(bar);
+      state.root = null;
+      state.bar = bar;
+      return;
+    }
+
     const root = document.createElement('div');
     root.className = 'bps-root';
-    const groups = collectGroups(items);
-    root.appendChild(buildChipBar(groups));
-    for (const [course, list] of groups) root.appendChild(buildGroup(course, list));
+    root.appendChild(bar);
+
+    if (state.grouped && state.filter === 'ALL') {
+      const pages = packPages(groups);
+      if (state.page > pages.length) state.page = pages.length;
+      const page = pages[state.page - 1];
+      for (const [course, list] of page.groups) root.appendChild(buildGroup(course, list));
+      if (pages.length > 1) root.appendChild(buildPager(items.length, pages.length));
+    } else {
+      // 走到这里 filter 必为具体课程（全部+列表已在上方走原生分支）
+      const shown = items.filter(i => (i.course || '未分类') === state.filter);
+      const box = document.createElement('div');
+      box.className = 'bps-flat';
+      const frag = document.createDocumentFragment();
+      for (const it of shown) {
+        const c = it.el.cloneNode(true);
+        c.classList.add('bps-clone');
+        frag.appendChild(c);
+      }
+      box.appendChild(frag);
+      root.appendChild(box);
+    }
+
     listEl.before(root);
     listEl.style.display = 'none';
     setPagingHidden(true);
     state.root = root;
-    state.groupEls = new Map([...root.querySelectorAll('.bps-group')].map(g => [g.dataset.course, g]));
-  }
-
-  // 列表模式：不展示筛选条（其计数面向全部分页，过滤只作用于当前页，容易误解），
-  // 只保留一个切回分组的入口
-  function renderBarOnly(listEl) {
-    const root = document.createElement('div');
-    root.className = 'bps-root';
-    const bar = document.createElement('div');
-    bar.className = 'bps-chips';
-    const toggle = document.createElement('button');
-    toggle.type = 'button';
-    toggle.className = 'bps-chip bps-mode';
-    toggle.textContent = '按课程分组';
-    toggle.addEventListener('click', async () => {
-      settings.grouped = true;
-      await storage.set(settings);
-      sync(true);
-    });
-    bar.appendChild(toggle);
-    root.appendChild(bar);
-    listEl.before(root);
-    state.root = root;
-  }
-
-  function applyFilter() {
-    const f = state.filter;
-    for (const [course, g] of state.groupEls) {
-      const show = f === 'ALL' || course === f;
-      if (g.style.display !== (show ? '' : 'none')) g.style.display = show ? '' : 'none';
-    }
+    state.bar = null;
   }
 
   // 分组视图接管全部条目后，隐藏 PTA 自身的分页条/条数文案，切回列表模式时恢复
@@ -623,10 +692,11 @@
 
   function removeRoot() {
     document.querySelectorAll('.bps-root').forEach(n => n.remove());
+    document.querySelectorAll('[data-bps-bar]').forEach(n => n.remove());
     document.querySelectorAll('main .pc-list').forEach(n => { if (n.style.display) n.style.display = ''; });
     setPagingHidden(false);
     state.root = null;
-    state.groupEls = new Map();
+    state.bar = null;
   }
 
   function teardown() {
@@ -687,22 +757,22 @@
       state.items = uni;
       uni.forEach(it => decorate(it, settings)); // API 卡片补徽章/倒计时；DOM 卡片幂等
 
-      // 签名含当前 DOM 的条目指纹：SPA 换页后即使聚合数据相同，克隆卡片也要重建
+      // 签名含 DOM 条目指纹与筛选/模式/页码：SPA 换页、筛选、模式、翻页都触发内容重建
       const domSig = domItems.map(i => i.id).join(',');
-      const sig = `${settings.grouped}#${domSig}#${uni.map(i => `${i.id}|${i.course}|${i.closeText}`).join(';')}`;
-      const hiddenOk = settings.grouped ? listEl.style.display === 'none' : listEl.style.display !== 'none';
-      if (!force && state.root && state.sig === sig && hiddenOk && document.contains(state.root)) {
+      const sig = `${state.grouped}#${state.filter}#${state.page}#${domSig}#${uni.map(i => `${i.id}|${i.course}|${i.closeText}`).join(';')}`;
+      // 默认态（全部+列表）要求原生列表可见；分组/课程筛选态要求其隐藏
+      const nativeListMode = state.filter === 'ALL' && !state.grouped;
+      const hiddenOk = nativeListMode ? listEl.style.display !== 'none' : listEl.style.display === 'none';
+      const anchor = state.root || state.bar;
+      if (!force && anchor && state.sig === sig && hiddenOk && document.contains(anchor)) {
         refreshCountdowns();
-        applyFilter();
-        if (settings.grouped) setPagingHidden(true);
+        setPagingHidden(!nativeListMode);
         return;
       }
 
       state.sig = sig;
       removeRoot();
-      if (settings.grouped) renderGrouped(listEl, uni);
-      else renderBarOnly(listEl);
-      applyFilter();
+      renderContent(listEl, uni);
     } catch (err) {
       console.warn('[更好的题目集] sync 失败:', err);
     }
@@ -710,6 +780,12 @@
 
   async function init() {
     settings = await storage.get();
+    // v4 迁移：列表/分组改为按路由的会话内状态（活跃=列表、其余=分组），不再持久化
+    if (!settings.settingsVersion || settings.settingsVersion < 4) {
+      delete settings.grouped;
+      settings.settingsVersion = 4;
+      await storage.set(settings);
+    }
     storage.onChanged(s => { settings = s; sync(true); });
 
     try { performance.setResourceTimingBufferSize(1000); } catch (_) { /* ignore */ }

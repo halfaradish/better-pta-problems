@@ -115,7 +115,8 @@
   flex: 1;
 }
 
-.bps-items {
+.bps-items,
+.bps-flat {
   display: flex;
   flex-direction: column;
   gap: 1rem;
@@ -124,6 +125,54 @@
 
 .bps-items.bps-hidden {
   display: none;
+}
+
+/* 分组视图的整组分页条 */
+.bps-pager {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: #fff;
+  border-radius: 0.625rem;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+  padding: 12px 16px;
+}
+
+.bps-pager-summary {
+  font-size: 12px;
+  color: #868e96;
+}
+
+.bps-pager-nav {
+  display: flex;
+  gap: 6px;
+}
+
+.bps-pager-btn {
+  min-width: 28px;
+  height: 28px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #495057;
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 28px;
+  padding: 0 6px;
+}
+
+.bps-pager-btn:hover:not(:disabled) {
+  background: rgba(0, 0, 0, 0.05);
+}
+
+.bps-pager-btn.bps-on {
+  background: #0a4991;
+  color: #fff;
+}
+
+.bps-pager-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
 }
 
 /* 卡片内徽章 */
