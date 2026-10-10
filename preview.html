@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>更好的题目集 · 设计预览</title>
+<link rel="stylesheet" href="extension/content/styles.css">
+<style>
+  /* ---- 页面骨架（模拟 PTA 布局） ---- */
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #f1f3f5; color: #404040;
+         font-family: Harmony, ui-sans-serif, system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", "Noto Sans", sans-serif; }
+  .app { display: flex; height: 100vh; }
+  .sidebar { width: 220px; flex: none; background: #fff; border-right: 1px solid #e9ecef; padding: 16px 10px; }
+  .sidebar .logo { font-weight: 700; font-size: 15px; padding: 6px 12px 18px; color: #0a4991; }
+  .sidebar a { display: block; padding: 8px 12px; border-radius: 8px; color: #495057; text-decoration: none; font-size: 14px; }
+  .sidebar a.on { background: rgba(10, 73, 145, 0.08); color: #0a4991; font-weight: 600; }
+  main { flex: 1; min-width: 0; }
+  .scroll { height: 100vh; overflow-y: auto; }
+  .page { max-width: 860px; margin: 0 auto; padding: 16px; }
+
+  /* ---- PTA 原有元素复刻 ---- */
+  .tabs { display: flex; align-items: center; gap: 16px; padding-bottom: 10px; }
+  .tab { font-size: 15px; color: #868e96; cursor: pointer; padding-bottom: 6px; }
+  .tab.on { color: #0a4991; font-weight: 700; border-bottom: 2px solid #0a4991; }
+  .sorts { margin-left: auto; font-size: 12px; color: #868e96; }
+  .filters { display: flex; align-items: flex-end; gap: 8px; flex-wrap: wrap; margin-bottom: 16px; }
+  .f-label { font-size: 12px; color: #868e96; margin-bottom: 4px; }
+  .f-search { display: flex; flex-direction: column; flex: 1; min-width: 140px; max-width: 220px; }
+  .f-search input { height: 30px; padding: 0 10px; border: 1px solid #ced4da; border-radius: 4px; font-size: 13px; background: #fff; }
+  .f-select { display: flex; flex-direction: column; }
+  .f-select select { height: 30px; padding: 0 8px; border: 1px solid #ced4da; border-radius: 4px; font-size: 12px; background: #fff; color: #495057; }
+
+  .text-xs { font-size: 12px; line-height: 18px; color: #868e96; }
+  .pc-list { display: flex; flex-direction: column; gap: 16px; }
+  .item { display: flex; align-items: center; gap: 10px; padding: 12px 16px; background: #fff;
+          border-radius: 10px; box-shadow: 0 1px 2px rgba(0,0,0,0.06); text-decoration: none; color: inherit;
+          transition: box-shadow .15s; }
+  .item:hover { box-shadow: 0 3px 10px rgba(0,0,0,0.1); }
+  .ic { width: 38px; height: 38px; flex: none; color: #adb5bd; }
+  .grow { flex: 1; min-width: 0; }
+  .t-wrap { display: flex; flex-direction: column; gap: 4px; }
+  .title { font-size: 14px; font-weight: 700; color: #404040; }
+  .item:hover .title { color: #0a4991; }
+  .flex { display: flex; align-items: center; gap: 8px; }
+  .sub .flex .flex { gap: 4px; }
+  .right { flex: none; }
+  .flexv { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
+  .pill { border-radius: 9999px; padding: 3px 12px; font-size: 12px; white-space: nowrap; }
+  .pill-green { background: rgba(64, 192, 87, 0.12); color: #2f9e44; }
+  .pill-blue  { background: rgba(28, 126, 214, 0.10); color: #1c7ed6; }
+  .pill-orange { background: rgba(232, 89, 12, 0.10); color: #e8590c; }
+  .pill-grey  { background: rgba(0, 0, 0, 0.06); color: #868e96; }
+  .creator { flex: none; color: #868e96; }
+
+  /* 分页条复刻（真实 PTA 结构为 paginationWrapper_* 的白底卡片） */
+  .pager-card { background: #fff; border-radius: 10px; box-shadow: 0 1px 2px rgba(0,0,0,0.06);
+                padding: 16px; display: flex; align-items: center; justify-content: space-between; margin-top: 16px; }
+  .pager { display: flex; gap: 6px; }
+  .pg { min-width: 28px; height: 28px; border: 0; border-radius: 6px; background: transparent; color: #495057; cursor: pointer; }
+  .pg.on { background: #0a4991; color: #fff; }
+
+  /* ---- 预览工具条（非扩展运行时） ---- */
+  .preview-bar { position: fixed; right: 16px; bottom: 16px; z-index: 99; display: flex; gap: 8px;
+                 padding: 8px 10px; border-radius: 10px; background: #212529; color: #fff; font-size: 12px;
+                 box-shadow: 0 4px 14px rgba(0,0,0,.25); }
+  .preview-bar button { border: 0; border-radius: 6px; padding: 5px 12px; cursor: pointer; font-size: 12px; }
+  .preview-bar .b-on { background: #0a4991; color: #fff; }
+  .preview-bar .b-plain { background: #495057; color: #fff; }
+  .preview-note { position: fixed; left: 16px; bottom: 16px; z-index: 99; font-size: 12px; color: #868e96; }
+
+  /* ---- PTA 工具类兼容（预览页无 PTA 样式表；真实页面上这些类由 PTA 提供） ---- */
+  .items-center { align-items: center; }
+  .py-3 { padding-top: 12px; padding-bottom: 12px; }
+  .px-4 { padding-left: 16px; padding-right: 16px; }
+  .space-x-2 > * + * { margin-left: 8px; }
+  .space-y-1 > * + * { margin-top: 4px; }
+  .flex-1 { flex: 1 1 0%; min-width: 0; }
+  .flex-none { flex: none; }
+  .flex-col { flex-direction: column; }
+  .items-end { align-items: flex-end; }
+  .rounded-lg { border-radius: 10px; }
+  .bg-bg-base { background: #fff; }
+  .shadow-sm { box-shadow: 0 1px 2px rgba(0,0,0,0.06); }
+  .text-sm { font-size: 14px; line-height: 20px; }
+  .text-normal { color: #404040; }
+  .font-bold { font-weight: 700; }
+  .ellipsis-m { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .ellipsis { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .whitespace-nowrap { white-space: nowrap; }
+  .inline-block { display: inline-block; }
+  .rounded-xl { border-radius: 9999px; }
+  .bg-green-500 { background-color: rgba(64, 192, 87, 0.12); }
+  .bg-blue-500 { background-color: rgba(28, 126, 214, 0.10); }
+  .bg-orange-500 { background-color: rgba(232, 89, 12, 0.10); }
+  .bg-bg-light { background-color: rgba(0, 0, 0, 0.06); }
+  .pc-color-pass { color: #2f9e44; }
+  .pc-color-primary { color: #1c7ed6; }
+  .pc-color-warning { color: #e8590c; }
+  .pc-color-light { color: #868e96; }
+  @media (min-width: 768px) { .md\:flex { display: flex; } .hidden.md\:flex { display: flex; } }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="logo">PTA · 预览</div>
+    <a class="on" href="javascript:void 0">题目集</a>
+    <a href="javascript:void 0">考试</a>
+    <a href="javascript:void 0">作业</a>
+    <a href="javascript:void 0">题库</a>
+    <a href="javascript:void 0">竞赛</a>
+  </aside>
+  <main>
+    <div class="scroll">
+      <div class="page">
+        <div class="tabs">
+          <span class="tab on">活跃题目集</span>
+          <span class="tab">所有题目集</span>
+          <span class="sorts">最晚结束 ▾</span>
+        </div>
+        <div class="filters">
+          <div class="f-search">
+            <div class="f-label">题目集名称</div>
+            <input type="search" placeholder="题目集名称关键词...">
+          </div>
+          <div class="f-select">
+            <div class="f-label">是否开考</div>
+            <select><option>全部</option><option>已开考</option><option>未开考</option></select>
+          </div>
+          <div class="f-select">
+            <div class="f-label">题目集类型</div>
+            <select><option>全部</option><option>默认</option></select>
+          </div>
+          <div class="f-select">
+            <div class="f-label">题目创建者</div>
+            <select><option>全部</option><option>教师A</option><option>教师B</option><option>教师C</option><option>教师D</option></select>
+          </div>
+        </div>
+        <div class="space-y-4">
+          <div class="pc-list" id="list"></div>
+          <div class="pager-card paginationWrapper_mock">
+            <div class="count-line text-xs">共 33 条数据</div>
+            <div class="pager"><button class="pg on">1</button><button class="pg">2</button><button class="pg">3</button></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<div class="preview-bar">
+  <span style="align-self:center;opacity:.7">预览</span>
+  <button class="b-on" onclick="BPS.setSettings({enabled:true,grouped:true})">分组视图</button>
+  <button class="b-plain" onclick="BPS.setSettings({enabled:true,grouped:false})">原始页面</button>
+  <button class="b-plain" onclick="BPS.setSettings({enabled:false})">关闭插件</button>
+</div>
+<div class="preview-note">设计预览：分组视图跨页聚合 33 条（当前页 16 条克隆 PTA 卡片，其余按接口数据重建）</div>
+
+<script>
+  /* chrome.storage 仿真（预览页无扩展环境） */
+  window.__BPS_SETTINGS__ = { enabled: true, grouped: true, badge: true, countdown: true, separators: '--,｜,|', rules: '' };
+
+  /* 当前页（PTA 渲染的 16 张卡片，id 与 mock 接口数据一一对应） */
+  const DATA = [
+    { id: '2100000000000000136', title: '算法设计与分析--课堂练习1-3', close: '2026-10-10 12:22', badges: [['已开考','green'],['已关闭','grey']], creator: '教师A' },
+    { id: '2100000000000000137', title: '算法设计与分析--课堂练习1-4', close: '2026-10-17 23:59', badges: [['已开考','green'],['已开放','blue']], creator: '教师A' },
+    { id: '2100000000000000138', title: '算法设计与分析--课堂练习2-1', close: '2026-10-18 23:59', badges: [['未开放','orange']], creator: '教师A' },
+    { id: '2100000000000000139', title: '算法设计与分析--课堂练习1-5', close: '2026-10-18 23:59', badges: [['未开放','orange']], creator: '教师A' },
+    { id: '2100000000000000140', title: '算法设计与分析--算法分析作业1-1', close: '2026-10-31 12:41', badges: [['已开放','blue']], creator: '教师A' },
+    { id: '2100000000000000141', title: '代数结构与初等数论｜作业01｜证明方法与整除', close: '2026-12-31 23:59', badges: [['已开放','blue']], creator: '教师B' },
+    { id: '2100000000000000142', title: '代数结构与初等数论｜作业02｜不定方程与同余', close: '2026-12-31 23:59', badges: [['已开放','blue']], creator: '教师B' },
+    { id: '2100000000000000143', title: '代数结构与初等数论｜作业03｜Euler定理、同余式与对称', close: '2026-12-31 23:59', badges: [['已开放','blue']], creator: '教师B' },
+    { id: '2100000000000000144', title: '代数结构与初等数论｜作业04｜群与子群', close: '2026-12-31 23:59', badges: [['已开放','blue']], creator: '教师B' },
+    { id: '2100000000000000145', title: '代数结构与初等数论｜作业05｜循环群、Cayley定理与商群', close: '2026-12-31 23:59', badges: [['已开放','blue']], creator: '教师B' },
+    { id: '2100000000000000146', title: '代数结构与初等数论｜作业06｜同态与群作用', close: '2026-12-31 23:59', badges: [['已开放','blue']], creator: '教师B' },
+    { id: '2100000000000000147', title: '代数结构与初等数论｜作业07｜有限群、Sylow与群论复习', close: '2026-12-31 23:59', badges: [['已开考','green'],['已开放','blue']], creator: '教师B' },
+    { id: '2100000000000000148', title: '代数结构与初等数论｜作业08｜环、域、理想与商环', close: '2026-12-31 23:59', badges: [['已开放','blue']], creator: '教师A' },
+    { id: '2100000000000000149', title: '代数结构与初等数论｜作业09｜分式域与代数构造', close: '2026-12-31 23:59', badges: [['已开放','blue']], creator: '教师A' },
+    { id: '2100000000000000150', title: '代数结构与初等数论｜作业10｜多项式环', close: '2026-12-31 23:59', badges: [['已开放','blue']], creator: '教师A' },
+    { id: '2100000000000000151', title: '代数结构与初等数论｜作业11｜交换环、整除与域扩张', close: '2026-12-31 23:59', badges: [['已开放','blue']], creator: '教师A' },
+  ];
+
+  const pill = ([t, c]) => `<div class="pill pill-${c}"><span>${t}</span></div>`;
+  document.getElementById('list').innerHTML = DATA.map(o => `
+    <a tabindex="0" href="/problem-sets/${o.id}/overview" class="item">
+      <svg class="ic" viewBox="0 0 24 24"><rect x="2" y="4" width="20" height="13" rx="2" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M8 21h8M12 17v4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+      <div class="flex items-center grow">
+        <div class="t-wrap grow">
+          <div title="${o.title}" class="title">${o.title}</div>
+          <div class="text-xs sub"><div class="flex"><div class="flex">关闭时间:<span>${o.close}</span></div></div></div>
+        </div>
+      </div>
+      <div class="right"><div><div class="flexv">${o.badges.map(pill).join('')}</div></div></div>
+      <div class="text-xs creator">${o.creator}</div>
+    </a>`).join('');
+
+  /* mock 接口：基于真实 API 结构（total/problemSets/examIdByProblemSetId）。
+     前 16 条与上方 DOM 卡片同 id（走克隆路径），其余 17 条模拟“其他分页”（走重建路径），
+     时间取自 2026-10-11 实抓数据。 */
+  const P = (id, name, startAt, endAt, owner) => ({ id, name, startAt, endAt, ownerNickname: owner, organizationName: '某高校', timeType: 'FIXED_TIME', status: 'PENDING' });
+  const MOCK_PROBLEM_SETS = [
+    ...DATA.map((o, i) => P(o.id, o.title, i === 2 || i === 3 ? '2026-10-12T00:00:00Z' : '2026-09-20T14:15:00Z', { '2100000000000000136': '2026-10-10T04:22:00Z', '2100000000000000137': '2026-10-17T15:59:00Z', '2100000000000000138': '2026-10-18T15:59:00Z', '2100000000000000139': '2026-10-18T15:59:00Z', '2100000000000000140': '2026-10-31T04:41:00Z' }[o.id] || '2026-12-31T15:59:00Z', o.creator)),
+    P('2200000000000000001', '算法设计与分析--课堂练习1-1', '2026-09-20T11:40:00Z', '2026-10-01T15:59:00Z', '教师A'),
+    P('2200000000000000002', '算法设计与分析--课堂练习1-2', '2026-09-23T02:22:00Z', '2026-10-03T04:22:00Z', '教师A'),
+    P('2200000000000000003', '数据结构复习题(线性表）', '2025-12-23T03:18:00Z', '2026-01-20T15:59:00Z', '教师C'),
+    P('2200000000000000004', '数据结构复习题(树一)', '2025-12-23T03:18:00Z', '2026-01-20T15:59:00Z', '教师C'),
+    P('2200000000000000005', '数据结构复习题(树二)', '2025-12-23T03:18:00Z', '2026-01-20T15:59:00Z', '教师C'),
+    P('2200000000000000006', '数据结构复习题(图)', '2025-12-23T03:18:00Z', '2026-01-20T15:59:00Z', '教师C'),
+    P('2200000000000000007', '数据结构复习题(排序)', '2025-12-23T03:18:00Z', '2026-01-20T15:59:00Z', '教师C'),
+    P('2200000000000000008', '数据结构-作业八（第7章）', '2025-12-23T03:10:00Z', '2026-01-20T15:59:00Z', '教师C'),
+    P('2200000000000000009', '数据结构-实验八-排序', '2025-12-01T12:43:00Z', '2026-01-20T15:59:00Z', '教师C'),
+    P('2200000000000000010', '数据结构-实验七-最小生成树', '2025-12-01T12:43:00Z', '2026-01-20T15:59:00Z', '教师C'),
+    P('2200000000000000011', '数据结构-实验六-图的存储与遍历', '2025-11-12T03:47:00Z', '2026-01-20T15:59:00Z', '教师C'),
+    P('2200000000000000012', '数据结构-实验五-散列查找', '2025-11-12T03:47:00Z', '2026-01-20T15:59:00Z', '教师C'),
+    P('2200000000000000013', '数据结构-实验四-二叉搜索树与平衡二叉树', '2025-11-05T06:12:00Z', '2026-01-11T15:59:00Z', '教师C'),
+    P('2200000000000000014', '数据结构-实验三-二叉树', '2025-11-05T06:09:00Z', '2026-01-11T15:59:00Z', '教师C'),
+    P('2200000000000000015', '数据结构-期中测试', '2025-11-20T01:00:00Z', '2025-12-02T16:00:00Z', '教师C'),
+    P('2200000000000000016', '数据结构期中测试一', '2025-11-10T01:00:00Z', '2025-11-18T16:00:00Z', '教师C'),
+    P('2200000000000000017', '2025-随堂243-接口与多态', '2025-10-20T01:00:00Z', '2025-11-05T16:00:00Z', '教师D'),
+    P('2200000000000000018', '2025-期中考试', '2025-11-25T01:00:00Z', '2025-11-29T16:00:00Z', '教师D'),
+    P('2200000000000000019', '2024程序设计基础-作业11', '2024-12-20T01:00:00Z', '2025-01-02T16:00:00Z', '教师E'),
+    P('2200000000000000020', '2024程序设计基础-作业10', '2024-12-20T01:00:00Z', '2025-01-02T16:00:00Z', '教师E'),
+    P('2200000000000000021', '2024程序设计基础-242-作业9', '2024-12-20T01:00:00Z', '2025-01-02T16:00:00Z', '教师E'),
+  ];
+  const MOCK_EXAM_IDS = {};
+  for (const p of MOCK_PROBLEM_SETS) {
+    if (/课堂练习|作业07|数据结构-(实验|作业八)|数据结构复习题/.test(p.name)) MOCK_EXAM_IDS[p.id] = 'exam';
+  }
+  window.__BPS_MOCK_API__ = true;
+  window.__BPS_FETCH_JSON__ = async () => ({ total: MOCK_PROBLEM_SETS.length, problemSets: MOCK_PROBLEM_SETS, examIdByProblemSetId: MOCK_EXAM_IDS, homeworkByProblemSetId: {} });
+
+  // 预览页不是真实 PTA 路由，放开路径限制以便本地验证
+  window.__BPS_FORCE_LIST__ = true;
+</script>
+<script src="extension/content/core.js"></script>
+</body>
+</html>
