@@ -1,14 +1,18 @@
 const DEFAULTS = { enabled: true, badge: true, countdown: true, separators: '--,｜,|', rules: '', mergeSimilar: true, reminderEnabled: true, reminderServer: '', reminderEmail: '', settingsVersion: 0 };
 const $ = id => document.getElementById(id);
 let stored = { ...DEFAULTS };
+// 无扩展环境（直接打开 popup.html 做设计回归）时优雅降级：用默认值渲染、跳过存储
+const hasChrome = typeof chrome !== 'undefined' && !!chrome.storage?.sync;
 
 async function load() {
-  const { settings } = await chrome.storage.sync.get({ settings: {} });
-  stored = { ...DEFAULTS, ...settings };
-  // 与内容脚本一致的 v4 迁移：列表/分组改为按路由的会话内状态，不再持久化
-  if (!stored.settingsVersion || stored.settingsVersion < 4) {
-    delete stored.grouped;
-    stored.settingsVersion = 4;
+  if (hasChrome) {
+    const { settings } = await chrome.storage.sync.get({ settings: {} });
+    stored = { ...DEFAULTS, ...settings };
+    // 与内容脚本一致的 v4 迁移：列表/分组改为按路由的会话内状态，不再持久化
+    if (!stored.settingsVersion || stored.settingsVersion < 4) {
+      delete stored.grouped;
+      stored.settingsVersion = 4;
+    }
   }
   for (const k of ['enabled', 'badge', 'countdown', 'mergeSimilar']) $(k).checked = !!stored[k];
   $('separators').value = stored.separators;
@@ -38,7 +42,7 @@ function collect() {
 }
 
 function save() {
-  chrome.storage.sync.set({ settings: collect() });
+  if (hasChrome) chrome.storage.sync.set({ settings: collect() });
 }
 
 /* ---------- 邮件提醒开关与测试邮件冷却 ---------- */
@@ -55,10 +59,13 @@ function applyReminderEnabled() {
 }
 
 function readTestSentAt() {
-  // 冷却起点存 storage.session：弹窗关开不绕过；无该 API（旧浏览器）时退化为仅后端限制
-  return chrome.storage?.session?.get({ testSentAt: 0 })
-    .then(v => v.testSentAt || 0)
-    .catch(() => 0);
+  try {
+    return chrome.storage?.session?.get({ testSentAt: 0 })
+      .then(v => v.testSentAt || 0)
+      .catch(() => 0);
+  } catch (_) {
+    return Promise.resolve(0); // 无扩展环境视为从未发送
+  }
 }
 
 function startTestCooldown(seconds) {
@@ -124,8 +131,9 @@ $('testReminder').addEventListener('click', async () => {
 });
 
 $('reset').addEventListener('click', async () => {
-  await chrome.storage.sync.set({ settings: { ...DEFAULTS } });
+  if (hasChrome) await chrome.storage.sync.set({ settings: { ...DEFAULTS } });
   load();
 });
 
+try { $('version').textContent = 'v' + chrome.runtime.getManifest().version; } catch (_) { /* 非扩展环境保留静态文案 */ }
 load();
