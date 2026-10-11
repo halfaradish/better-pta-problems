@@ -42,6 +42,7 @@ node index.js     # 或 npm start
 | `REMIND_BEFORE_MINUTES` | `4320,1440` | 截止前多少分钟提醒，逗号分隔（默认 3 天 / 1 天） |
 | `CHECK_INTERVAL_SECONDS` | `60` | 调度检查间隔 |
 | `GRACE_MINUTES` | `120` | 补发宽限：触发点已过超过该时长就不再补发（防宕机恢复后陈旧轰炸） |
+| `TEST_COOLDOWN_SECONDS` | `60` | 测试邮件冷却（每个邮箱独立计时，防连点刷信） |
 | `DISPLAY_TZ` | `Asia/Shanghai` | 邮件里时间的显示时区 |
 | `TOKEN` | 空 | 访问令牌，见下方「安全」 |
 | `DRY_RUN` | 空 | `1` = 只把邮件打印到日志，不真发 |
@@ -103,6 +104,6 @@ docker run -d --name better-pta-reminder \
 |---|---|---|
 | `GET` | `/healthz` | 健康检查：`{ok, emails, sets}` |
 | `POST` | `/api/subscriptions` | 全量替换某邮箱的订阅：`{email, sets:[{id,title,endAt,owner,org}]}`，`endAt` 为 ISO 时间或 epoch ms |
-| `POST` | `/api/test` | 给 `{email}` 立即发一封测试邮件 |
+| `POST` | `/api/test` | 给 `{email}` 立即发一封测试邮件；每邮箱 60 秒（`TEST_COOLDOWN_SECONDS`）一次，超频返回 429 |
 
 所有响应带 `Access-Control-Allow-Origin: *`（扩展 background 跨源调用所需）；配置了 `TOKEN` 时 `/api/*` 要求 `X-Token` 请求头。
