@@ -86,6 +86,19 @@ docker run -d --name better-pta-reminder \
   better-pta-reminder
 ```
 
+## 日志
+
+- **运行日志**：数据库同目录的 `service.log`（Docker 部署即卷内 `./data/service.log`），带 DISPLAY_TZ 时间戳与 info / warn / error 级别；超过 2MB 自动滚动保留 5 份（`service.log.1` ~ `service.log.4`）。标准输出同时保留，`docker compose logs -f` 照常可用。
+- **发信审计**：每封邮件的结果都会写入 SQLite `mail_log` 表——收件人、题目集、提前档位、主题、失败/跳过原因——保留 90 天后随每轮检查自动清理。
+- **查询接口**：`GET /api/mail-log`（配置了 TOKEN 时需带 `X-Token` 头）：
+
+  ```bash
+  curl "http://127.0.0.1:8787/api/mail-log?limit=20"               # 最近 20 条
+  curl "http://127.0.0.1:8787/api/mail-log?email=me@example.com"   # 按邮箱过滤
+  ```
+
+  返回的 `event` 取值：`sent`（已发送）、`failed`（发送失败，`detail` 为原因）、`skipped`（超过补发宽限被跳过）、`dry-run`、`test` / `test-failed` / `test-dry-run`。
+
 ## 安全
 
 - 接口收到订阅后会**以你的 SMTP 账号向任意邮箱发信**，公网裸奔有被当垃圾邮件中继的风险；

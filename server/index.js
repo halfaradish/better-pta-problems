@@ -4,6 +4,8 @@
  * 在截止前 REMIND_BEFORE_MINUTES（默认 4320,1440 = 提前 3 天 / 1 天）各发一封提醒邮件。
  *
  * 存储：node:sqlite（Node >= 22.5 内置，无第三方数据库依赖），单文件 data.db。
+ * 日志：运行日志 service.log（DB 同目录，2MB×5 滚动）+ SQLite mail_log 发信审计（90 天），
+ *       后者可经 GET /api/mail-log 查询。
  * 配置：环境变量或同目录 .env（模板见 .env.example）。
  * 测试：DRY_RUN=1 只打印邮件不真发；REMIND_BEFORE_MINUTES=5 配合一个 6 分钟后
  *       关闭的订阅可端到端验证（见 README「验证」一节）。
@@ -51,6 +53,46 @@ const cfg = {
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
+/* ---------- 日志 ---------- */
+// 运行日志写 DB 同目录 service.log（Docker 即卷内，随数据持久化），超 2MB 滚动保留 5 份；
+// 时间戳用 DISPLAY_TZ 格式化——容器默认 UTC，直接打 ISO 会对不上邮件里的时间。
+const LOG_MAX_BYTES = 2 * 1024 * 1024;
+const LOG_KEEP = 5;
+const logFile = path.join(path.dirname(cfg.dbFile), 'service.log');
+fs.mkdirSync(path.dirname(logFile), { recursive: true });
+
+function logTime(ms) {
+  return new Date(ms).toLocaleString('zh-CN', {
+    timeZone: cfg.displayTz, hour12: false,
+    year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit',
+  }).replace(/\//g, '-');
+}
+
+function rotateLogFile() {
+  let size = 0;
+  try { size = fs.statSync(logFile).size; } catch { return; }
+  if (size < LOG_MAX_BYTES) return;
+  for (let i = LOG_KEEP - 1; i >= 1; i--) {
+    const from = i === 1 ? logFile : `${logFile}.${i - 1}`;
+    try { fs.renameSync(from, `${logFile}.${i}`); } catch { /* 源不存在，跳过 */ }
+  }
+}
+
+function writeLog(level, msg) {
+  const line = `[${logTime(Date.now())}] [${level}] ${msg}`;
+  try {
+    rotateLogFile();
+    fs.appendFileSync(logFile, line + '\n');
+  } catch { /* 文件写失败不影响业务 */ }
+  (level === 'error' ? console.error : console.log)(line);
+}
+
+const log = {
+  info: m => writeLog('info', m),
+  warn: m => writeLog('warn', m),
+  error: m => writeLog('error', m),
+};
+
 /* ---------- 存储（node:sqlite） ---------- */
 fs.mkdirSync(path.dirname(cfg.dbFile), { recursive: true });
 const db = new DatabaseSync(cfg.dbFile);
@@ -72,6 +114,19 @@ db.exec(`
     sent_at        INTEGER NOT NULL,       -- 发送/跳过时刻（epoch ms）
     PRIMARY KEY (email, set_id, offset_minutes)
   );
+  CREATE TABLE IF NOT EXISTS mail_log (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts             INTEGER NOT NULL,       -- epoch ms
+    event          TEXT NOT NULL,          -- sent / failed / skipped / dry-run / test / test-failed / test-dry-run
+    email          TEXT NOT NULL DEFAULT '',
+    set_ids        TEXT NOT NULL DEFAULT '',  -- 汇总邮件为逗号分隔
+    titles         TEXT NOT NULL DEFAULT '',
+    offset_minutes INTEGER,                   -- 提前档位（测试邮件为 NULL）
+    subject        TEXT NOT NULL DEFAULT '',
+    detail         TEXT NOT NULL DEFAULT ''   -- 失败 / 跳过原因等
+  );
+  CREATE INDEX IF NOT EXISTS idx_mail_log_ts ON mail_log (ts);
+  CREATE INDEX IF NOT EXISTS idx_mail_log_email ON mail_log (email);
 `);
 
 const store = {
@@ -96,9 +151,22 @@ const store = {
   markSent(email, setId, offsetMin, now) {
     db.prepare('INSERT OR REPLACE INTO sent_log (email, set_id, offset_minutes, sent_at) VALUES (?, ?, ?, ?)').run(email, setId, offsetMin, now);
   },
+  // 发信审计：每种发信事件（成功/失败/跳过/测试/dry-run）都落库，供 /api/mail-log 追溯
+  recordMail({ event, email, sets = [], offsetMin = null, subject = '', detail = '' }) {
+    db.prepare('INSERT INTO mail_log (ts, event, email, set_ids, titles, offset_minutes, subject, detail) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(Date.now(), event, email || '', sets.map(s => s.id).join(','), sets.map(s => s.title).join(' | '), offsetMin, subject || '', detail || '');
+  },
+  mailLog({ limit = 50, email } = {}) {
+    const lim = Math.min(Math.max(int(limit, 50), 1), 200);
+    const rows = email
+      ? db.prepare('SELECT * FROM mail_log WHERE email = ? ORDER BY id DESC LIMIT ?').all(email, lim)
+      : db.prepare('SELECT * FROM mail_log ORDER BY id DESC LIMIT ?').all(lim);
+    return rows.map(r => ({ ...r, time: logTime(r.ts) }));
+  },
   cleanup(now) {
     db.prepare('DELETE FROM subscriptions WHERE end_at < ?').run(now - 7 * 86400000);
     db.prepare('DELETE FROM sent_log WHERE sent_at < ?').run(now - 90 * 86400000);
+    db.prepare('DELETE FROM mail_log WHERE ts < ?').run(now - 90 * 86400000);
   },
   counts() {
     return {
@@ -165,7 +233,7 @@ function htmlToText(html) {
 
 async function sendMail({ to, subject, html }) {
   if (cfg.dryRun) {
-    console.log(`[dry-run] 邮件 -> ${to}\n  发件人: ${cfg.mailFromName ? `${cfg.mailFromName} <${cfg.mailFrom}>` : cfg.mailFrom}\n  主题: ${subject}\n  正文: ${htmlToText(html).replace(/\s+/g, ' ').slice(0, 200)}`);
+    log.info(`[dry-run] 邮件 -> ${to}\n  发件人: ${cfg.mailFromName ? `${cfg.mailFromName} <${cfg.mailFrom}>` : cfg.mailFrom}\n  主题: ${subject}\n  正文: ${htmlToText(html).replace(/\s+/g, ' ').slice(0, 200)}`);
     return;
   }
   await transporter.sendMail({
@@ -360,7 +428,8 @@ async function tick() {
         const lateMinutes = (now - trigger) / 60000;
         if (lateMinutes > cfg.graceMinutes) {
           store.markSent(row.email, row.set_id, offsetMin, now);
-          console.log(`[skip] 《${row.title}》的「提前 ${offsetMin} 分钟」提醒已过期 ${Math.round(lateMinutes)} 分钟，不再补发`);
+          store.recordMail({ event: 'skipped', email: row.email, sets: [{ id: row.set_id, title: row.title }], offsetMin, detail: `提醒点已过期 ${Math.round(lateMinutes)} 分钟，超过宽限不再补发` });
+          log.info(`[skip] 《${row.title}》的「提前 ${offsetMin} 分钟」提醒已过期 ${Math.round(lateMinutes)} 分钟，不再补发`);
           continue;
         }
         due.push({ row, offsetMin });
@@ -377,15 +446,19 @@ async function tick() {
     }
     for (const items of groups.values()) {
       const { email, title } = items[0].row;
+      const sets = items.map(it => ({ id: it.row.set_id, title: it.row.title }));
+      const mail = digestMail(items, now);
       try {
-        await sendMail(digestMail(items, now));
+        await sendMail(mail);
         for (const it of items) store.markSent(it.row.email, it.row.set_id, it.offsetMin, now);
-        console.log(items.length === 1
+        store.recordMail({ event: cfg.dryRun ? 'dry-run' : 'sent', email, sets, offsetMin: items[0].offsetMin, subject: mail.subject });
+        log.info(items.length === 1
           ? `[sent] 《${title}》 -> ${email}（提前 ${items[0].offsetMin} 分钟）`
           : `[sent] ${items.length} 个题目集 -> ${email}（提前 ${items[0].offsetMin} 分钟，已合并）`);
       } catch (err) {
         // 不标记，下一轮重试；宽限期内一直有效
-        console.error(`[error] 发送失败（${items.length === 1 ? `《${title}》` : `${items.length} 个题目集`} -> ${email}）: ${err.message}`);
+        store.recordMail({ event: 'failed', email, sets, offsetMin: items[0].offsetMin, subject: mail.subject, detail: err.message });
+        log.error(`[error] 发送失败（${items.length === 1 ? `《${title}》` : `${items.length} 个题目集`} -> ${email}）: ${err.message}`);
       }
     }
     store.cleanup(now);
@@ -450,16 +523,31 @@ app.post('/api/test', async (req, res) => {
   }
   try {
     await sendMail(testMail(mail));
+    store.recordMail({ event: cfg.dryRun ? 'test-dry-run' : 'test', email: mail, subject: '【PTA提醒】测试邮件' });
     res.json({ ok: true });
   } catch (err) {
+    store.recordMail({ event: 'test-failed', email: mail, subject: '【PTA提醒】测试邮件', detail: err.message || String(err) });
     res.status(502).json({ ok: false, error: err.message || String(err) });
   }
 });
 
+// 发信审计查询：?limit=50（1~200）&email=...；配置 TOKEN 后需带 X-Token 头
+app.get('/api/mail-log', (req, res) => {
+  const rows = store.mailLog({ limit: req.query.limit, email: String(req.query.email || '').toLowerCase() });
+  res.json({ ok: true, count: rows.length, log: rows });
+});
+
 app.listen(cfg.port, () => {
-  console.log(`题目集关闭邮件提醒服务已启动: http://0.0.0.0:${cfg.port}（数据文件 ${cfg.dbFile}）`);
-  console.log(`提醒时机: 截止前 ${cfg.remindBefore.join(' / ')} 分钟 | 检查间隔 ${cfg.checkIntervalSec}s | 补发宽限 ${cfg.graceMinutes} 分钟 | 测试邮件冷却 ${cfg.testCooldownSec}s${cfg.token ? ' | 已启用访问令牌' : ''}`);
-  if (cfg.dryRun) console.log('DRY_RUN 生效（DRY_RUN=1 或未配置 SMTP_HOST）：邮件只打印到日志，不会真发');
+  log.info(`题目集关闭邮件提醒服务已启动: http://0.0.0.0:${cfg.port}（数据文件 ${cfg.dbFile}，日志文件 ${logFile}）`);
+  log.info(`提醒时机: 截止前 ${cfg.remindBefore.join(' / ')} 分钟 | 检查间隔 ${cfg.checkIntervalSec}s | 补发宽限 ${cfg.graceMinutes} 分钟 | 测试邮件冷却 ${cfg.testCooldownSec}s${cfg.token ? ' | 已启用访问令牌' : ''}`);
+  if (cfg.dryRun) log.info('DRY_RUN 生效（DRY_RUN=1 或未配置 SMTP_HOST）：邮件只打印到日志，不会真发');
+});
+
+// 崩溃前把痕迹写进日志再退出；重启交给 Docker 重启策略 / systemd
+process.on('unhandledRejection', (err) => log.error(`未处理的 Promise 拒绝: ${(err && err.stack) || err}`));
+process.on('uncaughtException', (err) => {
+  log.error(`未捕获异常，进程退出: ${(err && err.stack) || err}`);
+  process.exit(1);
 });
 
 setInterval(tick, cfg.checkIntervalSec * 1000);
