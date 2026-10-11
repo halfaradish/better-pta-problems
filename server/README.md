@@ -63,6 +63,18 @@ journalctl -u better-pta-reminder -f
 
 ### Docker
 
+推荐用 Docker Compose（`docker-compose.yml` 已带数据卷、健康检查与日志轮转）：
+
+```bash
+cp .env.example .env && vim .env
+docker compose up -d --build
+docker compose logs -f          # 看日志
+```
+
+数据落在挂载的 `./data/data.db`，升级镜像不丢数据；备份即备份该目录。
+
+不用 Compose 也可以手动 `docker run`：
+
 ```bash
 docker build -t better-pta-reminder .
 docker run -d --name better-pta-reminder \
@@ -72,8 +84,6 @@ docker run -d --name better-pta-reminder \
   --restart unless-stopped \
   better-pta-reminder
 ```
-
-数据落在挂载的 `./data/data.db`，升级镜像不丢数据。
 
 ## 安全
 

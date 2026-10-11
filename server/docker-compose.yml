@@ -1,0 +1,32 @@
+# 「更好的题目集」· 提醒后端持久化部署
+# 用法：
+#   cp .env.example .env && vim .env   # 填 SMTP 账号（公网部署建议设 TOKEN）
+#   docker compose up -d --build
+# 数据落在宿主机 ./data/data.db，升级/重建容器不丢数据。
+services:
+  better-pta-reminder:
+    build: .
+    image: better-pta-reminder:latest
+    container_name: better-pta-reminder
+    restart: unless-stopped
+    ports:
+      - "8787:8787"          # 左边改成宿主机端口即可换端口
+    env_file:
+      - .env                 # 需先从 .env.example 复制；缺 SMTP_HOST 时服务等效 DRY_RUN
+    environment:
+      # 固定指向挂载卷，覆盖 .env 里可能写错的 DB_FILE
+      DB_FILE: /app/data/data.db
+    volumes:
+      - ./data:/app/data     # SQLite 单文件存这里；备份 = 备份该目录
+    healthcheck:
+      # 镜像是 node:24-slim，无 curl/wget，用内置 fetch 探测 /healthz
+      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:'+(process.env.PORT||8787)+'/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
