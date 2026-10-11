@@ -32,6 +32,16 @@ better-pta-problems/
 2. **已装过旧版本**：在扩展卡片上点「刷新」（↻）后，重新打开题目集列表页。
 3. 本地预览：浏览器直接打开 `preview.html`（mock 了数据与接口，实际运行 `core.js`，可验证聚合/筛选/折叠/模式切换）。
 
+## 发版流程（维护者）
+
+推送 `v*` 形式的 tag 即自动发版（[.github/workflows/release.yml](./.github/workflows/release.yml)），无需手动打包：
+
+1. 确认 `extension/manifest.json` 的 `version` 已改成本次版本号（与 tag 不一致时流水线直接报错退出）；
+2. 打**附注 tag** 并推送：`git tag -a v0.8.0 -m "v0.8.0：一句话标题" -m "详细更新说明"` → `git push origin v0.8.0`；
+3. Actions 自动把 `extension/` 打成 `better-pta-problems-v0.8.0.zip`（zip 内为一个目录，解压后可直接「加载已解压的扩展程序」）并发布 GitHub Release，**Release 标题/正文 = 附注 tag 的信息**。
+
+tag 打错想重发：删远端 tag 后重打重推（`git push origin :refs/tags/v0.8.0`），或在 Actions 页用 workflow_dispatch 手动填 tag 重跑（Release 已存在时会失败，需先删 Release）。
+
 ## 题目关闭邮件提醒（可选，v0.6）
 
 页面内的倒计时只是展示；想在截止前收到**邮件**提醒，需自建一个轻量后端（`server/` 目录）：
