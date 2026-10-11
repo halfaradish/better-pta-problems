@@ -1,4 +1,4 @@
-const DEFAULTS = { enabled: true, badge: true, countdown: true, separators: '--,｜,|', rules: '', mergeSimilar: true, settingsVersion: 0 };
+const DEFAULTS = { enabled: true, badge: true, countdown: true, separators: '--,｜,|', rules: '', mergeSimilar: true, reminderServer: '', reminderEmail: '', settingsVersion: 0 };
 const $ = id => document.getElementById(id);
 let stored = { ...DEFAULTS };
 
@@ -13,6 +13,8 @@ async function load() {
   for (const k of ['enabled', 'badge', 'countdown', 'mergeSimilar']) $(k).checked = !!stored[k];
   $('separators').value = stored.separators;
   $('rules').value = stored.rules || '';
+  $('reminderServer').value = stored.reminderServer || '';
+  $('reminderEmail').value = stored.reminderEmail || '';
 }
 
 function collect() {
@@ -26,6 +28,8 @@ function collect() {
     mergeSimilar: $('mergeSimilar').checked,
     separators: $('separators').value.trim() || DEFAULTS.separators,
     rules: $('rules').value.trim(),
+    reminderServer: $('reminderServer').value.trim(),
+    reminderEmail: $('reminderEmail').value.trim(),
   };
 }
 
@@ -36,6 +40,25 @@ function save() {
 for (const k of ['enabled', 'badge', 'countdown', 'mergeSimilar']) $(k).addEventListener('change', save);
 $('separators').addEventListener('input', save);
 $('rules').addEventListener('input', save);
+$('reminderServer').addEventListener('input', save);
+$('reminderEmail').addEventListener('input', save);
+$('testReminder').addEventListener('click', async () => {
+  const status = $('reminderStatus');
+  const show = (text, cls) => { status.textContent = text; status.className = 'status' + (cls ? ' ' + cls : ''); };
+  const server = $('reminderServer').value.trim();
+  const email = $('reminderEmail').value.trim();
+  if (!server) return show('请先填写服务器地址', 'err');
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return show('邮箱格式不正确', 'err');
+  save(); // 先落盘，再让 background 发起测试
+  show('发送中…');
+  try {
+    const res = await chrome.runtime.sendMessage({ type: 'BPS_TEST', server, email });
+    if (res?.ok) show('已发送，请查收', 'ok');
+    else show('失败：' + (res?.error || '未知错误'), 'err');
+  } catch (err) {
+    show('失败：' + (err?.message || err), 'err');
+  }
+});
 $('reset').addEventListener('click', async () => {
   await chrome.storage.sync.set({ settings: { ...DEFAULTS } });
   load();

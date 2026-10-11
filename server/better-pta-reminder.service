@@ -1,0 +1,22 @@
+# 「更好的题目集」· 题目集关闭邮件提醒后端 systemd 单元
+# 安装：
+#   sudo cp better-pta-reminder.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now better-pta-reminder
+# 按需修改 WorkingDirectory / User / ExecStart 中的 node 路径（which node）。
+
+[Unit]
+Description=Better PTA Problems - problem set close email reminder
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+WorkingDirectory=/opt/better-pta-reminder
+ExecStart=/usr/bin/node /opt/better-pta-reminder/index.js
+Restart=on-failure
+RestartSec=5
+# index.js 自行读取同目录 .env，无需在此重复环境配置
+# 建议用低权限用户运行：先 chown -R 该用户 /opt/better-pta-reminder
+User=www-data
+
+[Install]
+WantedBy=multi-user.target

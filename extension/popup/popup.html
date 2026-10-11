@@ -10,6 +10,10 @@
     .tip { color: #868e96; font-size: 12px; margin: 10px 0; }
     button { padding: 4px 12px; border: 1px solid #ced4da; border-radius: 6px; background: #fff; cursor: pointer; }
     button:hover { border-color: #0a4991; color: #0a4991; }
+    hr { border: 0; border-top: 1px solid #e9ecef; margin: 12px 0; }
+    h2 { font-size: 13px; margin: 0 0 4px; color: #0a4991; }
+    .status.ok { color: #2f9e44; }
+    .status.err { color: #e03131; }
   </style>
 </head>
 <body>
@@ -23,6 +27,14 @@
   <p>自定义规则（每行一条：关键词=&gt;课程名，包含匹配，优先于自动识别）</p>
   <textarea id="rules" rows="3" placeholder="例如：2025- => 2025级课程"></textarea>
   <p class="tip">无分隔符时按 作业/实验/考试/期中/复习题 等关键词识别课程名。改动即时保存，回到题目集页面即生效。</p>
+  <hr>
+  <h2>题目关闭倒计时提醒</h2>
+  <p>提醒服务器地址（ip:port，后端配置令牌时可写 ip:port/令牌）</p>
+  <input type="text" id="reminderServer" placeholder="例如 123.45.67.89:8787">
+  <p>目标邮箱</p>
+  <input type="text" id="reminderEmail" placeholder="you@example.com">
+  <p class="tip">打开 PTA「进行中」页面时会自动把未关闭题目集同步到服务器，由服务器在截止前发邮件提醒（时机由后端配置，默认提前 3 天 / 1 天）。</p>
+  <p><button id="testReminder">发送测试邮件</button> <span id="reminderStatus" class="status"></span></p>
   <p><button id="reset">恢复默认</button></p>
   <script src="popup.js"></script>
 </body>

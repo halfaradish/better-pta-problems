@@ -22,6 +22,8 @@
     separators: '--,｜,|',  // 课程名分隔符：取首个分隔符之前的部分作为课程名
     rules: '',              // 自定义规则，每行一条：关键词=>课程名（包含匹配，优先于自动识别）
     mergeSimilar: true,     // 同一教师下相似课程名自动归并为同一门课
+    reminderServer: '',     // 邮件提醒后端地址（ip:port，可加 /令牌 后缀）；空 = 关闭
+    reminderEmail: '',      // 提醒邮件接收邮箱
     settingsVersion: 0,     // 0 = 旧版设置；init 时迁移到 v4（移除 grouped，改为按路由的会话内状态）
   };
 
@@ -441,6 +443,7 @@
         agg.items = items;
         agg.at = Date.now();
         agg.retryAt = 0;
+        maybePushReminders();
       })
       .catch(err => {
         if (agg.key !== key || err?.name === 'AbortError') return; // 旧路由/已中止：静默
@@ -463,6 +466,37 @@
     if (Date.now() < agg.retryAt) return null;  // 失败退避，避免每 3s 重试
     if (!agg.inflight) startAggregate(key);
     return null;
+  }
+
+  /* ---------- 题目关闭邮件提醒：把未关闭题目集同步到用户自建后端 ---------- */
+  // 仅「进行中」页的聚合结果是未关闭题目集的全集（其余路由是筛选后的子集，
+  // 而后端按邮箱全量替换，推子集会丢数据），因此只在该路由推送。
+  const ACTIVE_PATH_RE = /^\/problem-sets\/active\/?$/;
+  const PUSH_MIN_INTERVAL = 30 * 60 * 1000; // 签名未变时的最小重发间隔（endAt 不变就静默）
+  let lastPush = { sig: null, at: 0 };
+  let lastRemindCfg = { server: null, email: null };
+
+  function maybePushReminders() {
+    const server = settings.reminderServer || '', email = settings.reminderEmail || '';
+    // 刚保存提醒配置时立即同步一次；其余按签名 + 间隔节流
+    const cfgChanged = server !== lastRemindCfg.server || email !== lastRemindCfg.email;
+    lastRemindCfg = { server, email };
+    if (!server || !email || !ACTIVE_PATH_RE.test(location.pathname)) return;
+    if (typeof chrome === 'undefined' || !chrome.runtime?.sendMessage) return; // 预览页无扩展运行时
+    const now = Date.now();
+    const sets = (agg.items || [])
+      .filter(i => i.closeAt && +i.closeAt > now)
+      .map(i => ({ id: i.id, title: i.title, endAt: i.closeAt.toISOString(), owner: i.creator, org: i.org }))
+      .sort((a, b) => a.endAt.localeCompare(b.endAt));
+    const sig = JSON.stringify(sets);
+    if (!cfgChanged && sig === lastPush.sig && now - lastPush.at < PUSH_MIN_INTERVAL) return;
+    lastPush = { sig, at: now }; // 记在发送前：失败也等下一轮节流窗口，避免每 3s 重试
+    chrome.runtime.sendMessage({ type: 'BPS_SYNC', server, email, sets })
+      .then(res => {
+        if (res?.ok) console.info(`[更好的题目集] 邮件提醒订阅已同步（${sets.length} 个题目集）`);
+        else console.warn('[更好的题目集] 邮件提醒同步失败:', res?.error || '未知错误');
+      })
+      .catch(err => console.warn('[更好的题目集] 邮件提醒同步失败:', err?.message || err));
   }
 
   /* ---------- API 卡片构建（非当前页条目，复用 PTA 的样式类） ---------- */
@@ -839,7 +873,7 @@
       settings.settingsVersion = 4;
       await storage.set(settings);
     }
-    storage.onChanged(s => { settings = s; sync(true); });
+    storage.onChanged(s => { settings = s; sync(true); maybePushReminders(); });
 
     try { performance.setResourceTimingBufferSize(1000); } catch (_) { /* ignore */ }
 
