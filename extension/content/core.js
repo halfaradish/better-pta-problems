@@ -320,7 +320,7 @@
   }
 
   /* ---------- 跨页聚合：复用页面自身的列表接口 ---------- */
-  const agg = { key: null, items: null, at: 0, inflight: null, retryAt: 0 };
+  const agg = { key: null, items: null, at: 0, inflight: null, abort: null, retryAt: 0 };
   const routeUrls = new Map();   // pathname -> { url: 该页自己的列表请求, entryTime }
   let lastApiEntryTime = 0;
   let lastPath = null;
@@ -363,9 +363,9 @@
     return routeUrls.get(location.pathname)?.url || null;
   }
 
-  async function fetchJson(url) {
+  async function fetchJson(url, signal) {
     if (window.__BPS_FETCH_JSON__) return window.__BPS_FETCH_JSON__(url); // 预览页测试注入
-    const res = await fetch(url, { credentials: 'include', headers: { accept: 'application/json' } });
+    const res = await fetch(url, { credentials: 'include', headers: { accept: 'application/json' }, signal });
     if (!res.ok) throw new Error('HTTP ' + res.status);
     return res.json();
   }
@@ -396,11 +396,11 @@
     });
   }
 
-  async function aggregateAll(keyUrl) {
+  async function aggregateAll(keyUrl, signal) {
     const u = new URL(keyUrl);
     u.searchParams.set('page', '0');
     u.searchParams.set('limit', '100'); // 实测服务端支持一次拉全
-    const data = await fetchJson(String(u));
+    const data = await fetchJson(String(u), signal);
     const examMap = { ...(data.examIdByProblemSetId || {}) };
     let items = normalizeApiItems(data.problemSets, examMap);
     const total = data.total ?? items.length;
@@ -408,7 +408,7 @@
       const pageSize = items.length;
       for (let page = 1; items.length < total && page < 60; page++) {
         u.searchParams.set('page', String(page));
-        const d = await fetchJson(String(u));
+        const d = await fetchJson(String(u), signal);
         Object.assign(examMap, d.examIdByProblemSetId || {});
         const batch = normalizeApiItems(d.problemSets, examMap);
         if (!batch.length) break;
@@ -420,19 +420,48 @@
     return items.filter(i => !seen.has(i.id) && seen.add(i.id));
   }
 
+  // 发起一次聚合。状态更新全部按 key 守卫：快速切换路由时旧请求会被 abort，
+  // 其 settle 回调不得覆盖新路由的聚合状态（否则会把 A 页数据错缓存给 B 页，或
+  // 提前清掉 B 的 inflight 导致重复请求）。失败不清空已有数据——过期后暂用上次
+  // 结果（可能略旧），30s 后自动重试；仅在从未成功过时才退回当前页数据。
+  function startAggregate(key) {
+    if (agg.inflight && agg.key === key) return;             // 同一路由已在拉取
+    if (agg.key === key && Date.now() < agg.retryAt) return; // 同一路由失败退避
+    agg.abort?.abort();                                      // 旧路由的在途请求作废
+    agg.key = key;
+    const ctrl = new AbortController();
+    agg.abort = ctrl;
+    const settled = p => {
+      if (agg.inflight === p) { agg.inflight = null; agg.abort = null; }
+      sync(true);
+    };
+    const p = aggregateAll(key, ctrl.signal)
+      .then(items => {
+        if (agg.key !== key) return;
+        agg.items = items;
+        agg.at = Date.now();
+        agg.retryAt = 0;
+      })
+      .catch(err => {
+        if (agg.key !== key || err?.name === 'AbortError') return; // 旧路由/已中止：静默
+        agg.retryAt = Date.now() + 30 * 1000;
+        console.warn(`[更好的题目集] 跨页聚合失败（${err?.message || err}），暂用${agg.items ? '上次聚合结果' : '当前页数据'}，30 秒后自动重试`);
+      })
+      .finally(() => settled(p));
+    agg.inflight = p;
+  }
+
   function ensureAggregate() {
     const key = currentRouteApiUrl();
     if (!key) return null;
-    const fresh = agg.items && agg.key === key && Date.now() - agg.at < AGG_TTL;
-    if (fresh) return agg.items;
-    if (Date.now() < agg.retryAt) return null; // 失败退避，避免每 3s 重试
-    if (!agg.inflight || agg.key !== key) {
-      agg.key = key;
-      agg.inflight = aggregateAll(key)
-        .then(items => { agg.items = items; agg.at = Date.now(); })
-        .catch(err => { console.warn('[更好的题目集] 跨页聚合失败，暂用当前页数据:', err); agg.items = null; agg.key = null; agg.retryAt = Date.now() + 30 * 1000; })
-        .finally(() => { agg.inflight = null; sync(true); });
+    if (agg.key !== key) startAggregate(key);   // 换路由：立即取新数据，旧数据作废
+    if (agg.key === key && agg.items) {
+      if (Date.now() - agg.at < AGG_TTL) return agg.items;
+      startAggregate(key);                      // 过期：后台刷新，先给上次结果顶住
+      return agg.items;
     }
+    if (Date.now() < agg.retryAt) return null;  // 失败退避，避免每 3s 重试
+    if (!agg.inflight) startAggregate(key);
     return null;
   }
 
