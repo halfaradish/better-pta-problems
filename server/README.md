@@ -39,6 +39,7 @@ node index.js     # 或 npm start
 | `SMTP_HOST` / `SMTP_PORT` / `SMTP_SECURE` | — / `465` / `1` | SMTP 服务器 |
 | `SMTP_USER` / `SMTP_PASS` | — | SMTP 账号 / 授权码 |
 | `MAIL_FROM` | `SMTP_USER` | 发件人显示地址 |
+| `MAIL_FROM_NAME` | `更好的题目集` | 发件人显示名（收件箱列表里的名字） |
 | `REMIND_BEFORE_MINUTES` | `4320,1440` | 截止前多少分钟提醒，逗号分隔（默认 3 天 / 1 天） |
 | `CHECK_INTERVAL_SECONDS` | `60` | 调度检查间隔 |
 | `GRACE_MINUTES` | `120` | 补发宽限：触发点已过超过该时长就不再补发（防宕机恢复后陈旧轰炸） |

@@ -36,6 +36,8 @@ const cfg = {
   smtpUser: process.env.SMTP_USER || '',
   smtpPass: process.env.SMTP_PASS || '',
   mailFrom: process.env.MAIL_FROM || process.env.SMTP_USER || '',
+  // 发件人显示名：收件箱里看到的名字（截图里的 "public12306" 就是没设它时露出的邮箱账号名）
+  mailFromName: process.env.MAIL_FROM_NAME !== undefined ? process.env.MAIL_FROM_NAME : '更好的题目集',
   remindBefore: parseMinutes(process.env.REMIND_BEFORE_MINUTES, '4320,1440'),
   checkIntervalSec: int(process.env.CHECK_INTERVAL_SECONDS, 60),
   // 宕机补发宽限：触发点已过多少分钟之内仍补发，超过则记为跳过，避免恢复后陈旧轰炸
@@ -163,10 +165,14 @@ function htmlToText(html) {
 
 async function sendMail({ to, subject, html }) {
   if (cfg.dryRun) {
-    console.log(`[dry-run] 邮件 -> ${to}\n  主题: ${subject}\n  正文: ${htmlToText(html).replace(/\s+/g, ' ').slice(0, 200)}`);
+    console.log(`[dry-run] 邮件 -> ${to}\n  发件人: ${cfg.mailFromName ? `${cfg.mailFromName} <${cfg.mailFrom}>` : cfg.mailFrom}\n  主题: ${subject}\n  正文: ${htmlToText(html).replace(/\s+/g, ' ').slice(0, 200)}`);
     return;
   }
-  await transporter.sendMail({ from: cfg.mailFrom, to, subject, html, text: htmlToText(html) });
+  await transporter.sendMail({
+    // 对象形式让 nodemailer 处理显示名的 MIME 编码与引号转义
+    from: cfg.mailFromName ? { name: cfg.mailFromName, address: cfg.mailFrom } : cfg.mailFrom,
+    to, subject, html, text: htmlToText(html),
+  });
 }
 
 /* ----- 模板片段 ----- */
