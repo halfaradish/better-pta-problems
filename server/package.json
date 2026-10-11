@@ -1,6 +1,6 @@
 {
   "name": "better-pta-reminder-server",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "private": true,
   "description": "「更好的题目集」插件 · 题目集关闭邮件提醒后端",
   "main": "index.js",

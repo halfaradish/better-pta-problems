@@ -161,9 +161,41 @@ function testMail(email) {
 <div style="font:14px/1.7 -apple-system,'Microsoft YaHei',sans-serif;color:#343a40">
   <p>这是一封<b>测试邮件</b>，说明「更好的题目集」插件的服务器与邮箱配置已生效。</p>
   <p style="color:#868e96">发送时间：${fmtTime(Date.now())}（${cfg.displayTz}）</p>
-  <p style="color:#868e96;font-size:12px">打开 PTA「进行中」页面后，未关闭的题目集会自动同步到本服务，截止前 ${cfg.remindBefore.join(' / ')} 分钟你会各收到一封提醒。</p>
+  <p style="color:#868e96;font-size:12px">打开 PTA「进行中」页面后，未关闭的题目集会自动同步到本服务，截止前 ${cfg.remindBefore.join(' / ')} 分钟你会各收到一封提醒；同一时间到期的多个题目集会合并成一封汇总邮件。</p>
 </div>`;
   return { to: email, subject: '【PTA提醒】测试邮件', html };
+}
+
+// 同邮箱同档位的多条提醒合并成一封汇总邮件；单条仍用 reminderMail 的具体主题
+function digestMail(items, now) {
+  if (items.length === 1) return reminderMail(items[0].row, now);
+  const sorted = [...items].sort((a, b) => a.row.end_at - b.row.end_at);
+  const td = 'padding: 4px 12px 4px 0; vertical-align: top;';
+  const th = 'padding: 4px 12px 4px 0; vertical-align: top; color: #868e96; font-weight: normal; text-align: left;';
+  const rowsHtml = sorted.map(({ row }) => `
+    <tr>
+      <td style="${td}"><a href="https://pintia.cn/problem-sets/${row.set_id}/overview">${escapeHtml(row.title)}</a></td>
+      <td style="${td}">${escapeHtml(row.owner)}${row.owner && row.org ? ' · ' : ''}${escapeHtml(row.org)}</td>
+      <td style="${td}">${fmtTime(row.end_at)}</td>
+      <td style="${td}"><b>${humanLeft(row.end_at - now)}</b></td>
+    </tr>`).join('');
+  const html = `
+<div style="font:14px/1.7 -apple-system,'Microsoft YaHei',sans-serif;color:#343a40;max-width:640px">
+  <p>你好，</p>
+  <p>以下 ${sorted.length} 个题目集即将关闭：</p>
+  <table style="border-collapse:collapse;margin:8px 0">
+    <tr><th style="${th}">题目集</th><th style="${th}">教师 / 单位</th><th style="${th}">关闭时间</th><th style="${th}">剩余</th></tr>
+    ${rowsHtml}
+  </table>
+  <p>别忘了完成还没提交的题目。</p>
+  <p style="color:#868e96;font-size:12px">—— 由你自行部署的「更好的题目集」插件邮件提醒服务发送；不想再收到，请在插件设置中清空服务器地址或邮箱。</p>
+</div>`;
+  const earliest = sorted[0].row;
+  return {
+    to: earliest.email,
+    subject: `【PTA提醒】${sorted.length} 个题目集即将关闭（最早 ${fmtTime(earliest.end_at)}）`,
+    html,
+  };
 }
 
 /* ---------- 调度器 ---------- */
@@ -173,6 +205,7 @@ async function tick() {
   ticking = true;
   try {
     const now = Date.now();
+    const due = []; // { row, offsetMin }
     for (const row of store.activeSets(now)) {
       for (const offsetMin of cfg.remindBefore) {
         const trigger = row.end_at - offsetMin * 60000;
@@ -184,14 +217,29 @@ async function tick() {
           console.log(`[skip] 《${row.title}》的「提前 ${offsetMin} 分钟」提醒已过期 ${Math.round(lateMinutes)} 分钟，不再补发`);
           continue;
         }
-        try {
-          await sendMail(reminderMail(row, now));
-          store.markSent(row.email, row.set_id, offsetMin, now);
-          console.log(`[sent] 《${row.title}》 -> ${row.email}（提前 ${offsetMin} 分钟）`);
-        } catch (err) {
-          // 不标记，下一轮重试；宽限期内一直有效
-          console.error(`[error] 发送失败（《${row.title}》 -> ${row.email}）: ${err.message}`);
-        }
+        due.push({ row, offsetMin });
+      }
+    }
+    // 同邮箱同档位到期的合并成一封汇总邮件：多个题目集同一时间截止时不再连环发信；
+    // 宕机恢复时积压的多条提醒也会并成一封
+    const groups = new Map(); // "email|offsetMin" -> items[]
+    for (const d of due) {
+      const key = `${d.row.email}|${d.offsetMin}`;
+      let list = groups.get(key);
+      if (!list) groups.set(key, (list = []));
+      list.push(d);
+    }
+    for (const items of groups.values()) {
+      const { email, title } = items[0].row;
+      try {
+        await sendMail(digestMail(items, now));
+        for (const it of items) store.markSent(it.row.email, it.row.set_id, it.offsetMin, now);
+        console.log(items.length === 1
+          ? `[sent] 《${title}》 -> ${email}（提前 ${items[0].offsetMin} 分钟）`
+          : `[sent] ${items.length} 个题目集 -> ${email}（提前 ${items[0].offsetMin} 分钟，已合并）`);
+      } catch (err) {
+        // 不标记，下一轮重试；宽限期内一直有效
+        console.error(`[error] 发送失败（${items.length === 1 ? `《${title}》` : `${items.length} 个题目集`} -> ${email}）: ${err.message}`);
       }
     }
     store.cleanup(now);
