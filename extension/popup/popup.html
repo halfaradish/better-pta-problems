@@ -7,6 +7,7 @@
     h1 { font-size: 14px; margin: 0 0 10px; }
     label.row { display: flex; align-items: center; justify-content: space-between; margin: 8px 0; cursor: pointer; }
     input[type="text"], textarea { width: 100%; box-sizing: border-box; padding: 5px 8px; border: 1px solid #ced4da; border-radius: 6px; font: inherit; }
+    input:disabled, textarea:disabled, button:disabled { opacity: .5; cursor: not-allowed; }
     .tip { color: #868e96; font-size: 12px; margin: 10px 0; }
     button { padding: 4px 12px; border: 1px solid #ced4da; border-radius: 6px; background: #fff; cursor: pointer; }
     button:hover { border-color: #0a4991; color: #0a4991; }
@@ -29,6 +30,7 @@
   <p class="tip">无分隔符时按 作业/实验/考试/期中/复习题 等关键词识别课程名。改动即时保存，回到题目集页面即生效。</p>
   <hr>
   <h2>题目关闭倒计时提醒</h2>
+  <label class="row">启用邮件提醒 <input type="checkbox" id="reminderEnabled"></label>
   <p>提醒服务器地址（ip:port，后端配置令牌时可写 ip:port/令牌）</p>
   <input type="text" id="reminderServer" placeholder="例如 123.45.67.89:8787">
   <p>目标邮箱</p>

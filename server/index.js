@@ -40,6 +40,8 @@ const cfg = {
   checkIntervalSec: int(process.env.CHECK_INTERVAL_SECONDS, 60),
   // 宕机补发宽限：触发点已过多少分钟之内仍补发，超过则记为跳过，避免恢复后陈旧轰炸
   graceMinutes: int(process.env.GRACE_MINUTES, 120),
+  // 测试邮件冷却（秒）：防止连点测试按钮刷信；每个邮箱独立计时
+  testCooldownSec: int(process.env.TEST_COOLDOWN_SECONDS, 60),
   token: process.env.TOKEN || '',
   displayTz: process.env.DISPLAY_TZ || 'Asia/Shanghai',
   dryRun: process.env.DRY_RUN === '1' || !process.env.SMTP_HOST,
@@ -288,11 +290,22 @@ app.post('/api/subscriptions', (req, res) => {
   res.json({ ok: true, total: normalized.length });
 });
 
+// 测试邮件每邮箱冷却：记「发起」时刻而非成功时刻，SMTP 失败的重试同样要等冷却
+const testLimiter = new Map(); // email -> epoch ms
+
 app.post('/api/test', async (req, res) => {
   const { email } = req.body || {};
   if (!EMAIL_RE.test(String(email || ''))) return res.status(400).json({ ok: false, error: '邮箱格式不正确' });
+  const mail = String(email).toLowerCase();
+  const waitSec = Math.ceil((cfg.testCooldownSec * 1000 - (Date.now() - (testLimiter.get(mail) || 0))) / 1000);
+  if (waitSec > 0) return res.status(429).json({ ok: false, error: `测试邮件发送过于频繁，请 ${waitSec} 秒后再试` });
+  testLimiter.set(mail, Date.now());
+  if (testLimiter.size > 500) {
+    const cutoff = Date.now() - 10 * 60000;
+    for (const [k, t] of testLimiter) if (t < cutoff) testLimiter.delete(k);
+  }
   try {
-    await sendMail(testMail(String(email).toLowerCase()));
+    await sendMail(testMail(mail));
     res.json({ ok: true });
   } catch (err) {
     res.status(502).json({ ok: false, error: err.message || String(err) });
@@ -301,7 +314,7 @@ app.post('/api/test', async (req, res) => {
 
 app.listen(cfg.port, () => {
   console.log(`题目集关闭邮件提醒服务已启动: http://0.0.0.0:${cfg.port}（数据文件 ${cfg.dbFile}）`);
-  console.log(`提醒时机: 截止前 ${cfg.remindBefore.join(' / ')} 分钟 | 检查间隔 ${cfg.checkIntervalSec}s | 补发宽限 ${cfg.graceMinutes} 分钟${cfg.token ? ' | 已启用访问令牌' : ''}`);
+  console.log(`提醒时机: 截止前 ${cfg.remindBefore.join(' / ')} 分钟 | 检查间隔 ${cfg.checkIntervalSec}s | 补发宽限 ${cfg.graceMinutes} 分钟 | 测试邮件冷却 ${cfg.testCooldownSec}s${cfg.token ? ' | 已启用访问令牌' : ''}`);
   if (cfg.dryRun) console.log('DRY_RUN 生效（DRY_RUN=1 或未配置 SMTP_HOST）：邮件只打印到日志，不会真发');
 });
 

@@ -1,4 +1,4 @@
-const DEFAULTS = { enabled: true, badge: true, countdown: true, separators: '--,｜,|', rules: '', mergeSimilar: true, reminderServer: '', reminderEmail: '', settingsVersion: 0 };
+const DEFAULTS = { enabled: true, badge: true, countdown: true, separators: '--,｜,|', rules: '', mergeSimilar: true, reminderEnabled: true, reminderServer: '', reminderEmail: '', settingsVersion: 0 };
 const $ = id => document.getElementById(id);
 let stored = { ...DEFAULTS };
 
@@ -13,8 +13,11 @@ async function load() {
   for (const k of ['enabled', 'badge', 'countdown', 'mergeSimilar']) $(k).checked = !!stored[k];
   $('separators').value = stored.separators;
   $('rules').value = stored.rules || '';
+  $('reminderEnabled').checked = stored.reminderEnabled !== false;
   $('reminderServer').value = stored.reminderServer || '';
   $('reminderEmail').value = stored.reminderEmail || '';
+  applyReminderEnabled();
+  resumeTestCooldown();
 }
 
 function collect() {
@@ -28,6 +31,7 @@ function collect() {
     mergeSimilar: $('mergeSimilar').checked,
     separators: $('separators').value.trim() || DEFAULTS.separators,
     rules: $('rules').value.trim(),
+    reminderEnabled: $('reminderEnabled').checked,
     reminderServer: $('reminderServer').value.trim(),
     reminderEmail: $('reminderEmail').value.trim(),
   };
@@ -37,28 +41,88 @@ function save() {
   chrome.storage.sync.set({ settings: collect() });
 }
 
+/* ---------- 邮件提醒开关与测试邮件冷却 ---------- */
+const TEST_COOLDOWN_MS = 60 * 1000; // 与后端 /api/test 的每邮箱冷却一致，双保险
+let testCooldownUntil = 0;
+let countdownTimer = null;
+let testBusy = false;
+
+function applyReminderEnabled() {
+  const on = $('reminderEnabled').checked;
+  $('reminderServer').disabled = !on;
+  $('reminderEmail').disabled = !on;
+  $('testReminder').disabled = !on || Date.now() < testCooldownUntil;
+}
+
+function readTestSentAt() {
+  // 冷却起点存 storage.session：弹窗关开不绕过；无该 API（旧浏览器）时退化为仅后端限制
+  return chrome.storage?.session?.get({ testSentAt: 0 })
+    .then(v => v.testSentAt || 0)
+    .catch(() => 0);
+}
+
+function startTestCooldown(seconds) {
+  testCooldownUntil = Date.now() + seconds * 1000;
+  clearInterval(countdownTimer);
+  $('testReminder').textContent = `冷却中（${seconds}s）`;
+  countdownTimer = setInterval(() => {
+    const left = Math.ceil((testCooldownUntil - Date.now()) / 1000);
+    if (left <= 0) {
+      clearInterval(countdownTimer);
+      countdownTimer = null;
+      testCooldownUntil = 0;
+      $('testReminder').textContent = '发送测试邮件';
+      applyReminderEnabled();
+    } else {
+      $('testReminder').textContent = `冷却中（${left}s）`;
+    }
+  }, 1000);
+  applyReminderEnabled();
+}
+
+async function resumeTestCooldown() {
+  const sentAt = await readTestSentAt();
+  const left = Math.ceil((sentAt + TEST_COOLDOWN_MS - Date.now()) / 1000);
+  if (left > 0) startTestCooldown(left);
+}
+
 for (const k of ['enabled', 'badge', 'countdown', 'mergeSimilar']) $(k).addEventListener('change', save);
 $('separators').addEventListener('input', save);
 $('rules').addEventListener('input', save);
 $('reminderServer').addEventListener('input', save);
 $('reminderEmail').addEventListener('input', save);
+$('reminderEnabled').addEventListener('change', () => { save(); applyReminderEnabled(); });
+
 $('testReminder').addEventListener('click', async () => {
-  const status = $('reminderStatus');
-  const show = (text, cls) => { status.textContent = text; status.className = 'status' + (cls ? ' ' + cls : ''); };
-  const server = $('reminderServer').value.trim();
-  const email = $('reminderEmail').value.trim();
-  if (!server) return show('请先填写服务器地址', 'err');
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return show('邮箱格式不正确', 'err');
-  save(); // 先落盘，再让 background 发起测试
-  show('发送中…');
+  if (testBusy || $('testReminder').disabled) return;
+  testBusy = true;
   try {
+    const status = $('reminderStatus');
+    const show = (text, cls) => { status.textContent = text; status.className = 'status' + (cls ? ' ' + cls : ''); };
+    const server = $('reminderServer').value.trim();
+    const email = $('reminderEmail').value.trim();
+    if (!server) return show('请先填写服务器地址', 'err');
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return show('邮箱格式不正确', 'err');
+    const sentAt = await readTestSentAt();
+    const waitLeft = Math.ceil((sentAt + TEST_COOLDOWN_MS - Date.now()) / 1000);
+    if (waitLeft > 0) return show(`请 ${waitLeft} 秒后再试`, 'err');
+    save(); // 先落盘，再让 background 发起测试
+    show('发送中…');
+    try {
+      await chrome.storage.session.set({ testSentAt: Date.now() }); // 冷却起点：请求发出即计时，SMTP 失败也要等
+    } catch (_) { /* 无 session 存储，仅靠后端冷却 */ }
+    startTestCooldown(TEST_COOLDOWN_MS / 1000);
     const res = await chrome.runtime.sendMessage({ type: 'BPS_TEST', server, email });
     if (res?.ok) show('已发送，请查收', 'ok');
     else show('失败：' + (res?.error || '未知错误'), 'err');
   } catch (err) {
-    show('失败：' + (err?.message || err), 'err');
+    $('reminderStatus').textContent = '失败：' + (err?.message || err);
+    $('reminderStatus').className = 'status err';
+  } finally {
+    testBusy = false;
   }
 });
+
 $('reset').addEventListener('click', async () => {
   await chrome.storage.sync.set({ settings: { ...DEFAULTS } });
   load();

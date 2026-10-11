@@ -22,6 +22,7 @@
     separators: '--,｜,|',  // 课程名分隔符：取首个分隔符之前的部分作为课程名
     rules: '',              // 自定义规则，每行一条：关键词=>课程名（包含匹配，优先于自动识别）
     mergeSimilar: true,     // 同一教师下相似课程名自动归并为同一门课
+    reminderEnabled: true,  // 题目关闭邮件提醒总开关（与下面两项配置配合；关闭即暂停同步）
     reminderServer: '',     // 邮件提醒后端地址（ip:port，可加 /令牌 后缀）；空 = 关闭
     reminderEmail: '',      // 提醒邮件接收邮箱
     settingsVersion: 0,     // 0 = 旧版设置；init 时迁移到 v4（移除 grouped，改为按路由的会话内状态）
@@ -474,14 +475,15 @@
   const ACTIVE_PATH_RE = /^\/problem-sets\/active\/?$/;
   const PUSH_MIN_INTERVAL = 30 * 60 * 1000; // 签名未变时的最小重发间隔（endAt 不变就静默）
   let lastPush = { sig: null, at: 0 };
-  let lastRemindCfg = { server: null, email: null };
+  let lastRemindCfg = { enabled: null, server: null, email: null };
 
   function maybePushReminders() {
+    const enabled = settings.reminderEnabled !== false;
     const server = settings.reminderServer || '', email = settings.reminderEmail || '';
-    // 刚保存提醒配置时立即同步一次；其余按签名 + 间隔节流
-    const cfgChanged = server !== lastRemindCfg.server || email !== lastRemindCfg.email;
-    lastRemindCfg = { server, email };
-    if (!server || !email || !ACTIVE_PATH_RE.test(location.pathname)) return;
+    // 刚保存提醒配置（含重新打开开关）时立即同步一次；其余按签名 + 间隔节流
+    const cfgChanged = enabled !== lastRemindCfg.enabled || server !== lastRemindCfg.server || email !== lastRemindCfg.email;
+    lastRemindCfg = { enabled, server, email };
+    if (!enabled || !server || !email || !ACTIVE_PATH_RE.test(location.pathname)) return;
     if (typeof chrome === 'undefined' || !chrome.runtime?.sendMessage) return; // 预览页无扩展运行时
     const now = Date.now();
     const sets = (agg.items || [])
