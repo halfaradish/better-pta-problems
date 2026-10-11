@@ -1,4 +1,4 @@
-const DEFAULTS = { enabled: true, badge: true, countdown: true, separators: '--,｜,|', rules: '', mergeSimilar: true, reminderEnabled: true, reminderServer: '', reminderEmail: '', settingsVersion: 0 };
+const DEFAULTS = { enabled: true, badge: true, countdown: true, separators: '--,｜,|', rules: '', mergeSimilar: true, openInNewTab: true, reminderEnabled: true, reminderServer: '', reminderEmail: '', settingsVersion: 0 };
 const $ = id => document.getElementById(id);
 let stored = { ...DEFAULTS };
 // 无扩展环境（直接打开 popup.html 做设计回归）时优雅降级：用默认值渲染、跳过存储
@@ -14,7 +14,7 @@ async function load() {
       stored.settingsVersion = 4;
     }
   }
-  for (const k of ['enabled', 'badge', 'countdown', 'mergeSimilar']) $(k).checked = !!stored[k];
+  for (const k of ['enabled', 'badge', 'countdown', 'mergeSimilar', 'openInNewTab']) $(k).checked = !!stored[k];
   $('separators').value = stored.separators;
   $('rules').value = stored.rules || '';
   $('reminderEnabled').checked = stored.reminderEnabled !== false;
@@ -33,6 +33,7 @@ function collect() {
     badge: $('badge').checked,
     countdown: $('countdown').checked,
     mergeSimilar: $('mergeSimilar').checked,
+    openInNewTab: $('openInNewTab').checked,
     separators: $('separators').value.trim() || DEFAULTS.separators,
     rules: $('rules').value.trim(),
     reminderEnabled: $('reminderEnabled').checked,
@@ -93,7 +94,7 @@ async function resumeTestCooldown() {
   if (left > 0) startTestCooldown(left);
 }
 
-for (const k of ['enabled', 'badge', 'countdown', 'mergeSimilar']) $(k).addEventListener('change', save);
+for (const k of ['enabled', 'badge', 'countdown', 'mergeSimilar', 'openInNewTab']) $(k).addEventListener('change', save);
 $('separators').addEventListener('input', save);
 $('rules').addEventListener('input', save);
 $('reminderServer').addEventListener('input', save);

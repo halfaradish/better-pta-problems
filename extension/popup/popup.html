@@ -44,7 +44,7 @@
     }
     * { box-sizing: border-box; }
     body {
-      width: 360px; margin: 0; padding: 9px 16px 6px;
+      width: 360px; margin: 0; padding: 8px 16px 5px;
       background: var(--bg); color: var(--text);
       font: 13px/1.5 system-ui, "Microsoft YaHei", "PingFang SC", sans-serif;
       -webkit-font-smoothing: antialiased;
@@ -53,14 +53,14 @@
     input:focus-visible, textarea:focus-visible { outline: none; }
 
     /* ---------- 头部 ---------- */
-    .head { display: flex; align-items: center; gap: 10px; padding-bottom: 8px; }
+    .head { display: flex; align-items: center; gap: 10px; padding-bottom: 6px; }
     .head img { width: 30px; height: 30px; border-radius: 8px; }
     .head-title { display: flex; align-items: center; gap: 7px; font-size: 15px; font-weight: 650; letter-spacing: .01em; }
     .ver { font-size: 11px; font-weight: 500; line-height: 17px; padding: 0 7px; border: 1px solid var(--input-border); border-radius: 9999px; background: var(--input-bg); color: var(--text-2); }
     .head-sub { margin-top: 1px; font-size: 12px; color: var(--text-3); }
 
     main > * + * { border-top: 1px solid var(--hairline); }
-    section, details { padding: 6px 0 8px; }
+    section, details { padding: 5px 0 7px; }
 
     /* ---------- 开关（原生 checkbox 样式化，保留键盘与读屏语义） ---------- */
     .switch {
@@ -79,7 +79,7 @@
     .switch:checked::after { transform: translateX(16px); }
     .switch:disabled, input:disabled, textarea:disabled, button:disabled { opacity: .45; cursor: not-allowed; }
 
-    .row { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 32px; cursor: pointer; }
+    .row { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 30px; cursor: pointer; }
     .row .q { margin-left: 6px; font-size: 12px; color: var(--text-3); }
 
     /* ---------- 主开关行：面板的锚点控件，开启时整行淡蓝 ---------- */
@@ -99,7 +99,7 @@
     /* ---------- 可折叠区块（课程识别） ---------- */
     summary {
       display: flex; align-items: center; justify-content: space-between; gap: 12px;
-      min-height: 32px; cursor: pointer; list-style: none; font-weight: 600;
+      min-height: 30px; cursor: pointer; list-style: none; font-weight: 600;
     }
     summary::-webkit-details-marker { display: none; }
     .caret {
@@ -128,7 +128,7 @@
 
     /* ---------- 提醒区 ---------- */
     .sec-head { font-weight: 600; margin-bottom: 2px; }
-    .test-row { display: flex; align-items: center; gap: 10px; margin-top: 8px; }
+    .test-row { display: flex; align-items: center; gap: 10px; margin-top: 6px; }
     .status { min-width: 0; font-size: 12px; color: var(--text-2); }
     .status.ok { color: var(--ok); font-weight: 500; }
     .status.err { color: var(--err); }
@@ -148,7 +148,7 @@
     /* ---------- 页脚 ---------- */
     footer {
       display: flex; align-items: center; justify-content: space-between; gap: 10px;
-      margin-top: 2px; padding-top: 9px; border-top: 1px solid var(--hairline);
+      margin-top: 2px; padding-top: 7px; border-top: 1px solid var(--hairline);
     }
     .repo {
       display: inline-flex; align-items: center; gap: 6px; min-width: 0; min-height: 28px;
@@ -167,7 +167,7 @@
   <header class="head">
     <img src="../icons/icon48.png" alt="" width="30" height="30">
     <div class="head-text">
-      <div class="head-title">更好的题目集 <span class="ver" id="version">v0.7.1</span></div>
+      <div class="head-title">更好的题目集 <span class="ver" id="version">v0.7.2</span></div>
       <div class="head-sub">PTA 题目集列表增强</div>
     </div>
   </header>
@@ -188,6 +188,7 @@
         <label class="row"><span class="row-text">卡片课程徽章</span><input type="checkbox" class="switch" id="badge" checked></label>
         <label class="row"><span class="row-text">截止倒计时<span class="q">剩 7 天内显示</span></span><input type="checkbox" class="switch" id="countdown" checked></label>
         <label class="row"><span class="row-text">同教师课程归并</span><input type="checkbox" class="switch" id="mergeSimilar" checked></label>
+        <label class="row"><span class="row-text">新标签页打开题目集</span><input type="checkbox" class="switch" id="openInNewTab" checked></label>
       </div>
     </section>
 

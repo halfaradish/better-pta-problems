@@ -22,6 +22,7 @@
     separators: '--,｜,|',  // 课程名分隔符：取首个分隔符之前的部分作为课程名
     rules: '',              // 自定义规则，每行一条：关键词=>课程名（包含匹配，优先于自动识别）
     mergeSimilar: true,     // 同一教师下相似课程名自动归并为同一门课
+    openInNewTab: true,     // 点开题目集在新标签页打开（绕过 PTA 的 SPA 同页跳转）
     reminderEnabled: true,  // 题目关闭邮件提醒总开关（与下面两项配置配合；关闭即暂停同步）
     reminderServer: '',     // 邮件提醒后端地址（ip:port，可加 /令牌 后缀）；空 = 关闭
     reminderEmail: '',      // 提醒邮件接收邮箱
@@ -935,6 +936,19 @@
       }
     });
     mo.observe(document.body, { childList: true, subtree: true });
+
+    // 点开题目集 → 新标签页打开。capture 挂在 document 上，先于 PTA 挂在
+    // React 根上的路由委托（document 是 #root 的祖先）；stopPropagation 拦下
+    // SPA 同页跳转。修饰键/中键交还浏览器原生行为（Ctrl+Click 本来就是新标签页）。
+    document.addEventListener('click', e => {
+      if (!settings.enabled || !settings.openInNewTab) return;
+      if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+      const a = e.target?.closest?.('a[href]');
+      if (!a || !SET_HREF_RE.test(a.getAttribute('href') || '')) return;
+      e.preventDefault();
+      e.stopPropagation();
+      window.open(a.href, '_blank', 'noopener');
+    }, true);
 
     setInterval(() => sync(), 3000);                    // 兜底：路由切换 / 遗漏的变动
     setInterval(() => { if (state.root) refreshCountdowns(); }, 60000);
