@@ -106,7 +106,20 @@ const store = {
   },
 };
 
-/* ---------- 邮件 ---------- */
+/* ---------- 邮件（HTML 模板） ---------- */
+// 与插件弹窗同一套设计语言：深蓝主色、浅蓝衬底、冷灰字阶、圆角与胶囊徽标。
+// 刻意只用 table + 内联样式：不依赖远程图片和 <style>，主流邮箱（QQ/163/Gmail/Outlook）都能渲染，
+// 不支持的特性（圆角、媒体查询）只做优雅降级。
+const MAIL_FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei',sans-serif";
+const C = {
+  ink: '#242a32', ink2: '#5c6672', ink3: '#6f7a88',   // 文字三级灰
+  line: '#e3e7ec', wash: '#f6f8fa', outer: '#eef1f4', // 描边 / 面板底 / 页面底
+  accent: '#0a4991', accentSoft: '#e8f0fa',           // 插件主蓝 / 浅蓝衬底
+  ok: '#2b8a3e', okSoft: '#e7f3ea',                   // 成功（测试邮件）
+  err: '#e03131', errSoft: '#fdecec',                 // 紧急：剩余不足 24h
+};
+const URGENT_MS = 24 * 3600 * 1000;
+
 const transporter = cfg.dryRun ? null : nodemailer.createTransport({
   host: cfg.smtpHost,
   port: cfg.smtpPort,
@@ -121,7 +134,7 @@ function fmtTime(ms) {
   return new Date(ms).toLocaleString('zh-CN', {
     timeZone: cfg.displayTz, hour12: false,
     year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
-  });
+  }).replace(/\//g, '-');
 }
 function humanLeft(ms) {
   const m = Math.max(1, Math.round(ms / 60000));
@@ -129,74 +142,199 @@ function humanLeft(ms) {
   if (m >= 120) return `约 ${Math.round(m / 60)} 小时`;
   return `约 ${m} 分钟`;
 }
+function humanMinutes(min) {
+  const n = min >= 1440 ? min / 1440 : min >= 60 ? min / 60 : min;
+  const unit = min >= 1440 ? '天' : min >= 60 ? '小时' : '分钟';
+  return `${Number.isInteger(n) ? n : Math.round(n * 10) / 10} ${unit}`;
+}
+// 纯文本降级版（提升进箱率与无障碍阅读）
+function htmlToText(html) {
+  return html
+    .replace(/<style[\s\S]*?<\/style>/gi, '')
+    .replace(/<(br|\/p|\/div|\/td|\/tr|\/h\d)[^>]*>/gi, '\n')
+    .replace(/<[^>]+>/g, '')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&').replace(/&lt;/gi, '<').replace(/&gt;/gi, '>').replace(/&quot;/gi, '"').replace(/&#39;/gi, "'")
+    .replace(/[ \t]+/g, ' ')
+    .replace(/ *\n */g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
 
 async function sendMail({ to, subject, html }) {
   if (cfg.dryRun) {
-    console.log(`[dry-run] 邮件 -> ${to}\n  主题: ${subject}\n  正文: ${html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 200)}`);
+    console.log(`[dry-run] 邮件 -> ${to}\n  主题: ${subject}\n  正文: ${htmlToText(html).replace(/\s+/g, ' ').slice(0, 200)}`);
     return;
   }
-  await transporter.sendMail({ from: cfg.mailFrom, to, subject, html });
+  await transporter.sendMail({ from: cfg.mailFrom, to, subject, html, text: htmlToText(html) });
 }
 
+/* ----- 模板片段 ----- */
+// 剩余时间胶囊：不足 24h 转紧急红，颜色编码的是真实信息
+function chipHtml(text, urgent) {
+  const bg = urgent ? C.errSoft : C.accentSoft;
+  const fg = urgent ? C.err : C.accent;
+  return `<span style="display:inline-block;padding:1px 9px;border-radius:9999px;background:${bg};color:${fg};font:500 12px/20px ${MAIL_FONT};white-space:nowrap">${text}</span>`;
+}
+
+// 视觉锚点：大字结论 + 右侧精确时间；bg/bigColor 按紧急度或语义（成功绿）传入
+function heroPanel({ bg, label, big, bigColor, right }) {
+  return `<table role="presentation" class="hero" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="${bg}" style="background:${bg};border-radius:8px;border-collapse:separate"><tr class="hero-tr">
+    <td style="padding:18px 20px;font-family:${MAIL_FONT}">
+      <div style="font:400 13px/20px ${MAIL_FONT};color:${C.ink3}">${label}</div>
+      <div style="margin-top:2px;font:700 28px/38px ${MAIL_FONT};color:${bigColor}">${big}</div>
+    </td>
+    <td class="r" valign="bottom" align="right" style="padding:18px 20px;font:400 13px/20px ${MAIL_FONT};color:${C.ink2}">${right}</td>
+  </tr></table>`;
+}
+
+function cardHeader() {
+  return `<tr><td style="padding:16px 24px;border-bottom:1px solid ${C.line};font-family:${MAIL_FONT}">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr>
+      <td width="28" height="28" align="center" valign="middle" bgcolor="${C.accentSoft}" style="background:${C.accentSoft};border-radius:8px;font:700 14px/28px ${MAIL_FONT};color:${C.accent}">题</td>
+      <td style="padding-left:10px;font:600 15px/22px ${MAIL_FONT};color:${C.ink};letter-spacing:.01em">更好的题目集</td>
+      <td align="right" valign="middle"><span style="display:inline-block;padding:0 9px;border:1px solid ${C.line};border-radius:9999px;background:${C.wash};color:${C.ink3};font:500 11px/19px ${MAIL_FONT};white-space:nowrap">题目集关闭提醒</span></td>
+    </tr></table>
+  </td></tr>`;
+}
+
+function cardFooter() {
+  return `<tr><td bgcolor="${C.wash}" style="background:${C.wash};padding:13px 24px;border-top:1px solid ${C.line};font:400 12px/20px ${MAIL_FONT};color:${C.ink3}">
+    这封邮件由你自行部署的「更好的题目集」插件提醒服务发送。不想再收到：在插件设置中清空服务器地址或邮箱即可。
+  </td></tr>`;
+}
+
+function mailShell({ preheader = '', inner }) {
+  return `<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light only">
+<meta name="supported-color-schemes" content="light only">
+<style>
+.t { white-space:nowrap; }
+@media only screen and (max-width:480px) {
+  .hero, .hero-tr { display:block !important; width:100% !important; }
+  .hero-tr > td { display:block !important; width:100% !important; box-sizing:border-box !important; text-align:left !important; }
+  .r { padding:0 20px 16px !important; }
+  .hide-sm { display:none !important; }
+  .t { white-space:normal !important; }
+}
+</style>
+</head>
+<body style="margin:0;padding:0;background:${C.outer}">
+<div style="display:none;max-height:0;overflow:hidden;opacity:0;font-size:1px;line-height:1px;color:${C.outer}">${preheader}</div>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="${C.outer}" style="background:${C.outer}"><tr><td align="center" style="padding:28px 12px">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%;max-width:600px;background:#ffffff;border:1px solid ${C.line};border-radius:12px;border-collapse:separate;overflow:hidden">
+${cardHeader()}
+${inner}
+${cardFooter()}
+</table>
+</td></tr></table>
+</body>
+</html>`;
+}
+
+function primaryButton(href, text) {
+  return `<table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr>
+    <td bgcolor="${C.accent}" style="background:${C.accent};border-radius:8px">
+      <a href="${href}" style="display:inline-block;padding:11px 26px;border-radius:8px;font:500 14px/22px ${MAIL_FONT};color:#ffffff;text-decoration:none">${text}</a>
+    </td>
+  </tr></table>`;
+}
+
+function ownerOrg(row) {
+  return [row.owner, row.org].filter(Boolean).map(escapeHtml).join(' · ');
+}
+
+/* ----- 三种邮件 ----- */
 function reminderMail(row, now) {
   const left = row.end_at - now;
+  const urgent = left < URGENT_MS;
   const setUrl = `https://pintia.cn/problem-sets/${row.set_id}/overview`;
-  const td = 'padding: 4px 12px 4px 0; vertical-align: top;';
-  const html = `
-<div style="font:14px/1.7 -apple-system,'Microsoft YaHei',sans-serif;color:#343a40;max-width:560px">
-  <p>你好，</p>
-  <p>以下题目集即将关闭：</p>
-  <table style="border-collapse:collapse;margin:8px 0">
-    <tr><td style="${td}color:#868e96">题目集</td><td style="${td}"><a href="${setUrl}">${escapeHtml(row.title)}</a></td></tr>
-    <tr><td style="${td}color:#868e96">教师 / 单位</td><td style="${td}">${escapeHtml(row.owner)}${row.owner && row.org ? ' · ' : ''}${escapeHtml(row.org)}</td></tr>
-    <tr><td style="${td}color:#868e96">关闭时间</td><td style="${td}">${fmtTime(row.end_at)}</td></tr>
-    <tr><td style="${td}color:#868e96">剩余时间</td><td style="${td}"><b>${humanLeft(left)}</b></td></tr>
-  </table>
-  <p>别忘了完成还没提交的题目：<a href="${setUrl}">打开题目集</a></p>
-  <p style="color:#868e96;font-size:12px">—— 由你自行部署的「更好的题目集」插件邮件提醒服务发送；不想再收到，请在插件设置中清空服务器地址或邮箱。</p>
-</div>`;
-  return { to: row.email, subject: `【PTA提醒】《${row.title}》${humanLeft(left)}后关闭（${fmtTime(row.end_at)}）`, html };
+  const meta = ownerOrg(row);
+  const preheader = `《${row.title}》将于 ${fmtTime(row.end_at)} 关闭，剩余${humanLeft(left)}。`;
+  const inner = `<tr><td style="padding:24px 24px 28px;font-family:${MAIL_FONT}">
+  <p style="margin:0 0 16px;font:400 14px/22px ${MAIL_FONT};color:${C.ink}">你好，</p>
+  ${heroPanel({
+    bg: urgent ? C.errSoft : C.accentSoft,
+    label: '距关闭还剩',
+    big: humanLeft(left),
+    bigColor: urgent ? C.err : C.accent,
+    right: `${fmtTime(row.end_at)} 关闭`,
+  })}
+  <p style="margin:20px 0 ${meta ? '4px' : '20px'};font:600 17px/26px ${MAIL_FONT}"><a href="${setUrl}" style="color:${C.accent};text-decoration:none">《${escapeHtml(row.title)}》</a></p>
+  ${meta ? `<p style="margin:0 0 22px;font:400 13px/20px ${MAIL_FONT};color:${C.ink3}">${meta}</p>` : ''}
+  ${primaryButton(setUrl, '打开题目集，完成未提交的题目')}
+</td></tr>`;
+  return { to: row.email, subject: `【PTA提醒】《${row.title}》${humanLeft(left)}后关闭（${fmtTime(row.end_at)}）`, html: mailShell({ preheader, inner }) };
 }
 
 function testMail(email) {
-  const html = `
-<div style="font:14px/1.7 -apple-system,'Microsoft YaHei',sans-serif;color:#343a40">
-  <p>这是一封<b>测试邮件</b>，说明「更好的题目集」插件的服务器与邮箱配置已生效。</p>
-  <p style="color:#868e96">发送时间：${fmtTime(Date.now())}（${cfg.displayTz}）</p>
-  <p style="color:#868e96;font-size:12px">打开 PTA「进行中」页面后，未关闭的题目集会自动同步到本服务，截止前 ${cfg.remindBefore.join(' / ')} 分钟你会各收到一封提醒；同一时间到期的多个题目集会合并成一封汇总邮件。</p>
-</div>`;
-  return { to: email, subject: '【PTA提醒】测试邮件', html };
+  const now = Date.now();
+  const settingRows = [
+    ['提醒时机', `截止前 ${cfg.remindBefore.map(humanMinutes).join(' / ')}`],
+    ['检查频率', `每 ${cfg.checkIntervalSec} 秒扫描一次`],
+    ['显示时区', escapeHtml(cfg.displayTz)],
+    ['汇总规则', '同一时间到期的多个题目集合并为一封'],
+  ].map(([k, v]) => `<tr>
+      <td style="padding:3px 18px 3px 0;font:400 13px/22px ${MAIL_FONT};color:${C.ink3};vertical-align:top">${k}</td>
+      <td style="padding:3px 0;font:400 13px/22px ${MAIL_FONT};color:${C.ink}">${v}</td>
+    </tr>`).join('');
+  const inner = `<tr><td style="padding:24px 24px 28px;font-family:${MAIL_FONT}">
+  <p style="margin:0 0 16px;font:400 14px/22px ${MAIL_FONT};color:${C.ink}">你好，</p>
+  ${heroPanel({ bg: C.okSoft, label: '测试邮件', big: '发送成功', bigColor: C.ok, right: `${fmtTime(now)}<br><span style="color:${C.ink3}">${escapeHtml(cfg.displayTz)}</span>` })}
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="${C.wash}" style="background:${C.wash};border-radius:8px;border-collapse:separate;margin-top:20px"><tr><td style="padding:14px 18px">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">${settingRows}</table>
+  </td></tr></table>
+  <p style="margin:18px 0 0;font:400 14px/22px ${MAIL_FONT};color:${C.ink2}">接下来，正在进行的题目集临近关闭时，你会收到同样式的提醒邮件。</p>
+</td></tr>`;
+  return { to: email, subject: '【PTA提醒】测试邮件', html: mailShell({ preheader: '测试邮件：服务器与邮箱配置正常。', inner }) };
 }
 
 // 同邮箱同档位的多条提醒合并成一封汇总邮件；单条仍用 reminderMail 的具体主题
 function digestMail(items, now) {
   if (items.length === 1) return reminderMail(items[0].row, now);
   const sorted = [...items].sort((a, b) => a.row.end_at - b.row.end_at);
-  const td = 'padding: 4px 12px 4px 0; vertical-align: top;';
-  const th = 'padding: 4px 12px 4px 0; vertical-align: top; color: #868e96; font-weight: normal; text-align: left;';
-  const rowsHtml = sorted.map(({ row }) => `
-    <tr>
-      <td style="${td}"><a href="https://pintia.cn/problem-sets/${row.set_id}/overview">${escapeHtml(row.title)}</a></td>
-      <td style="${td}">${escapeHtml(row.owner)}${row.owner && row.org ? ' · ' : ''}${escapeHtml(row.org)}</td>
-      <td style="${td}">${fmtTime(row.end_at)}</td>
-      <td style="${td}"><b>${humanLeft(row.end_at - now)}</b></td>
-    </tr>`).join('');
-  const html = `
-<div style="font:14px/1.7 -apple-system,'Microsoft YaHei',sans-serif;color:#343a40;max-width:640px">
-  <p>你好，</p>
-  <p>以下 ${sorted.length} 个题目集即将关闭：</p>
-  <table style="border-collapse:collapse;margin:8px 0">
-    <tr><th style="${th}">题目集</th><th style="${th}">教师 / 单位</th><th style="${th}">关闭时间</th><th style="${th}">剩余</th></tr>
-    ${rowsHtml}
-  </table>
-  <p>别忘了完成还没提交的题目。</p>
-  <p style="color:#868e96;font-size:12px">—— 由你自行部署的「更好的题目集」插件邮件提醒服务发送；不想再收到，请在插件设置中清空服务器地址或邮箱。</p>
-</div>`;
   const earliest = sorted[0].row;
+  const urgent = earliest.end_at - now < URGENT_MS;
+  const rows = sorted.map(({ row }, i) => {
+    const l = row.end_at - now;
+    const b = i < sorted.length - 1 ? `border-bottom:1px solid ${C.line};` : '';
+    const td = `padding:12px 14px 12px 0;${b}vertical-align:top;font:400 13px/21px ${MAIL_FONT}`;
+    const [datePart, timePart] = fmtTime(row.end_at).split(' ');
+    return `<tr>
+      <td style="${td}"><a href="https://pintia.cn/problem-sets/${row.set_id}/overview" style="color:${C.accent};text-decoration:none;font:600 14px/22px ${MAIL_FONT}">《${escapeHtml(row.title)}》</a></td>
+      <td class="hide-sm" style="${td}color:${C.ink2}">${ownerOrg(row) || '—'}</td>
+      <td class="t" style="${td}color:${C.ink2}"><span style="white-space:nowrap">${datePart}</span> <span style="white-space:nowrap">${timePart}</span></td>
+      <td align="right" style="${td}white-space:nowrap">${chipHtml(humanLeft(l), l < URGENT_MS)}</td>
+    </tr>`;
+  }).join('');
+  const head = `<tr>
+    <td style="padding:0 14px 8px 0;font:500 12px/18px ${MAIL_FONT};color:${C.ink3}">题目集</td>
+    <td class="hide-sm" style="padding:0 14px 8px 0;font:500 12px/18px ${MAIL_FONT};color:${C.ink3}">教师 / 单位</td>
+    <td class="t" style="padding:0 14px 8px 0;font:500 12px/18px ${MAIL_FONT};color:${C.ink3}">关闭时间</td>
+    <td align="right" style="padding:0 0 8px;font:500 12px/18px ${MAIL_FONT};color:${C.ink3}">剩余</td>
+  </tr>`;
+  const inner = `<tr><td style="padding:24px 24px 28px;font-family:${MAIL_FONT}">
+  <p style="margin:0 0 16px;font:400 14px/22px ${MAIL_FONT};color:${C.ink}">你好，</p>
+  ${heroPanel({
+    bg: urgent ? C.errSoft : C.accentSoft,
+    label: '即将关闭',
+    big: `${sorted.length} 个题目集`,
+    bigColor: urgent ? C.err : C.accent,
+    right: `最早 ${fmtTime(earliest.end_at)} 关闭`,
+  })}
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-top:22px;width:100%;border-collapse:collapse">
+    ${head}${rows}
+  </table>
+  <p style="margin:18px 0 0;font:400 14px/22px ${MAIL_FONT};color:${C.ink2}">记得在关闭前完成还没提交的题目。</p>
+</td></tr>`;
   return {
     to: earliest.email,
     subject: `【PTA提醒】${sorted.length} 个题目集即将关闭（最早 ${fmtTime(earliest.end_at)}）`,
-    html,
+    html: mailShell({ preheader: `${sorted.length} 个题目集即将关闭，最早 ${fmtTime(earliest.end_at)}，剩余${humanLeft(earliest.end_at - now)}。`, inner }),
   };
 }
 
