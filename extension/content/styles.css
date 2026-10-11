@@ -59,6 +59,36 @@
   margin-left: auto;
 }
 
+/* 课程级开放状态：未关闭的课程计数高亮，已全部关闭的课程灰显 */
+.bps-chip-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.bps-chip-num {
+  flex: none;
+}
+
+.bps-num-open {
+  color: #1c7ed6;
+  font-weight: 600;
+}
+
+.bps-chip.bps-on .bps-num-open {
+  color: #fff;
+}
+
+.bps-chip.bps-off {
+  background: #f8f9fa;
+  border-color: #e9ecef;
+  color: #adb5bd;
+}
+
+.bps-chip.bps-off:hover {
+  border-color: #ced4da;
+  color: #868e96;
+}
+
 /* 分组 */
 .bps-head {
   display: flex;

@@ -504,11 +504,35 @@
   function buildChipBar(groups) {
     const bar = document.createElement('div');
     bar.className = 'bps-chips';
-    const mk = (key, label, count) => {
+    const now = Date.now();
+    // 课程级开放状态：还有未关闭题目集的课程计数高亮（部分关闭时显示 开放/总数），
+    // 已全部关闭的课程整颗灰显——筛选条上一眼区分还在开放的课和已结的课
+    const mk = (key, label, list) => {
+      const total = list.length;
+      const isCourse = key !== 'ALL';
+      const openCount = isCourse ? list.filter(i => !i.closeAt || +i.closeAt > now).length : 0;
       const chip = document.createElement('button');
       chip.type = 'button';
       chip.className = 'bps-chip' + (state.filter === key ? ' bps-on' : '');
-      chip.textContent = count == null ? label : `${label} ${count}`;
+      if (isCourse && openCount === 0) chip.classList.add('bps-off');
+      const name = document.createElement('span');
+      name.className = 'bps-chip-name';
+      name.textContent = label;
+      const num = document.createElement('span');
+      num.className = 'bps-chip-num';
+      if (isCourse && openCount > 0 && openCount < total) {
+        num.classList.add('bps-num-open');
+        num.textContent = `${openCount}/${total}`;
+      } else {
+        if (isCourse && openCount > 0) num.classList.add('bps-num-open');
+        num.textContent = String(total);
+      }
+      if (isCourse) {
+        chip.title = openCount > 0
+          ? `还有 ${openCount} 个题目集未关闭（共 ${total} 个）`
+          : '该课程的题目集已全部关闭';
+      }
+      chip.append(name, num);
       chip.addEventListener('click', () => {
         if (state.filter === key) return;
         state.filter = key;
@@ -517,8 +541,8 @@
       });
       return chip;
     };
-    bar.appendChild(mk('ALL', '全部', state.items.length));
-    for (const [course, list] of groups) bar.appendChild(mk(course, course, list.length));
+    bar.appendChild(mk('ALL', '全部', state.items));
+    for (const [course, list] of groups) bar.appendChild(mk(course, course, list));
     // 列表/分组切换只影响「全部」：选中具体课程时不渲染 toggle
     if (state.filter === 'ALL') {
       const toggle = document.createElement('button');
