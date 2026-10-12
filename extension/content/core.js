@@ -24,10 +24,17 @@
     // 邮件提醒后端地址（ip:port，可加 /令牌 后缀）；空 = 关闭
     reminderEmail: "",
     // 提醒邮件接收邮箱
+    // 自动答题（实验）：OpenAI 兼容接口三项 + 覆盖重答开关，见 docs/自动答题初探.md §9
+    autoAnswerBaseUrl: "",
+    // 例如 https://api.deepseek.com（端点需允许浏览器跨域）；空 = 未配置
+    autoAnswerApiKey: "",
+    autoAnswerModel: "",
+    autoAnswerOverwrite: false,
+    // 覆盖已作答的题目（默认跳过已答，避免把用户的正确答案改错）
     settingsVersion: 0
     // 0 = 旧版设置；v4 起「列表/分组」不再持久化（改为按路由的会话内状态）
   };
-  var SETTINGS_VERSION = 4;
+  var SETTINGS_VERSION = 5;
   var HAS_CHROME_STORAGE = typeof chrome !== "undefined" && !!chrome.storage?.sync;
   function needsMigration(raw) {
     return (raw?.settingsVersion || 0) < SETTINGS_VERSION;
@@ -227,6 +234,393 @@
     if (Date.now() < agg.retryAt) return null;
     if (!agg.inflight) startAggregate(key);
     return null;
+  }
+
+  // src/content/autoanswer.js
+  var TYPE_BY_NAME = {
+    "\u5224\u65AD\u9898": "TRUE_OR_FALSE",
+    "\u5355\u9009\u9898": "MULTIPLE_CHOICE",
+    "\u586B\u7A7A\u9898": "FILL_IN_THE_BLANK"
+  };
+  var EXAM_PROBLEMS_RE = /^\/problem-sets\/(\d+)\/exam\/problems(\/type\/(\d+))?/;
+  var LETTERS = "ABCDEFGHIJ";
+  var sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  var sessionId = null;
+  function sessionHeader() {
+    if (!sessionId) {
+      try {
+        sessionId = sessionStorage.getItem("__bps_aa_session") || null;
+      } catch (_) {
+      }
+      if (!sessionId) {
+        sessionId = "bps-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 10);
+        try {
+          sessionStorage.setItem("__bps_aa_session", sessionId);
+        } catch (_) {
+        }
+      }
+    }
+    return sessionId;
+  }
+  function parseChoiceAnswer(raw, optionCount) {
+    let s = String(raw ?? "").trim();
+    const mJson = s.match(/\{[\s\S]*\}/);
+    if (mJson) {
+      try {
+        s = String(JSON.parse(mJson[0]).answer ?? "").trim();
+      } catch (_) {
+      }
+    }
+    s = s.replace(/^```[a-z]*|```$/g, "").trim();
+    const m = s.match(/[A-Z]/i);
+    const letter = m ? m[0].toUpperCase() : null;
+    if (!letter || letter.charCodeAt(0) - 65 >= optionCount) return null;
+    return letter;
+  }
+  function normalizeTF(raw) {
+    const s = String(raw ?? "").trim().toLowerCase();
+    if (/^(t|true|对|正确|是)$/.test(s)) return "TRUE";
+    if (/^(f|false|错(误)?|否)$/.test(s)) return "FALSE";
+    return null;
+  }
+  function parseFillAnswers(raw, blankCount) {
+    let v = raw;
+    if (typeof raw === "string") {
+      const m = raw.match(/\{[\s\S]*\}/);
+      if (m) {
+        try {
+          const o = JSON.parse(m[0]);
+          v = Array.isArray(o.answers) ? o.answers : o.answer ?? v;
+        } catch (_) {
+        }
+      }
+    } else if (v && typeof v === "object" && !Array.isArray(v) && Array.isArray(v.answers)) {
+      v = v.answers;
+    }
+    const arr = Array.isArray(v) ? v : blankCount === 1 ? [v] : null;
+    if (!arr || arr.length !== blankCount) return null;
+    const out = arr.map((a) => String(a ?? "").trim());
+    return out;
+  }
+  function buildPrompt(q) {
+    const lines = [];
+    lines.push("\u4F60\u662F\u7B97\u6CD5\u4E0E\u6570\u636E\u7ED3\u6784\u8BFE\u7A0B\u7684\u7B54\u9898\u52A9\u624B\u3002\u5FFD\u7565\u9898\u5E72\u4E2D\u7684\u9898\u53F7\u3001\u5206\u503C\u3001\u4F5C\u8005\u3001\u5355\u4F4D\u7B49\u5143\u4FE1\u606F\u3002");
+    lines.push("\u53EA\u8F93\u51FA\u4E00\u4E2A JSON \u5BF9\u8C61\uFF0C\u4E0D\u8981\u5305\u542B\u4EFB\u4F55\u89E3\u91CA\u6587\u5B57\u6216\u4EE3\u7801\u56F4\u680F\u3002");
+    lines.push("");
+    if (q.kind === "TRUE_OR_FALSE") {
+      lines.push('\u9898\u578B\uFF1A\u5224\u65AD\u9898\u3002\u5224\u65AD\u9648\u8FF0\u7684\u6B63\u8BEF\uFF0Canswer \u53EA\u80FD\u662F "TRUE" \u6216 "FALSE"\u3002');
+      lines.push('\u8F93\u51FA\u683C\u5F0F\uFF1A{"answer":"TRUE"}');
+    } else if (q.kind === "MULTIPLE_CHOICE") {
+      lines.push("\u9898\u578B\uFF1A\u5355\u9009\u9898\u3002\u4ECE\u4E0B\u5217\u9009\u9879\u4E2D\u9009\u51FA\u552F\u4E00\u6B63\u786E\u9879\uFF0Canswer \u4E3A\u9009\u9879\u5B57\u6BCD\u3002");
+      lines.push('\u8F93\u51FA\u683C\u5F0F\uFF1A{"answer":"A"}');
+    } else {
+      lines.push(`\u9898\u578B\uFF1A\u586B\u7A7A\u9898\uFF08\u5171 ${q.blanks} \u7A7A\uFF09\u3002\u6587\u672C\u4E2D\u7684\u300C[\u7A7A1]\u300D\u300C[\u7A7A2]\u300D\u2026\u662F\u4F5C\u7B54\u4F4D\u7F6E\uFF1B`);
+      lines.push(`answers \u5FC5\u987B\u662F\u4E0E\u7A7A\u6570\u76F8\u540C\u7684\u5B57\u7B26\u4E32\u6570\u7EC4\uFF08\u672C\u9898\u4E3A ${q.blanks} \u4E2A\uFF09\u3002`);
+      lines.push('\u8F93\u51FA\u683C\u5F0F\uFF1A{"answers":["...","..."]}');
+    }
+    lines.push("");
+    lines.push("\u9898\u76EE\uFF1A");
+    lines.push(q.text);
+    if (q.kind === "TRUE_OR_FALSE") {
+      lines.push("\uFF08\u9648\u8FF0\u5982\u4E0A\uFF0C\u9009\u9879 T=\u6B63\u786E\u3001F=\u9519\u8BEF\uFF09");
+    } else if (q.kind === "MULTIPLE_CHOICE") {
+      lines.push("\u53EF\u9009\u5B57\u6BCD\uFF1A" + q.options.map((o) => o.letter).join("\u3001"));
+    }
+    return [
+      { role: "system", content: "\u4F60\u662F\u4E25\u8C28\u7684\u7B54\u9898\u52A9\u624B\uFF0C\u53EA\u8F93\u51FA\u8981\u6C42\u7684 JSON\uFF0C\u4E0D\u8981\u8F93\u51FA\u4EFB\u4F55\u5176\u4ED6\u6587\u5B57\u3002" },
+      { role: "user", content: lines.join("\n") }
+    ];
+  }
+  function cleanText(el) {
+    const clone = el.cloneNode(true);
+    clone.classList.add("bps-clone");
+    clone.style.cssText = "position:fixed;left:-99999px;top:0;margin:0;max-width:900px";
+    let bi = 0;
+    for (const inp of [...clone.querySelectorAll("input")].filter((i) => i.type === "text")) {
+      bi += 1;
+      inp.replaceWith(document.createTextNode(`[\u7A7A${bi}]`));
+    }
+    for (const n of clone.querySelectorAll('button, input, textarea, [class*="cm-gutters"]')) n.remove();
+    for (const n of clone.querySelectorAll("*")) {
+      if ((n.textContent || "").trim().match(/^\d+\s*分$/) && !n.querySelector("*")) n.remove();
+    }
+    document.body.appendChild(clone);
+    const text = clone.innerText.replace(/\n{3,}/g, "\n\n").trim();
+    clone.remove();
+    return text;
+  }
+  function collectPage() {
+    const out = [];
+    const containers = [...document.querySelectorAll("main [id]")].filter((el) => /^\d+$/.test(el.id) && (el.querySelector("input[type=radio]") || [...el.querySelectorAll("input")].some((i) => i.type === "text")));
+    for (const el of containers) {
+      const radios = [...el.querySelectorAll("input[type=radio]")];
+      const texts = [...el.querySelectorAll("input")].filter((i) => i.type === "text");
+      let kind;
+      let options = [];
+      let blanks = 0;
+      if (radios.length === 2) kind = "TRUE_OR_FALSE";
+      else if (radios.length > 2) {
+        kind = "MULTIPLE_CHOICE";
+        options = radios.map((r, i) => {
+          const label = r.closest("label");
+          const t = (label?.innerText || "").replace(/\s+/g, " ").trim();
+          return { idx: i, letter: LETTERS[i] || "?" + i, text: t };
+        });
+      } else if (texts.length) {
+        kind = "FILL_IN_THE_BLANK";
+        blanks = texts.length;
+      } else continue;
+      out.push({
+        id: el.id,
+        kind,
+        el,
+        radios,
+        texts,
+        options,
+        blanks,
+        hasImg: !!el.querySelector("img"),
+        answered: radios.length ? radios.some((r) => r.checked) : texts.some((t) => String(t.value || "").trim() !== ""),
+        text: cleanText(el)
+      });
+    }
+    return out;
+  }
+  function sidebarTypes() {
+    const psId = (location.pathname.match(EXAM_PROBLEMS_RE) || [])[1];
+    if (!psId) return [];
+    const out = [];
+    for (const a of document.querySelectorAll("a[href]")) {
+      const m = (a.getAttribute("href") || "").match(/^\/problem-sets\/(\d+)\/exam\/problems\/type\/(\d+)$/);
+      if (!m || m[1] !== psId) continue;
+      const mm = (a.innerText || "").replace(/\s+/g, " ").trim().match(/^(.+?)\s*(\d+)\s*\/\s*(\d+)$/);
+      if (!mm) continue;
+      out.push({ typeName: mm[1], answered: +mm[2], total: +mm[3], typeId: m[2] });
+    }
+    return out;
+  }
+  function fillRadio(q, letter) {
+    const idx = letter.charCodeAt(0) - 65;
+    const radio = q.radios[idx];
+    if (!radio || radio.disabled) return false;
+    radio.click();
+    return radio.checked;
+  }
+  function fillBlank(q, answers) {
+    const setInput = (inp, value) => {
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set;
+      setter.call(inp, value);
+      inp.dispatchEvent(new Event("input", { bubbles: true }));
+      inp.dispatchEvent(new Event("change", { bubbles: true }));
+    };
+    q.texts.forEach((inp, i) => setInput(inp, answers[i] ?? ""));
+    return true;
+  }
+  async function saveTypePage() {
+    const btn = [...document.querySelectorAll("button")].find((b) => (b.textContent || "").trim() === "\u4FDD\u5B58" && !b.disabled);
+    if (!btn) return { saved: false, reason: "\u627E\u4E0D\u5230\u4FDD\u5B58\u6309\u94AE" };
+    const mark = performance.now();
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      btn.click();
+      for (let i = 0; i < 50; i++) {
+        await sleep(100);
+        const hit = performance.getEntriesByType("resource").some((e) => e.startTime > mark && /\/exam-submissions(\?|$)/.test(e.name));
+        if (hit) {
+          await sleep(300);
+          return { saved: true };
+        }
+      }
+    }
+    return { saved: false, reason: "\u70B9\u51FB\u4FDD\u5B58\u540E\u672A\u89C1\u63D0\u4EA4\u8BF7\u6C42" };
+  }
+  function parseJsonLoose(text) {
+    const m = String(text).match(/\{[\s\S]*\}/);
+    if (!m) return null;
+    try {
+      return JSON.parse(m[0]);
+    } catch (_) {
+      return null;
+    }
+  }
+  async function chatOnce(cfg, messages) {
+    const base = String(cfg.baseUrl || "").trim().replace(/\/+$/, "");
+    const res = await fetch(base + "/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: "Bearer " + String(cfg.apiKey || "").trim(),
+        "x-opencode-session": sessionHeader(),
+        "User-Agent": "better-pta-problems/0.9"
+      },
+      body: JSON.stringify({ model: cfg.model, temperature: 0, messages })
+    });
+    if (!res.ok) {
+      const t = await res.text().catch(() => "");
+      throw new Error("LLM HTTP " + res.status + (t ? "\uFF1A" + t.slice(0, 140) : ""));
+    }
+    const data = await res.json();
+    const text = data?.choices?.[0]?.message?.content;
+    if (typeof text !== "string" || !text.trim()) throw new Error("LLM \u54CD\u5E94\u4E3A\u7A7A");
+    return text;
+  }
+  async function answerOne(q, cfg, overwrite) {
+    const messages = buildPrompt(q);
+    let raw = null;
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        raw = globalThis.__BPS_LLM_MOCK__ ? await globalThis.__BPS_LLM_MOCK__(messages) : await chatOnce(cfg, messages);
+        break;
+      } catch (err) {
+        if (attempt === 2) return "LLM \u8C03\u7528\u5931\u8D25\uFF1A" + (err?.message || err);
+        await sleep(900);
+      }
+    }
+    const json = parseJsonLoose(raw);
+    if (!json) return "LLM \u8F93\u51FA\u65E0\u6CD5\u89E3\u6790\uFF1A" + String(raw).slice(0, 60);
+    try {
+      if (q.kind === "MULTIPLE_CHOICE") {
+        const letter = parseChoiceAnswer(json.answer, q.radios.length);
+        if (!letter) return "LLM \u5B57\u6BCD\u7B54\u6848\u65E0\u6548\uFF1A" + String(json.answer).slice(0, 20);
+        if (!fillRadio(q, letter)) return "\u5199\u5165\u9009\u9879\u5931\u8D25";
+      } else if (q.kind === "TRUE_OR_FALSE") {
+        const tf = normalizeTF(json.answer);
+        if (!tf) return "LLM \u5224\u65AD\u7B54\u6848\u65E0\u6548\uFF1A" + String(json.answer).slice(0, 20);
+        if (!fillRadio(q, tf === "TRUE" ? "A" : "B")) return "\u5199\u5165\u9009\u9879\u5931\u8D25";
+      } else {
+        const answers = parseFillAnswers(json, q.blanks);
+        if (!answers) return `LLM \u586B\u7A7A\u7B54\u6848\u6570\u91CF\u4E0D\u7B26\uFF08\u9700 ${q.blanks} \u7A7A\uFF09`;
+        fillBlank(q, answers);
+      }
+    } catch (err) {
+      return "\u5199\u5165\u5931\u8D25\uFF1A" + (err?.message || err);
+    }
+    return null;
+  }
+  function pageScript(code) {
+    const s = document.createElement("script");
+    s.textContent = code;
+    (document.head || document.documentElement).appendChild(s);
+    s.remove();
+  }
+  function suppressLeaveConfirm() {
+    pageScript("window.__BPS_CONFIRM__ = window.confirm; window.confirm = () => true;");
+  }
+  function restoreLeaveConfirm() {
+    pageScript("if (window.__BPS_CONFIRM__) { window.confirm = window.__BPS_CONFIRM__; delete window.__BPS_CONFIRM__; }");
+  }
+  var running = false;
+  function isRunning() {
+    return running;
+  }
+  function emit(event) {
+    try {
+      chrome.runtime?.sendMessage?.({ type: "BPS_AUTOANSWER_EVENT", ...event }).catch?.(() => {
+      });
+    } catch (_) {
+    }
+  }
+  var progressOf = (stats) => ({
+    applied: stats.ok.length,
+    skippedAnswered: stats.skippedAnswered,
+    skippedImage: stats.skippedImage,
+    failed: stats.failed.map((f) => f.reason)
+  });
+  async function handleRun(config = {}) {
+    if (running) return { ok: false, error: "\u5DF2\u6709\u4E00\u6B21\u7B54\u9898\u5728\u8FD0\u884C\u4E2D" };
+    const m = location.pathname.match(EXAM_PROBLEMS_RE);
+    if (!m || !m[3]) return { ok: false, error: "\u8BF7\u5148\u8FDB\u5165\u9898\u76EE\u5217\u8868\u7684\u67D0\u4E2A\u9898\u578B\u9875\uFF08\u5224\u65AD/\u5355\u9009/\u586B\u7A7A\u6807\u7B7E\uFF09\u518D\u5F00\u59CB" };
+    const psId = m[1];
+    const cfg = {
+      baseUrl: config.baseUrl || config.autoAnswerBaseUrl || "",
+      apiKey: config.apiKey || config.autoAnswerApiKey || "",
+      model: config.model || config.autoAnswerModel || "",
+      overwrite: !!(config.overwrite ?? config.autoAnswerOverwrite),
+      drySave: !!config.drySave
+    };
+    if (!cfg.baseUrl || !cfg.apiKey || !cfg.model) {
+      return { ok: false, error: "\u8BF7\u5148\u5728\u5F39\u7A97\u586B\u5199\u670D\u52A1\u5668\u5730\u5740\u3001API Key \u4E0E\u6A21\u578B\u540D" };
+    }
+    running = true;
+    suppressLeaveConfirm();
+    const summary = { types: [], applied: 0, skippedAnswered: 0, skippedImage: 0, failed: [], savedTypes: 0, saveFails: [] };
+    try {
+      const types = sidebarTypes().filter((t) => TYPE_BY_NAME[t.typeName] || false).filter((t) => t.total > 0);
+      const unknown = sidebarTypes().filter((t) => !(t.typeName in TYPE_BY_NAME) && t.total > 0);
+      if (!types.length) throw new Error("\u672C\u9875\u4FA7\u680F\u6CA1\u6709\u53EF\u4F5C\u7B54\u7684\u9898\u578B");
+      if (unknown.length) summary.failed.push({ id: "-", reason: `\u6682\u4E0D\u652F\u6301\u9898\u578B\uFF1A${unknown.map((u) => u.typeName).join("\u3001")}\uFF08\u8DF3\u8FC7\uFF09` });
+      for (const t of types) {
+        if (!EXAM_PROBLEMS_RE.test(location.pathname) || !location.pathname.includes(psId)) {
+          throw new Error("\u5DF2\u79BB\u5F00\u539F\u9898\u76EE\u9875\uFF0C\u4E2D\u6B62");
+        }
+        if (!location.pathname.endsWith(`/type/${t.typeId}`)) {
+          const link = [...document.querySelectorAll("a[href]")].find((a) => (a.getAttribute("href") || "").match(`^/problem-sets/${psId}/exam/problems/type/${t.typeId}$`));
+          if (!link) throw new Error(`\u627E\u4E0D\u5230\u300C${t.typeName}\u300D\u7684\u9875\u9762\u94FE\u63A5`);
+          link.click();
+          const type2 = TYPE_BY_NAME[t.typeName];
+          let ready = false;
+          for (let i = 0; i < 60 && !ready; i++) {
+            await sleep(100);
+            ready = location.pathname.endsWith(`/type/${t.typeId}`) && collectPage().filter((q) => q.kind === type2).length >= t.total;
+          }
+          if (!ready) throw new Error(`\u300C${t.typeName}\u300D\u9875\u9762\u672A\u5C31\u7EEA\uFF08\u4FA7\u680F\u7EDF\u8BA1 ${t.total} \u9898\uFF09`);
+        }
+        await sleep(300);
+        const type = TYPE_BY_NAME[t.typeName];
+        const questions = collectPage().filter((q) => q.kind === type);
+        if (!questions.length) throw new Error(`\u300C${t.typeName}\u300D\u9875\u9762\u6536\u96C6\u4E0D\u5230\u9898\u76EE`);
+        const stats = { ok: [], skippedAnswered: 0, skippedImage: 0, failed: [] };
+        let done = 0;
+        const queue2 = questions.map((q, i) => ({ q, i }));
+        let cursor = 0;
+        const emitProgress = () => emit({ event: "progress", typeName: t.typeName, done, total: questions.length });
+        const worker = async () => {
+          while (cursor < queue2.length) {
+            const { q } = queue2[cursor++];
+            done += 1;
+            if (q.answered && !cfg.overwrite) {
+              stats.skippedAnswered += 1;
+              emitProgress();
+              continue;
+            }
+            if (q.hasImg) {
+              stats.skippedImage += 1;
+              emitProgress();
+              continue;
+            }
+            const err = await answerOne(q, cfg, cfg.overwrite);
+            if (err) stats.failed.push({ id: q.id, reason: err });
+            else stats.ok.push(q.id);
+            emitProgress();
+          }
+        };
+        await Promise.all(Array.from({ length: Math.min(3, queue2.length) }, worker));
+        const filled = stats.ok.length > 0;
+        let saved = null;
+        if (filled && !cfg.drySave) {
+          saved = await saveTypePage();
+          if (saved.saved) summary.savedTypes += 1;
+          else summary.saveFails.push(`${t.typeName}\uFF1A${saved.reason}`);
+        } else if (!filled) {
+          saved = { saved: false, reason: "\u672C\u9875\u65E0\u9700\u65B0\u7B54\u6848\uFF0C\u672A\u4FDD\u5B58" };
+        }
+        const pg = progressOf(stats);
+        summary.applied += pg.applied;
+        summary.skippedAnswered += pg.skippedAnswered;
+        summary.skippedImage += pg.skippedImage;
+        summary.failed.push(...stats.failed);
+        summary.types.push({ type: t.typeName, total: questions.length, applied: pg.applied, skippedAnswered: pg.skippedAnswered, skippedImage: pg.skippedImage, failed: stats.failed.length, saved: saved?.saved === true });
+        emit({ event: "typedone", typeName: t.typeName, ...pg, saved: saved?.saved === true });
+      }
+      const result = { ok: true, summary };
+      emit({ event: "done", summary });
+      return result;
+    } catch (err) {
+      const message = err?.message || String(err);
+      emit({ event: "done", summary, error: message });
+      return { ok: false, error: message, summary };
+    } finally {
+      running = false;
+      restoreLeaveConfirm();
+    }
   }
 
   // src/content/classify.js
@@ -516,7 +910,7 @@
     if (!rec.total) return null;
     return { answered: rec.answered, total: rec.total };
   }
-  function progressOf(id) {
+  function progressOf2(id) {
     return readProgress(cache.get(id));
   }
   function ensureProgress(items, now = Date.now()) {
@@ -926,7 +1320,7 @@
       }));
       if (settings.progress) ensureProgress(aggItems || []);
       const attachProgress = (list) => list.forEach((it) => {
-        it.progress = progressOf(it.id);
+        it.progress = progressOf2(it.id);
       });
       attachProgress(renamed);
       renamed.forEach((it) => decorate(it, settings));
@@ -969,7 +1363,7 @@
     }
     const mo = new MutationObserver((muts) => {
       for (const m of muts) {
-        const relevant = [...m.addedNodes, ...m.removedNodes].some((n) => n.nodeType === 1 && !n.closest?.(".bps-root"));
+        const relevant = [...m.addedNodes, ...m.removedNodes].some((n) => n.nodeType === 1 && !n.closest?.(".bps-root") && !n.closest?.(".bps-clone"));
         if (relevant) {
           scheduleSync();
           return;
@@ -990,6 +1384,18 @@
     setInterval(() => {
       if (state.root) refreshCountdowns(settings);
     }, 6e4);
+    if (typeof chrome !== "undefined" && chrome.runtime?.onMessage) {
+      chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+        if (msg?.type !== "BPS_AUTOANSWER_RUN") return void 0;
+        if (isRunning()) {
+          sendResponse({ ok: false, error: "\u5DF2\u6709\u4E00\u6B21\u7B54\u9898\u5728\u8FD0\u884C\u4E2D" });
+          return;
+        }
+        sendResponse({ ok: true, started: true });
+        handleRun(msg.config).catch((err) => console.warn("[\u66F4\u597D\u7684\u9898\u76EE\u96C6] \u81EA\u52A8\u7B54\u9898\u8FD0\u884C\u5F02\u5E38:", err?.message || err));
+        return void 0;
+      });
+    }
     armDirectCooldown();
     setTimeout(() => syncRemindersDirect(settings), 2e3);
     sync(true);
@@ -1001,6 +1407,11 @@
     DEFAULTS,
     // 自动答题调试与回归入口：run 走完整流程（配合 __BPS_LLM_MOCK__ 可 mock LLM），
     // collect 只收集当前题型页的题目（验证提取纯度用）
+    autoAnswer: {
+      run: (config = {}) => handleRun(config),
+      collect: () => collectPage(),
+      types: () => sidebarTypes()
+    },
     setSettings: async (patch) => {
       settings = { ...settings, ...patch };
       await saveSettings(settings);

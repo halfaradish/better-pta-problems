@@ -44,7 +44,7 @@
     }
     * { box-sizing: border-box; }
     body {
-      width: 360px; margin: 0; padding: 8px 16px 5px;
+      width: 360px; margin: 0; padding: 7px 16px 4px;
       background: var(--bg); color: var(--text);
       font: 13px/1.5 system-ui, "Microsoft YaHei", "PingFang SC", sans-serif;
       -webkit-font-smoothing: antialiased;
@@ -53,14 +53,14 @@
     input:focus-visible, textarea:focus-visible { outline: none; }
 
     /* ---------- 头部 ---------- */
-    .head { display: flex; align-items: center; gap: 10px; padding-bottom: 5px; }
+    .head { display: flex; align-items: center; gap: 10px; padding-bottom: 4px; }
     .head img { width: 30px; height: 30px; border-radius: 8px; }
     .head-title { display: flex; align-items: center; gap: 7px; font-size: 15px; font-weight: 650; letter-spacing: .01em; }
     .ver { font-size: 11px; font-weight: 500; line-height: 17px; padding: 0 7px; border: 1px solid var(--input-border); border-radius: 9999px; background: var(--input-bg); color: var(--text-2); }
-    .head-sub { margin-top: 1px; font-size: 12px; color: var(--text-3); }
+    .head-sub { margin-top: 0; font-size: 12px; color: var(--text-3); }
 
     main > * + * { border-top: 1px solid var(--hairline); }
-    section, details { padding: 4px 0 5px; }
+    section, details { padding: 4px 0 4px; }
 
     /* ---------- 开关（原生 checkbox 样式化，保留键盘与读屏语义） ---------- */
     .switch {
@@ -79,13 +79,13 @@
     .switch:checked::after { transform: translateX(16px); }
     .switch:disabled, input:disabled, textarea:disabled, button:disabled { opacity: .45; cursor: not-allowed; }
 
-    .row { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 28px; cursor: pointer; }
+    .row { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 26px; cursor: pointer; }
     .row .q { margin-left: 6px; font-size: 12px; color: var(--text-3); }
 
     /* ---------- 主开关行：面板的锚点控件，开启时整行淡蓝 ---------- */
     .master {
       display: flex; align-items: center; justify-content: space-between; gap: 12px;
-      margin: 0 -16px; padding: 6px 16px;
+      margin: 0 -16px; padding: 5px 16px;
       transition: background .18s ease;
     }
     .master:has(#enabled:checked) { background: var(--accent-soft); }
@@ -94,12 +94,12 @@
     .when-on, .when-off { display: none; font-size: 12px; color: var(--text-2); }
     .master:has(#enabled:checked) .when-on { display: block; }
     .master:not(:has(#enabled:checked)) .when-off { display: block; }
-    .rows { padding: 2px 0 0; }
+    .rows { padding: 1px 0 0; }
 
     /* ---------- 可折叠区块（课程识别） ---------- */
     summary {
       display: flex; align-items: center; justify-content: space-between; gap: 12px;
-      min-height: 28px; cursor: pointer; list-style: none; font-weight: 600;
+      min-height: 26px; cursor: pointer; list-style: none; font-weight: 600;
     }
     summary::-webkit-details-marker { display: none; }
     .caret {
@@ -110,25 +110,26 @@
     details[open] .caret { transform: rotate(225deg); }
 
     /* ---------- 字段 ---------- */
-    .field { margin-top: 6px; }
-    .field-label { display: block; margin-bottom: 4px; font-size: 12px; color: var(--text-2); }
-    input[type="text"], textarea {
+    .field { margin-top: 5px; }
+    .field-label { display: block; margin-bottom: 3px; font-size: 12px; color: var(--text-2); }
+    input[type="text"], input[type="password"], textarea {
       width: 100%; padding: 5px 9px;
       border: 1px solid var(--input-border); border-radius: 8px;
       background: var(--input-bg); color: var(--text); font: inherit;
       transition: border-color .15s ease, background .15s ease, box-shadow .15s ease;
     }
-    input[type="text"]:focus, textarea:focus {
+    input[type="text"]:focus, input[type="password"]:focus, textarea:focus {
       outline: none; border-color: var(--accent); background: var(--bg);
       box-shadow: 0 0 0 3px var(--accent-ring);
     }
     input::placeholder, textarea::placeholder { color: var(--text-3); }
     textarea { resize: vertical; min-height: 64px; }
     .hint { margin: 3px 0 0; font-size: 12px; color: var(--text-3); }
+    .status-pre { white-space: pre-line; }
 
     /* ---------- 提醒区 ---------- */
     .sec-head { font-weight: 600; margin-bottom: 2px; }
-    .test-row { display: flex; align-items: center; gap: 10px; margin-top: 5px; }
+    .test-row { display: flex; align-items: center; gap: 10px; margin-top: 4px; }
     .status { min-width: 0; font-size: 12px; color: var(--text-2); }
     .status.ok { color: var(--ok); font-weight: 500; }
     .status.err { color: var(--err); }
@@ -148,7 +149,7 @@
     /* ---------- 页脚 ---------- */
     footer {
       display: flex; align-items: center; justify-content: space-between; gap: 10px;
-      margin-top: 2px; padding-top: 7px; border-top: 1px solid var(--hairline);
+      margin-top: 1px; padding-top: 6px; border-top: 1px solid var(--hairline);
     }
     .repo {
       display: inline-flex; align-items: center; gap: 6px; min-width: 0; min-height: 28px;
@@ -167,7 +168,7 @@
   <header class="head">
     <img src="../icons/icon48.png" alt="" width="30" height="30">
     <div class="head-text">
-      <div class="head-title">更好的题目集 <span class="ver" id="version">v0.8.0</span></div>
+      <div class="head-title">更好的题目集 <span class="ver" id="version">v0.9.0</span></div>
       <div class="head-sub">PTA 题目集列表增强</div>
     </div>
   </header>
@@ -204,6 +205,28 @@
         <label class="field-label" for="rules">自定义规则</label>
         <textarea id="rules" rows="3" placeholder="例如：2025- => 2025级课程"></textarea>
         <p class="hint">每行一条「关键词=&gt;课程名」，包含匹配，优先于自动识别；无分隔符时按 作业/实验/考试/期中/复习题 等关键词识别</p>
+      </div>
+    </details>
+
+    <details>
+      <summary>自动答题（实验）<span class="caret" aria-hidden="true"></span></summary>
+      <div class="field">
+        <label class="field-label" for="autoAnswerBaseUrl">LLM 服务器地址</label>
+        <input type="text" id="autoAnswerBaseUrl" placeholder="例如 https://api.deepseek.com" autocomplete="off" spellcheck="false">
+        <p class="hint">OpenAI 兼容接口；端点需允许浏览器访问（主流厂商均可）</p>
+      </div>
+      <div class="field">
+        <label class="field-label" for="autoAnswerApiKey">API Key</label>
+        <input type="password" id="autoAnswerApiKey" placeholder="sk-…" autocomplete="off" spellcheck="false">
+      </div>
+      <div class="field">
+        <label class="field-label" for="autoAnswerModel">模型名</label>
+        <input type="text" id="autoAnswerModel" placeholder="例如 deepseek-chat" autocomplete="off" spellcheck="false">
+      </div>
+      <label class="row"><span class="row-text">覆盖已作答<span class="q">默认跳过已答题</span></span><input type="checkbox" class="switch" id="autoAnswerOverwrite"></label>
+      <div class="test-row">
+        <button type="button" id="autoAnswerStart" class="btn-primary">开始答题</button>
+        <span id="autoAnswerStatus" class="status status-pre" role="status" aria-live="polite"></span>
       </div>
     </details>
 

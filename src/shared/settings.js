@@ -15,10 +15,15 @@ export const DEFAULTS = {
   reminderEnabled: true,  // 题目关闭邮件提醒总开关（与下面两项配置配合；关闭即暂停同步）
   reminderServer: '',     // 邮件提醒后端地址（ip:port，可加 /令牌 后缀）；空 = 关闭
   reminderEmail: '',      // 提醒邮件接收邮箱
+  // 自动答题（实验）：OpenAI 兼容接口三项 + 覆盖重答开关，见 docs/自动答题初探.md §9
+  autoAnswerBaseUrl: '',  // 例如 https://api.deepseek.com（端点需允许浏览器跨域）；空 = 未配置
+  autoAnswerApiKey: '',
+  autoAnswerModel: '',
+  autoAnswerOverwrite: false, // 覆盖已作答的题目（默认跳过已答，避免把用户的正确答案改错）
   settingsVersion: 0,     // 0 = 旧版设置；v4 起「列表/分组」不再持久化（改为按路由的会话内状态）
 };
 
-export const SETTINGS_VERSION = 4;
+export const SETTINGS_VERSION = 5;
 
 // 扩展环境用 chrome.storage.sync（跨设备同步）；预览页 / 独立打开的弹窗退化为内存
 export const HAS_CHROME_STORAGE = typeof chrome !== 'undefined' && !!chrome.storage?.sync;
