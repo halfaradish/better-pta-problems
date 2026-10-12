@@ -1,0 +1,14 @@
+{
+  "name": "better-pta-problems",
+  "private": true,
+  "type": "module",
+  "description": "PTA 题目集列表增强浏览器扩展——构建脚本与单元测试（源码在 src/，产物在 extension/）",
+  "scripts": {
+    "build": "node tools/build.mjs",
+    "dev": "node tools/build.mjs --watch",
+    "test": "node --test"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2"
+  }
+}
