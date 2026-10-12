@@ -247,3 +247,31 @@
   color: #e03131;
   font-weight: 700;
 }
+
+/* 答题进度：完成状态胶囊（尺寸对齐 PTA 原生胶囊 px-3 py-1 / text-xs / rounded-xl） */
+.bps-done {
+  flex: none;
+  display: inline-block;
+  padding: 4px 12px;
+  border-radius: 0.75rem;
+  font-size: 12px;
+  line-height: 18px;
+  white-space: nowrap;
+}
+
+.bps-done[data-level="done"] {
+  background: rgba(64, 192, 87, 0.12);
+  color: #2f9e44;
+}
+
+.bps-done[data-level="todo"] {
+  background: rgba(232, 89, 12, 0.1);
+  color: #e8590c;
+}
+
+.bps-answered {
+  flex: none;
+  font-size: 11px;
+  line-height: 17px;
+  color: #868e96;
+}

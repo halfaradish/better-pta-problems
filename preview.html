@@ -43,13 +43,6 @@
   .item:hover .title { color: #0a4991; }
   .flex { display: flex; align-items: center; gap: 8px; }
   .sub .flex .flex { gap: 4px; }
-  .right { flex: none; }
-  .flexv { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
-  .pill { border-radius: 9999px; padding: 3px 12px; font-size: 12px; white-space: nowrap; }
-  .pill-green { background: rgba(64, 192, 87, 0.12); color: #2f9e44; }
-  .pill-blue  { background: rgba(28, 126, 214, 0.10); color: #1c7ed6; }
-  .pill-orange { background: rgba(232, 89, 12, 0.10); color: #e8590c; }
-  .pill-grey  { background: rgba(0, 0, 0, 0.06); color: #868e96; }
   .creator { flex: none; color: #868e96; }
 
   /* 分页条复刻（真实 PTA 结构为 paginationWrapper_* 的白底卡片） */
@@ -72,12 +65,17 @@
   .items-center { align-items: center; }
   .py-3 { padding-top: 12px; padding-bottom: 12px; }
   .px-4 { padding-left: 16px; padding-right: 16px; }
+  .px-3 { padding-left: 12px; padding-right: 12px; }
+  .py-1 { padding-top: 4px; padding-bottom: 4px; }
   .space-x-2 > * + * { margin-left: 8px; }
+  .space-x-1 > * + * { margin-left: 4px; }
   .space-y-1 > * + * { margin-top: 4px; }
   .flex-1 { flex: 1 1 0%; min-width: 0; }
+  .flex-auto { flex: 1 1 auto; min-width: 0; }
   .flex-none { flex: none; }
   .flex-col { flex-direction: column; }
   .items-end { align-items: flex-end; }
+  .break-words { overflow-wrap: break-word; }
   .rounded-lg { border-radius: 10px; }
   .bg-bg-base { background: #fff; }
   .shadow-sm { box-shadow: 0 1px 2px rgba(0,0,0,0.06); }
@@ -159,7 +157,7 @@
 
 <script>
   /* chrome.storage 仿真（预览页无扩展环境） */
-  window.__BPS_SETTINGS__ = { enabled: true, grouped: true, badge: true, countdown: true, separators: '--,｜,|', rules: '', reminderEnabled: true, reminderServer: '', reminderEmail: '' };
+  window.__BPS_SETTINGS__ = { enabled: true, grouped: true, badge: true, countdown: true, progress: true, separators: '--,｜,|', rules: '', reminderEnabled: true, reminderServer: '', reminderEmail: '' };
 
   /* 当前页（PTA 渲染的 16 张卡片，id 与 mock 接口数据一一对应） */
   const DATA = [
@@ -181,7 +179,12 @@
     { id: '2100000000000000151', title: '代数结构与初等数论｜作业11｜交换环、整除与域扩张', close: '2026-12-31 23:59', badges: [['已开放','blue']], creator: '教师A' },
   ];
 
-  const pill = ([t, c]) => `<div class="pill pill-${c}"><span>${t}</span></div>`;
+  const pillTone = { green: ['bg-green-500', 'pc-color-pass'], blue: ['bg-blue-500', 'pc-color-primary'], orange: ['bg-orange-500', 'pc-color-warning'], grey: ['bg-bg-light', 'pc-color-light'] };
+  /* 状态胶囊与 PTA 原生 DOM 同形——插件按这个结构找徽章行、在尾部插入「已完成/未完成」 */
+  const pill = ([t, c]) => {
+    const [bg, color] = pillTone[c] || pillTone.grey;
+    return `<div class="rounded-xl ${bg} bg-opacity-10 px-3 py-1 inline-block whitespace-nowrap flex-none"><div class="flex items-center space-x-1"><div class="pc-text ${color} pc-gap-4"><div class="pc-text-raw flex-auto break-words text-xs"><span>${t}</span></div></div></div></div>`;
+  };
   document.getElementById('list').innerHTML = DATA.map(o => `
     <a tabindex="0" href="/problem-sets/${o.id}/overview" class="item">
       <svg class="ic" viewBox="0 0 24 24"><rect x="2" y="4" width="20" height="13" rx="2" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M8 21h8M12 17v4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
@@ -191,7 +194,7 @@
           <div class="text-xs sub"><div class="flex"><div class="flex">关闭时间:<span>${o.close}</span></div></div></div>
         </div>
       </div>
-      <div class="right"><div><div class="flexv">${o.badges.map(pill).join('')}</div></div></div>
+      <div class="flex-none flex-col items-end space-y-1 flex"><div><div class="flex space-x-2 items-center">${o.badges.map(pill).join('')}</div></div></div>
       <div class="text-xs creator">${o.creator}</div>
     </a>`).join('');
 
@@ -222,13 +225,38 @@
     P('2200000000000000019', '2024程序设计基础-作业11', '2024-12-20T01:00:00Z', '2025-01-02T16:00:00Z', '教师E'),
     P('2200000000000000020', '2024程序设计基础-作业10', '2024-12-20T01:00:00Z', '2025-01-02T16:00:00Z', '教师E'),
     P('2200000000000000021', '2024程序设计基础-242-作业9', '2024-12-20T01:00:00Z', '2025-01-02T16:00:00Z', '教师E'),
+    P('2200000000000000022', '算法设计与分析--课堂练习2-2', '2026-10-12T00:00:00Z', '2026-10-25T15:59:00Z', '教师A'), // 未关闭的考试集（走重建卡片路径验证答题进度）
   ];
   const MOCK_EXAM_IDS = {};
   for (const p of MOCK_PROBLEM_SETS) {
-    if (/课堂练习|作业07|数据结构-(实验|作业八)|数据结构复习题/.test(p.name)) MOCK_EXAM_IDS[p.id] = 'exam';
+    if (/课堂练习|作业07|数据结构-(实验|作业八)|数据结构复习题/.test(p.name)) MOCK_EXAM_IDS[p.id] = '9' + p.id.slice(1);
   }
+  /* 答题进度 mock：响应形状同真实的 problem-status（PROBLEM_SUBMITTED = 已作答）。
+     刻意覆盖三种状态：已完成、部分作答、一题没做。 */
+  const MOCK_PROGRESS = {
+    '2100000000000000137': { answered: 12, total: 12 },
+    '2100000000000000138': { answered: 7, total: 15 },
+    '2100000000000000139': { answered: 0, total: 20 },
+    '2200000000000000022': { answered: 5, total: 12 },
+    '2100000000000000147': { answered: 1, total: 1 },
+  };
+  const DEFAULT_PROGRESS = { answered: 0, total: 6 };
+
   window.__BPS_MOCK_API__ = true;
-  window.__BPS_FETCH_JSON__ = async () => ({ total: MOCK_PROBLEM_SETS.length, problemSets: MOCK_PROBLEM_SETS, examIdByProblemSetId: MOCK_EXAM_IDS, homeworkByProblemSetId: {} });
+  window.__BPS_FETCH_JSON__ = async url => {
+    if (String(url).includes('/problem-status')) {
+      const id = /problem-sets\/(\d+)\/problem-status/.exec(String(url))?.[1];
+      const { answered, total } = MOCK_PROGRESS[id] || DEFAULT_PROGRESS;
+      return {
+        problemStatus: Array.from({ length: total }, (_, i) => ({
+          id: `mock-problem-${i}`,
+          problemType: 'MULTIPLE_CHOICE',
+          problemSubmissionStatus: i < answered ? 'PROBLEM_SUBMITTED' : 'PROBLEM_NO_ANSWER',
+        })),
+      };
+    }
+    return { total: MOCK_PROBLEM_SETS.length, problemSets: MOCK_PROBLEM_SETS, examIdByProblemSetId: MOCK_EXAM_IDS, homeworkByProblemSetId: {} };
+  };
 
   // 预览页不是真实 PTA 路由，放开路径限制以便本地验证
   window.__BPS_FORCE_LIST__ = true;

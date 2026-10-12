@@ -16,6 +16,8 @@
     // 同一教师下相似课程名自动归并为同一门课
     openInNewTab: true,
     // 点开题目集在新标签页打开（绕过 PTA 的 SPA 同页跳转）
+    progress: true,
+    // 考试型题目集的答题进度（只对未关闭的拉取，见 content/progress.js）
     reminderEnabled: true,
     // 题目关闭邮件提醒总开关（与下面两项配置配合；关闭即暂停同步）
     reminderServer: "",
@@ -155,6 +157,8 @@
         startAt,
         closeAt,
         badges,
+        examId: examMap && examMap[p.id] ? String(examMap[p.id]) : "",
+        // 关联考试，答题进度的取数钥匙
         creator: p.ownerNickname || "",
         org: p.organizationName || ""
       };
@@ -181,6 +185,7 @@
       }
     }
     const seen = /* @__PURE__ */ new Set();
+    for (const it of items) if (!it.examId) it.examId = examMap[it.id] ? String(examMap[it.id]) : "";
     return items.filter((i) => !seen.has(i.id) && seen.add(i.id));
   }
   function startAggregate(key) {
@@ -419,6 +424,45 @@
       c.title = `\u5173\u95ED\u65F6\u95F4 ${fmtCloseLocal(it.closeAt)}`;
     }
   }
+  function pillRow(scopeEl) {
+    const pill = scopeEl.querySelector('div[class~="rounded-xl"][class*="bg-opacity-10"]');
+    return pill ? pill.parentElement : null;
+  }
+  function updateProgress(scopeEl, it, s) {
+    const p = s.progress && it.progress && it.progress.total > 0 ? it.progress : null;
+    const pill = scopeEl.querySelector(".bps-done");
+    const text = scopeEl.querySelector(".bps-answered");
+    if (!p) {
+      pill?.remove();
+      text?.remove();
+      return;
+    }
+    const done = p.answered >= p.total;
+    const row = pillRow(scopeEl);
+    if (row) {
+      const el = pill || document.createElement("span");
+      if (!pill) {
+        el.className = "bps-done";
+        row.append(el);
+      }
+      if (el.dataset.stamp !== (done ? "done" : "todo")) {
+        el.dataset.stamp = done ? "done" : "todo";
+        el.dataset.level = done ? "done" : "todo";
+        el.textContent = done ? "\u5DF2\u5B8C\u6210" : "\u672A\u5B8C\u6210";
+      }
+    }
+    const line = metaLine(scopeEl);
+    const target = line && (line.querySelector(".flex .flex") || line.querySelector(".flex"));
+    if (target) {
+      const el = text || document.createElement("span");
+      if (!text) {
+        el.className = "bps-answered";
+        target.append(el);
+      }
+      const label = `\u5DF2\u4F5C\u7B54 ${p.answered}/${p.total}`;
+      if (el.textContent !== label) el.textContent = label;
+    }
+  }
   function decorate(it, s) {
     const el = it.el;
     if (s.badge && it.course) {
@@ -438,6 +482,69 @@
       }
     }
     updateCountdown(el, it, s);
+    updateProgress(el, it, s);
+  }
+
+  // src/content/progress.js
+  var OK_TTL = 2 * 60 * 1e3;
+  var FAIL_TTL = 10 * 60 * 1e3;
+  var CONCURRENCY = 3;
+  var cache = /* @__PURE__ */ new Map();
+  var queued = /* @__PURE__ */ new Set();
+  var queue = [];
+  var active = 0;
+  var hooks2 = {};
+  function setProgressHooks(next) {
+    hooks2 = { ...hooks2, ...next };
+  }
+  function progressUrl(examId, problemSetId) {
+    return `/api/exams/${encodeURIComponent(examId)}/problem-sets/${encodeURIComponent(problemSetId)}/problem-status?_bps=progress`;
+  }
+  function countAnswered(json) {
+    const list = json?.problemStatus || [];
+    return {
+      answered: list.filter((p) => p.problemSubmissionStatus === "PROBLEM_SUBMITTED").length,
+      total: list.length
+    };
+  }
+  function wantsProgress(it, now = Date.now()) {
+    return !!(it?.examId && it.startAt && it.closeAt && +it.startAt <= now && +it.closeAt > now);
+  }
+  function readProgress(rec, now = Date.now()) {
+    if (!rec || !rec.ok) return null;
+    if (now - rec.at > OK_TTL) return null;
+    if (!rec.total) return null;
+    return { answered: rec.answered, total: rec.total };
+  }
+  function progressOf(id) {
+    return readProgress(cache.get(id));
+  }
+  function ensureProgress(items, now = Date.now()) {
+    for (const it of (items || []).filter((x) => wantsProgress(x, now))) {
+      const rec = cache.get(it.id);
+      if (rec && (rec.ok ? now - rec.at <= OK_TTL : now - rec.at <= FAIL_TTL)) continue;
+      if (queued.has(it.id)) continue;
+      queued.add(it.id);
+      queue.push({ id: it.id, examId: it.examId });
+    }
+    pump();
+  }
+  function pump() {
+    while (active < CONCURRENCY && queue.length) {
+      const job = queue.shift();
+      active++;
+      fetchJson(progressUrl(job.examId, job.id)).then((json) => {
+        cache.set(job.id, { at: Date.now(), ok: true, ...countAnswered(json) });
+      }).catch((err) => {
+        cache.set(job.id, { at: Date.now(), ok: false });
+        console.warn(`[\u66F4\u597D\u7684\u9898\u76EE\u96C6] \u7B54\u9898\u8FDB\u5EA6\u83B7\u53D6\u5931\u8D25\uFF08\u9898\u76EE\u96C6 ${job.id}\uFF09: ${err?.message || err}`);
+      }).finally(() => {
+        active--;
+        queued.delete(job.id);
+        hooks2.onUpdate?.();
+        pump();
+      });
+    }
   }
 
   // src/content/reminders.js
@@ -516,9 +623,9 @@
     // 原生列表模式下筛选条独立插入（不包在 .bps-root 里）
     items: []
   };
-  var hooks2 = {};
+  var hooks3 = {};
   function setViewHooks(next) {
-    hooks2 = { ...hooks2, ...next };
+    hooks3 = { ...hooks3, ...next };
   }
   function resetForRoute() {
     state.filter = "ALL";
@@ -554,8 +661,11 @@
         id: ai.id,
         title: ai.title,
         course: det.locked ? det.course : renameMap.get(det.course) || det.course,
+        startAt: ai.startAt,
         closeAt: ai.closeAt,
         closeText: fmtCloseLocal(ai.closeAt),
+        examId: ai.examId || "",
+        // 答题进度的取数钥匙（入口据此挂 it.progress）
         el: el || buildApiCard(ai),
         fromDom: !!el
       };
@@ -602,7 +712,7 @@
         if (state.filter === key) return;
         state.filter = key;
         state.page = 1;
-        hooks2.rerender?.();
+        hooks3.rerender?.();
       });
       return chip;
     };
@@ -616,7 +726,7 @@
       toggle.addEventListener("click", () => {
         state.grouped = !state.grouped;
         state.page = 1;
-        hooks2.rerender?.();
+        hooks3.rerender?.();
       });
       bar.appendChild(toggle);
     }
@@ -688,7 +798,7 @@
     const go = (p) => {
       if (p < 1 || p > totalPages || p === state.page) return;
       state.page = p;
-      hooks2.rerender?.();
+      hooks3.rerender?.();
       const anchor = state.root;
       if (anchor) anchor.scrollIntoView({ block: "start", behavior: "instant" });
     };
@@ -765,7 +875,7 @@
   }
   function teardown() {
     removeRoot();
-    document.querySelectorAll(".bps-badge, .bps-countdown").forEach((n) => n.remove());
+    document.querySelectorAll(".bps-badge, .bps-countdown, .bps-done, .bps-answered").forEach((n) => n.remove());
     state.sig = "";
     state.items = [];
   }
@@ -787,6 +897,7 @@
     onSettled: () => sync(true)
   });
   setViewHooks({ rerender: () => sync(true) });
+  setProgressHooks({ onUpdate: () => scheduleSync() });
   function sync(force = false) {
     try {
       if (!settings.enabled || !window.__BPS_FORCE_LIST__ && !LIST_PATH_RE.test(location.pathname)) {
@@ -813,12 +924,18 @@
         ...d,
         course: d.locked ? d.course : renameMap.get(d.course) || d.course
       }));
+      if (settings.progress) ensureProgress(aggItems || []);
+      const attachProgress = (list) => list.forEach((it) => {
+        it.progress = progressOf(it.id);
+      });
+      attachProgress(renamed);
       renamed.forEach((it) => decorate(it, settings));
       const uni = unifiedItems(renamed, settings, renameMap, aggItems);
       state.items = uni;
+      attachProgress(uni);
       uni.forEach((it) => decorate(it, settings));
       const domSig = domItems.map((i) => i.id).join(",");
-      const sig = `${state.grouped}#${state.filter}#${state.page}#${domSig}#${uni.map((i) => `${i.id}|${i.course}|${i.closeText}`).join(";")}`;
+      const sig = `${state.grouped}#${state.filter}#${state.page}#${domSig}#${uni.map((i) => `${i.id}|${i.course}|${i.closeText}|${i.progress ? `${i.progress.answered}/${i.progress.total}` : "-"}`).join(";")}`;
       const nativeListMode = state.filter === "ALL" && !state.grouped;
       const hiddenOk = nativeListMode ? listEl.style.display !== "none" : listEl.style.display === "none";
       const anchor = state.root || state.bar;
@@ -882,6 +999,8 @@
     sync,
     teardown,
     DEFAULTS,
+    // 自动答题调试与回归入口：run 走完整流程（配合 __BPS_LLM_MOCK__ 可 mock LLM），
+    // collect 只收集当前题型页的题目（验证提取纯度用）
     setSettings: async (patch) => {
       settings = { ...settings, ...patch };
       await saveSettings(settings);

@@ -80,8 +80,10 @@ export function unifiedItems(domItems, settings, renameMap, aggItems) {
       id: ai.id,
       title: ai.title,
       course: det.locked ? det.course : (renameMap.get(det.course) || det.course),
+      startAt: ai.startAt,
       closeAt: ai.closeAt,
       closeText: fmtCloseLocal(ai.closeAt),
+      examId: ai.examId || '',   // 答题进度的取数钥匙（入口据此挂 it.progress）
       el: el || buildApiCard(ai),
       fromDom: !!el,
     };
@@ -318,7 +320,7 @@ export function removeRoot() {
 
 export function teardown() {
   removeRoot();
-  document.querySelectorAll('.bps-badge, .bps-countdown').forEach(n => n.remove());
+  document.querySelectorAll('.bps-badge, .bps-countdown, .bps-done, .bps-answered').forEach(n => n.remove());
   state.sig = '';
   state.items = [];
 }

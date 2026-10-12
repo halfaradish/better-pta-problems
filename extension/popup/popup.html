@@ -53,14 +53,14 @@
     input:focus-visible, textarea:focus-visible { outline: none; }
 
     /* ---------- 头部 ---------- */
-    .head { display: flex; align-items: center; gap: 10px; padding-bottom: 6px; }
+    .head { display: flex; align-items: center; gap: 10px; padding-bottom: 5px; }
     .head img { width: 30px; height: 30px; border-radius: 8px; }
     .head-title { display: flex; align-items: center; gap: 7px; font-size: 15px; font-weight: 650; letter-spacing: .01em; }
     .ver { font-size: 11px; font-weight: 500; line-height: 17px; padding: 0 7px; border: 1px solid var(--input-border); border-radius: 9999px; background: var(--input-bg); color: var(--text-2); }
     .head-sub { margin-top: 1px; font-size: 12px; color: var(--text-3); }
 
     main > * + * { border-top: 1px solid var(--hairline); }
-    section, details { padding: 5px 0 7px; }
+    section, details { padding: 4px 0 5px; }
 
     /* ---------- 开关（原生 checkbox 样式化，保留键盘与读屏语义） ---------- */
     .switch {
@@ -79,7 +79,7 @@
     .switch:checked::after { transform: translateX(16px); }
     .switch:disabled, input:disabled, textarea:disabled, button:disabled { opacity: .45; cursor: not-allowed; }
 
-    .row { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 30px; cursor: pointer; }
+    .row { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 28px; cursor: pointer; }
     .row .q { margin-left: 6px; font-size: 12px; color: var(--text-3); }
 
     /* ---------- 主开关行：面板的锚点控件，开启时整行淡蓝 ---------- */
@@ -99,7 +99,7 @@
     /* ---------- 可折叠区块（课程识别） ---------- */
     summary {
       display: flex; align-items: center; justify-content: space-between; gap: 12px;
-      min-height: 30px; cursor: pointer; list-style: none; font-weight: 600;
+      min-height: 28px; cursor: pointer; list-style: none; font-weight: 600;
     }
     summary::-webkit-details-marker { display: none; }
     .caret {
@@ -110,7 +110,7 @@
     details[open] .caret { transform: rotate(225deg); }
 
     /* ---------- 字段 ---------- */
-    .field { margin-top: 7px; }
+    .field { margin-top: 6px; }
     .field-label { display: block; margin-bottom: 4px; font-size: 12px; color: var(--text-2); }
     input[type="text"], textarea {
       width: 100%; padding: 5px 9px;
@@ -124,11 +124,11 @@
     }
     input::placeholder, textarea::placeholder { color: var(--text-3); }
     textarea { resize: vertical; min-height: 64px; }
-    .hint { margin: 4px 0 0; font-size: 12px; color: var(--text-3); }
+    .hint { margin: 3px 0 0; font-size: 12px; color: var(--text-3); }
 
     /* ---------- 提醒区 ---------- */
     .sec-head { font-weight: 600; margin-bottom: 2px; }
-    .test-row { display: flex; align-items: center; gap: 10px; margin-top: 6px; }
+    .test-row { display: flex; align-items: center; gap: 10px; margin-top: 5px; }
     .status { min-width: 0; font-size: 12px; color: var(--text-2); }
     .status.ok { color: var(--ok); font-weight: 500; }
     .status.err { color: var(--err); }
@@ -167,7 +167,7 @@
   <header class="head">
     <img src="../icons/icon48.png" alt="" width="30" height="30">
     <div class="head-text">
-      <div class="head-title">更好的题目集 <span class="ver" id="version">v0.7.2</span></div>
+      <div class="head-title">更好的题目集 <span class="ver" id="version">v0.8.0</span></div>
       <div class="head-sub">PTA 题目集列表增强</div>
     </div>
   </header>
@@ -189,6 +189,7 @@
         <label class="row"><span class="row-text">截止倒计时<span class="q">剩 7 天内显示</span></span><input type="checkbox" class="switch" id="countdown" checked></label>
         <label class="row"><span class="row-text">同教师课程归并</span><input type="checkbox" class="switch" id="mergeSimilar" checked></label>
         <label class="row"><span class="row-text">新标签页打开题目集</span><input type="checkbox" class="switch" id="openInNewTab" checked></label>
+        <label class="row"><span class="row-text">答题进度<span class="q">考试型题目集</span></span><input type="checkbox" class="switch" id="progress" checked></label>
       </div>
     </section>
 

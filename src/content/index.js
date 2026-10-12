@@ -12,6 +12,7 @@ import { LIST_PATH_RE, SET_HREF_RE } from '../shared/paths.js';
 import * as agg from './aggregate.js';
 import { buildCourseRenameMap } from './classify.js';
 import { decorate, extractItems } from './decorate.js';
+import * as progress from './progress.js';
 import * as reminders from './reminders.js';
 import * as view from './list-view.js';
 
@@ -24,6 +25,8 @@ agg.setAggregateHooks({
   onSettled: () => sync(true),
 });
 view.setViewHooks({ rerender: () => sync(true) });
+// 进度逐个返回，落地即重建（scheduleSync 自带防抖，避免一批请求触发一串重建）
+progress.setProgressHooks({ onUpdate: () => scheduleSync() });
 
 function sync(force = false) {
   try {
@@ -53,15 +56,21 @@ function sync(force = false) {
       course: d.locked ? d.course : (renameMap.get(d.course) || d.course),
     }));
 
+    // 答题进度：考试型且未关闭的题目集才取数（aggItems 带 examId/时间），按 id 挂到卡片上
+    if (settings.progress) progress.ensureProgress(aggItems || []);
+    const attachProgress = list => list.forEach(it => { it.progress = progress.progressOf(it.id); });
+    attachProgress(renamed);
     renamed.forEach(it => decorate(it, settings)); // 原始卡片徽章/倒计时（列表模式直接可见）
 
     const uni = view.unifiedItems(renamed, settings, renameMap, aggItems);
     view.state.items = uni;
+    attachProgress(uni);
     uni.forEach(it => decorate(it, settings)); // API 卡片补徽章/倒计时；DOM 卡片幂等
 
-    // 签名含 DOM 条目指纹与筛选/模式/页码：SPA 换页、筛选、模式、翻页都触发内容重建
+    // 签名含 DOM 条目指纹与筛选/模式/页码：SPA 换页、筛选、模式、翻页都触发内容重建；
+    // 进度晚到（逐个接口）也靠它触发重建，卡片上的「已作答 X/Y」才会出现
     const domSig = domItems.map(i => i.id).join(',');
-    const sig = `${view.state.grouped}#${view.state.filter}#${view.state.page}#${domSig}#${uni.map(i => `${i.id}|${i.course}|${i.closeText}`).join(';')}`;
+    const sig = `${view.state.grouped}#${view.state.filter}#${view.state.page}#${domSig}#${uni.map(i => `${i.id}|${i.course}|${i.closeText}|${i.progress ? `${i.progress.answered}/${i.progress.total}` : '-'}`).join(';')}`;
     // 默认态（全部+列表）要求原生列表可见；分组/课程筛选态要求其隐藏
     const nativeListMode = view.state.filter === 'ALL' && !view.state.grouped;
     const hiddenOk = nativeListMode ? listEl.style.display !== 'none' : listEl.style.display === 'none';
@@ -128,6 +137,8 @@ async function init() {
 
 window.BPS = {
   init, sync, teardown: view.teardown, DEFAULTS,
+  // 自动答题调试与回归入口：run 走完整流程（配合 __BPS_LLM_MOCK__ 可 mock LLM），
+  // collect 只收集当前题型页的题目（验证提取纯度用）
   setSettings: async patch => {
     settings = { ...settings, ...patch };
     await saveSettings(settings);

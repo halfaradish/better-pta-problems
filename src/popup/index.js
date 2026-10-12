@@ -11,7 +11,7 @@ const hasChrome = HAS_CHROME_STORAGE;
 async function load() {
   // 迁移结果不在这里写回：等用户真正保存时，随 collect() 的 settingsVersion 一起落盘
   stored = await loadSettings();
-  for (const k of ['enabled', 'badge', 'countdown', 'mergeSimilar', 'openInNewTab']) $(k).checked = !!stored[k];
+  for (const k of ['enabled', 'badge', 'countdown', 'mergeSimilar', 'openInNewTab', 'progress']) $(k).checked = !!stored[k];
   $('separators').value = stored.separators;
   $('rules').value = stored.rules || '';
   $('reminderEnabled').checked = stored.reminderEnabled !== false;
@@ -31,6 +31,7 @@ function collect() {
     countdown: $('countdown').checked,
     mergeSimilar: $('mergeSimilar').checked,
     openInNewTab: $('openInNewTab').checked,
+    progress: $('progress').checked,
     separators: $('separators').value.trim() || DEFAULTS.separators,
     rules: $('rules').value.trim(),
     reminderEnabled: $('reminderEnabled').checked,
@@ -91,7 +92,7 @@ async function resumeTestCooldown() {
   if (left > 0) startTestCooldown(left);
 }
 
-for (const k of ['enabled', 'badge', 'countdown', 'mergeSimilar', 'openInNewTab']) $(k).addEventListener('change', save);
+for (const k of ['enabled', 'badge', 'countdown', 'mergeSimilar', 'openInNewTab', 'progress']) $(k).addEventListener('change', save);
 $('separators').addEventListener('input', save);
 $('rules').addEventListener('input', save);
 $('reminderServer').addEventListener('input', save);

@@ -16,6 +16,8 @@
     // 同一教师下相似课程名自动归并为同一门课
     openInNewTab: true,
     // 点开题目集在新标签页打开（绕过 PTA 的 SPA 同页跳转）
+    progress: true,
+    // 考试型题目集的答题进度（只对未关闭的拉取，见 content/progress.js）
     reminderEnabled: true,
     // 题目关闭邮件提醒总开关（与下面两项配置配合；关闭即暂停同步）
     reminderServer: "",
@@ -76,7 +78,7 @@
   var hasChrome = HAS_CHROME_STORAGE;
   async function load() {
     stored = await loadSettings();
-    for (const k of ["enabled", "badge", "countdown", "mergeSimilar", "openInNewTab"]) $(k).checked = !!stored[k];
+    for (const k of ["enabled", "badge", "countdown", "mergeSimilar", "openInNewTab", "progress"]) $(k).checked = !!stored[k];
     $("separators").value = stored.separators;
     $("rules").value = stored.rules || "";
     $("reminderEnabled").checked = stored.reminderEnabled !== false;
@@ -94,6 +96,7 @@
       countdown: $("countdown").checked,
       mergeSimilar: $("mergeSimilar").checked,
       openInNewTab: $("openInNewTab").checked,
+      progress: $("progress").checked,
       separators: $("separators").value.trim() || DEFAULTS.separators,
       rules: $("rules").value.trim(),
       reminderEnabled: $("reminderEnabled").checked,
@@ -144,7 +147,7 @@
     const left = Math.ceil((sentAt + TEST_COOLDOWN_MS - Date.now()) / 1e3);
     if (left > 0) startTestCooldown(left);
   }
-  for (const k of ["enabled", "badge", "countdown", "mergeSimilar", "openInNewTab"]) $(k).addEventListener("change", save);
+  for (const k of ["enabled", "badge", "countdown", "mergeSimilar", "openInNewTab", "progress"]) $(k).addEventListener("change", save);
   $("separators").addEventListener("input", save);
   $("rules").addEventListener("input", save);
   $("reminderServer").addEventListener("input", save);

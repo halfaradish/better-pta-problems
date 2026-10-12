@@ -57,6 +57,42 @@ export function updateCountdown(scopeEl, it, s) {
   }
 }
 
+// 状态徽章行：PTA 结构为 .flex.space-x-2.items-center > .rounded-xl（胶囊）
+function pillRow(scopeEl) {
+  const pill = scopeEl.querySelector('div[class~="rounded-xl"][class*="bg-opacity-10"]');
+  return pill ? pill.parentElement : null;
+}
+
+// 答题进度：徽章行尾部加「已完成/未完成」胶囊，副标题行尾加「已作答 X/Y」。
+// 只在拿到进度（考试型 + 已开始 + 未关闭，见 progress.js）时出现，其余题目集与之前一样。
+export function updateProgress(scopeEl, it, s) {
+  const p = s.progress && it.progress && it.progress.total > 0 ? it.progress : null;
+  const pill = scopeEl.querySelector('.bps-done');
+  const text = scopeEl.querySelector('.bps-answered');
+  if (!p) { pill?.remove(); text?.remove(); return; }
+
+  const done = p.answered >= p.total;
+  const row = pillRow(scopeEl);
+  if (row) {
+    const el = pill || document.createElement('span');
+    if (!pill) { el.className = 'bps-done'; row.append(el); }
+    if (el.dataset.stamp !== (done ? 'done' : 'todo')) {
+      el.dataset.stamp = done ? 'done' : 'todo';
+      el.dataset.level = done ? 'done' : 'todo';
+      el.textContent = done ? '已完成' : '未完成';
+    }
+  }
+
+  const line = metaLine(scopeEl);
+  const target = line && (line.querySelector('.flex .flex') || line.querySelector('.flex'));
+  if (target) {
+    const el = text || document.createElement('span');
+    if (!text) { el.className = 'bps-answered'; target.append(el); }
+    const label = `已作答 ${p.answered}/${p.total}`;
+    if (el.textContent !== label) el.textContent = label;
+  }
+}
+
 export function decorate(it, s) {
   const el = it.el;
   if (s.badge && it.course) {
@@ -76,4 +112,5 @@ export function decorate(it, s) {
     }
   }
   updateCountdown(el, it, s);
+  updateProgress(el, it, s);
 }

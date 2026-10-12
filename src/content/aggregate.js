@@ -94,6 +94,7 @@ export function normalizeApiItems(list, examMap) {
       id: String(p.id),
       title: p.name || '',
       startAt, closeAt, badges,
+      examId: (examMap && examMap[p.id]) ? String(examMap[p.id]) : '', // 关联考试，答题进度的取数钥匙
       creator: p.ownerNickname || '',
       org: p.organizationName || '',
     };
@@ -121,6 +122,8 @@ export async function aggregateAll(keyUrl, signal) {
     }
   }
   const seen = new Set();
+  // 兜底分页时后面的页才带回考试关联，前面已归一化的条目要补一次 examId（否则漏进度）
+  for (const it of items) if (!it.examId) it.examId = examMap[it.id] ? String(examMap[it.id]) : '';
   return items.filter(i => !seen.has(i.id) && seen.add(i.id));
 }
 
