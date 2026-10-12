@@ -8,29 +8,50 @@
 
 ```
 better-pta-problems/
-├── preview.html              # 设计预览页（复刻 PTA DOM + mock 接口 + 实际运行 core.js）
-├── extension/
+├── src/                      # 扩展源码（构建入口）
+│   ├── shared/               # 内容脚本与弹窗共用：设置定义与迁移、PTA URL 形状、时间、小工具
+│   ├── content/              # 内容脚本：课程识别与归并、跨页聚合、视图渲染、原生卡片装饰、提醒上报
+│   ├── background/           # 邮件提醒的消息转发（→ 用户自建后端）
+│   └── popup/                # 工具栏弹窗（开关 + 分隔符 + 自定义规则 + 邮件提醒配置）
+├── extension/                # 构建产物 + 静态资源（发版 Zip 的来源，可直接加载）
 │   ├── manifest.json         # MV3 清单
-│   ├── background.js         # 邮件提醒的消息转发（→ 用户自建后端）
+│   ├── background.js         # ← 由 src/background/ 构建
 │   ├── content/
-│   │   ├── core.js           # 全部核心逻辑（识别/聚合/渲染/同步/提醒上报）
+│   │   ├── core.js           # ← 由 src/content/ 构建（勿直接编辑）
 │   │   └── styles.css        # 注入样式（浅色，对齐 PTA 默认主题）
-│   ├── popup/                # 工具栏弹窗（开关 + 分隔符 + 自定义规则 + 邮件提醒配置）
+│   ├── popup/                # ← popup.js 由 src/popup/ 构建
 │   └── icons/                # 扩展图标
+├── test/                     # node:test 单元测试（识别/归并/整组分页/时间文案/设置迁移/数据源记账）
+├── preview.html              # 设计预览页（复刻 PTA DOM + mock 接口 + 实际运行 core.js 产物）
+├── package.json              # 构建（esbuild）与测试脚本
 ├── server/                   # 题目关闭邮件提醒后端（Node + node:sqlite + Nodemailer，部署见其 README）
 ├── docs/                     # 设计文档（索引见上表）
 │   ├── 核心结论.md
 │   ├── 课程识别策略.md
 │   ├── 布局设计.md
 │   └── 路线图.md
-└── tools/                    # 图标生成、本地预览服务器
+└── tools/                    # 构建脚本、图标生成、本地预览服务器
 ```
 
 ## 安装与更新
 
-1. `chrome://extensions`（Edge 为 `edge://extensions`）→ 开发者模式 →「加载已解压的扩展程序」→ 选 `extension/` 目录。
+1. `chrome://extensions`（Edge 为 `edge://extensions`）→ 开发者模式 →「加载已解压的扩展程序」→ 选 `extension/` 目录（构建产物已随仓库提交，克隆后无需先构建）。
 2. **已装过旧版本**：在扩展卡片上点「刷新」（↻）后，重新打开题目集列表页。
 3. 本地预览：浏览器直接打开 `preview.html`（mock 了数据与接口，实际运行 `core.js`，可验证聚合/筛选/折叠/模式切换）。
+
+## 开发与构建
+
+源码在 `src/`，用 [esbuild](https://esbuild.github.io/) 打包成单文件写回 `extension/` 的**原有路径**——`manifest.json`、`preview.html` 与发版流程因此都不用改，产物也提交进仓库，克隆后可直接加载。
+
+```bash
+npm install
+npm run build     # 一次性构建（改完 src/ 必须跑一次）
+npm run dev       # 监听源码变化自动重建
+npm test          # node:test 单测：识别/归并/整组分页/时间文案/设置迁移/数据源记账
+```
+
+- 改代码改 `src/` 下的文件；`extension/` 里的 `content/core.js`、`background.js`、`popup/popup.js` 是产物（首行有「构建产物」标记），不要直接编辑。
+- CI（[check.yml](./.github/workflows/check.yml)）在每次推送/PR 跑单测并校验产物与源码一致，漂移会直接失败；发版流水线另有一道同样的校验。
 
 ## 发版流程（维护者）
 
