@@ -27,12 +27,26 @@ jobs:
           ref: ${{ env.TAG }}
           fetch-depth: 0
 
+      - name: 准备 Node（校验产物与源码一致）
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
       - name: 校验 tag 与 manifest 版本一致
         run: |
           TAG_VERSION="${TAG#v}"
           MANIFEST_VERSION="$(jq -r .version extension/manifest.json)"
           if [ "$TAG_VERSION" != "$MANIFEST_VERSION" ]; then
             echo "::error::tag「$TAG」与 extension/manifest.json 的 version「$MANIFEST_VERSION」不一致；请先更新 manifest 版本号，删掉远端 tag 重新打"
+            exit 1
+          fi
+
+      - name: 校验 extension/ 产物与 src/ 源码一致（构建漂移守卫）
+        run: |
+          npm ci
+          npm run build
+          if ! git diff --exit-code -- extension; then
+            echo "::error::extension/ 下的构建产物与 src/ 源码不一致；请在本地执行 npm run build 后把产物一并提交"
             exit 1
           fi
 

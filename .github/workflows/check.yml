@@ -1,0 +1,30 @@
+# 每次推送 / PR：跑单元测试，并校验 extension/ 的构建产物与 src/ 源码一致。
+name: Check
+
+on: [push, pull_request]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 准备 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: 单元测试
+        run: npm test
+
+      - name: 构建产物与源码一致（漂移守卫）
+        run: |
+          npm run build
+          if ! git diff --exit-code -- extension; then
+            echo "::error::extension/ 下的构建产物与 src/ 源码不一致；请在本地执行 npm run build 后把产物一并提交"
+            exit 1
+          fi
