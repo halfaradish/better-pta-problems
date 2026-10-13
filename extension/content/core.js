@@ -1371,6 +1371,7 @@
   var MAX_LOG_LINES = 200;
   var CSS = `
 :host { all: initial; }
+:host * { box-sizing: border-box; } /* all:initial \u91CD\u7F6E\u6210 content-box\uFF0Cwidth:100% + padding \u4F1A\u6A2A\u5411\u6EA2\u51FA */
 .wrap { position: fixed; right: 18px; bottom: 18px; z-index: 2147483000;
   font: 13px/1.5 system-ui, "Microsoft YaHei", "PingFang SC", sans-serif;
   color: var(--text); font-family: system-ui, "Microsoft YaHei", "PingFang SC", sans-serif; }
@@ -1408,6 +1409,16 @@
 .panel[hidden] { display: none; }
 @keyframes aa-pop { from { transform: scale(.94) translateY(5px); opacity: 0; } }
 
+/* ---------- \u5206\u533A\u6807\u7B7E\uFF08\u7B54\u9898\u914D\u7F6E / \u6A21\u578B\u914D\u7F6E\uFF09 ---------- */
+.tabs { display: flex; gap: 4px; padding: 10px 14px 6px; }
+.tabs[role="tablist"] { border-bottom: 1px solid var(--hairline); }
+.tab { flex: 1; min-height: 26px; padding: 2px 8px; border: 1px solid transparent; border-radius: 8px;
+  background: none; color: var(--text-2); font: inherit; font-size: 12.5px; font-weight: 550;
+  letter-spacing: .02em; cursor: pointer; transition: background .12s ease, color .12s ease; }
+.tab:hover { background: var(--input-bg); color: var(--text); }
+.tab[aria-selected="true"] { background: var(--accent-soft); color: var(--accent-strong); }
+.tab:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
 .head { display: flex; align-items: center; gap: 8px; padding: 12px 14px 11px;
   border-bottom: 1px solid var(--hairline); }
 .head .title { font-weight: 650; font-size: 14px; letter-spacing: .01em; }
@@ -1425,7 +1436,11 @@
 .collapse:hover { background: var(--input-bg); color: var(--text); }
 .collapse:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
-.body { padding: 13px 14px 12px; overflow: auto; display: flex; flex-direction: column; gap: 12px; }
+/* ---------- \u5206\u9875\u5BB9\u5668\uFF08\u4E24\u4E2A\u5206\u533A\u5171\u7528\u5206\u9875\u6EDA\u52A8\uFF09 ---------- */
+.pages { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.pages > .page[hidden] { display: none; }
+.page { flex: 1; min-height: 0; padding: 12px 14px; overflow: auto;
+  display: flex; flex-direction: column; gap: 12px; }
 
 .field .flabel { display: block; margin-bottom: 5px; font-size: 12px; font-weight: 550; color: var(--text-2); }
 select { appearance: none; -webkit-appearance: none; width: 100%; padding: 7px 30px 7px 10px;
@@ -1495,6 +1510,7 @@ input:disabled, button:disabled { opacity: .5; cursor: not-allowed; }
   .ball { transition: none; }
   .panel { animation: none; }
   .wrap.dragging .ball { transition: none; }
+  .tab { transition: none; }
   .pill.run::before { animation: none; }
   .ring .fg { transition: none; }
 }
@@ -1519,6 +1535,7 @@ input:disabled, button:disabled { opacity: .5; cursor: not-allowed; }
   var shadow = null;
   var settings = null;
   var open = false;
+  var activePage = "answer";
   var ballPos = null;
   var BALL_SIZE = 46;
   var BALL_MARGIN = 18;
@@ -1675,8 +1692,29 @@ input:disabled, button:disabled { opacity: .5; cursor: not-allowed; }
     collapse.id = "collapse";
     collapse.setAttribute("aria-label", "\u6536\u8D77\u9762\u677F");
     collapse.textContent = "\u2014";
-    const body = el("div", "body", panel);
-    const fModel = el("div", "field", body);
+    const tabbar = el("div", "tabs", panel);
+    tabbar.setAttribute("role", "tablist");
+    tabbar.setAttribute("aria-label", "\u9762\u677F\u5206\u533A");
+    const tabAnswer = el("button", "tab", tabbar);
+    tabAnswer.id = "tab-answer";
+    tabAnswer.setAttribute("role", "tab");
+    tabAnswer.setAttribute("aria-controls", "page-answer");
+    tabAnswer.textContent = "\u7B54\u9898\u914D\u7F6E";
+    const tabModel = el("button", "tab", tabbar);
+    tabModel.id = "tab-model";
+    tabModel.setAttribute("role", "tab");
+    tabModel.setAttribute("aria-controls", "page-model");
+    tabModel.textContent = "\u6A21\u578B\u914D\u7F6E";
+    const pages = el("div", "pages", panel);
+    const pageAnswer = el("div", "page", pages);
+    pageAnswer.id = "page-answer";
+    pageAnswer.setAttribute("role", "tabpanel");
+    pageAnswer.setAttribute("aria-labelledby", "tab-answer");
+    const pageModel = el("div", "page", pages);
+    pageModel.id = "page-model";
+    pageModel.setAttribute("role", "tabpanel");
+    pageModel.setAttribute("aria-labelledby", "tab-model");
+    const fModel = el("div", "field", pageModel);
     el("label", "flabel", fModel).textContent = "\u670D\u52A1";
     fModel.querySelector("label").htmlFor = "aa-model";
     const sel = el("select", "", fModel);
@@ -1688,7 +1726,7 @@ input:disabled, button:disabled { opacity: .5; cursor: not-allowed; }
       if (p.disabled) o.disabled = true;
     }
     el("p", "hint", fModel);
-    const fBase = el("div", "field", body);
+    const fBase = el("div", "field", pageModel);
     fBase.id = "aa-base-field";
     fBase.hidden = true;
     el("label", "flabel", fBase).textContent = "\u7AEF\u70B9";
@@ -1701,7 +1739,7 @@ input:disabled, button:disabled { opacity: .5; cursor: not-allowed; }
     burl.autocomplete = "off";
     burl.spellcheck = false;
     el("p", "hint", fBase).textContent = "OpenAI \u517C\u5BB9\u6839\u5730\u5740\uFF0C\u586B\u5230 /v1 \u5373\u53EF\uFF08\u8BEF\u7C98 /chat/completions \u4F1A\u81EA\u52A8\u5265\u6389\uFF09";
-    const fModelName = el("div", "field", body);
+    const fModelName = el("div", "field", pageModel);
     fModelName.id = "aa-model-field";
     fModelName.hidden = true;
     el("label", "flabel", fModelName).textContent = "\u6A21\u578B";
@@ -1713,7 +1751,7 @@ input:disabled, button:disabled { opacity: .5; cursor: not-allowed; }
     mname.autocomplete = "off";
     mname.spellcheck = false;
     el("p", "hint", fModelName).textContent = "\u7559\u7A7A\u5373\u7528\u8BE5\u670D\u52A1\u7684\u9ED8\u8BA4\u6A21\u578B";
-    const fLang = el("div", "field", body);
+    const fLang = el("div", "field", pageAnswer);
     el("label", "flabel", fLang).textContent = "\u8BED\u8A00\uFF08\u7F16\u7A0B\u9898\uFF09";
     fLang.querySelector("label").htmlFor = "aa-lang";
     const lsel = el("select", "", fLang);
@@ -1722,7 +1760,7 @@ input:disabled, button:disabled { opacity: .5; cursor: not-allowed; }
     oFollow.value = "";
     oFollow.textContent = "\u8DDF\u968F\u7F16\u8F91\u5668\u5F53\u524D\u8BED\u8A00";
     el("p", "hint", fLang).textContent = "\u672C\u9898\u96C6\u5141\u8BB8\u7684\u8BED\u8A00\uFF1B\u4F5C\u7B54\u6309\u6240\u9009\u8BED\u8A00\u51FA\u7801\u5E76\u63D0\u4EA4\u8BC4\u6D4B";
-    const fKey = el("div", "field", body);
+    const fKey = el("div", "field", pageModel);
     el("label", "flabel", fKey).textContent = "API Key";
     fKey.querySelector("label").htmlFor = "aa-key";
     const keyrow = el("div", "keyrow", fKey);
@@ -1738,7 +1776,7 @@ input:disabled, button:disabled { opacity: .5; cursor: not-allowed; }
     peek.textContent = "\u663E\u793A";
     peek.setAttribute("aria-label", "\u663E\u793A\u6216\u9690\u85CF API Key");
     el("p", "hint", fKey).textContent = "\u6BCF\u4E2A\u670D\u52A1\u5404\u5B58\u4E00\u628A Key\uFF0C\u5207\u670D\u52A1\u81EA\u52A8\u5E26\u51FA\uFF1B\u4EC5\u4FDD\u5B58\u5728\u672C\u673A\u6D4F\u89C8\u5668";
-    const sw = el("label", "switchrow", body);
+    const sw = el("label", "switchrow", pageAnswer);
     sw.htmlFor = "aa-overwrite";
     const stxt = el("span", "stxt", sw);
     el("b", "", stxt).textContent = "\u8986\u76D6\u5DF2\u4F5C\u7B54";
@@ -1746,7 +1784,7 @@ input:disabled, button:disabled { opacity: .5; cursor: not-allowed; }
     const ovw = el("input", "switch", sw);
     ovw.id = "aa-overwrite";
     ovw.type = "checkbox";
-    const swImg = el("label", "switchrow", body);
+    const swImg = el("label", "switchrow", pageAnswer);
     swImg.htmlFor = "aa-images";
     const stxtImg = el("span", "stxt", swImg);
     el("b", "", stxtImg).textContent = "\u4F5C\u7B54\u542B\u56FE\u9898";
@@ -1754,23 +1792,23 @@ input:disabled, button:disabled { opacity: .5; cursor: not-allowed; }
     const imgs = el("input", "switch", swImg);
     imgs.id = "aa-images";
     imgs.type = "checkbox";
-    const start = el("button", "start", body);
+    const start = el("button", "start", pageAnswer);
     start.id = "start";
     start.type = "button";
     start.textContent = "\u5F00\u59CB\u7B54\u9898";
-    const logsHead = el("div", "logs-head", body);
+    const logsHead = el("div", "logs-head", pageAnswer);
     el("b", "", logsHead).textContent = "\u65E5\u5FD7";
     const clear = el("button", "clear", logsHead);
     clear.id = "clear";
     clear.type = "button";
     clear.textContent = "\u6E05\u7A7A";
-    const logs = el("div", "logs", body);
+    const logs = el("div", "logs", pageAnswer);
     logs.id = "logs";
     logs.setAttribute("role", "log");
     logs.setAttribute("aria-live", "polite");
-    el("p", "foot", body).textContent = "\u5B9E\u9A8C\u529F\u80FD\uFF1A\u7B54\u9898\u4E2D\u5E73\u53F0\u4E0D\u53CD\u9988\u5BF9\u9519\uFF0C\u5B8C\u6210\u540E\u8BF7\u81EA\u884C\u6838\u5BF9\u7ED3\u679C\u3002";
-    el("p", "foot", body).textContent = "\u6587\u672C\u6A21\u578B\u770B\u4E0D\u89C1\u56FE\u7247\uFF1A\u9898\u5E72/\u9009\u9879\u542B\u56FE\u7684\u9898\u8981\u4E48\u8DF3\u8FC7\uFF0C\u8981\u4E48\u5207\u5230\u89C6\u89C9\u6A21\u578B\uFF08\u5982 deepseek-flash\uFF09\u5E76\u5F00\u542F\u300C\u4F5C\u7B54\u542B\u56FE\u9898\u300D\u3002";
-    el("p", "foot", body).textContent = "\u7F16\u7A0B\u9898\u63D0\u4EA4\u5373\u8BC4\u6D4B\uFF1A\u4F5C\u7B54\u4F1A\u5B9E\u65F6\u751F\u6210\u63D0\u4EA4\u8BB0\u5F55\u4E0E\u4F5C\u7B54\u5EA6\uFF0C\u6210\u7EE9\u7531\u8BC4\u6D4B\u7ED3\u679C\u51B3\u5B9A\uFF0C\u4E0E\u5BA2\u89C2\u9898\u5224\u5206\u8DEF\u5F84\u4E0D\u540C\u3002";
+    el("p", "foot", pageAnswer).textContent = "\u5B9E\u9A8C\u529F\u80FD\uFF1A\u7B54\u9898\u4E2D\u5E73\u53F0\u4E0D\u53CD\u9988\u5BF9\u9519\uFF0C\u5B8C\u6210\u540E\u8BF7\u81EA\u884C\u6838\u5BF9\u7ED3\u679C\u3002";
+    el("p", "foot", pageAnswer).textContent = "\u6587\u672C\u6A21\u578B\u770B\u4E0D\u89C1\u56FE\u7247\uFF1A\u9898\u5E72/\u9009\u9879\u542B\u56FE\u7684\u9898\u8981\u4E48\u8DF3\u8FC7\uFF0C\u8981\u4E48\u5207\u5230\u89C6\u89C9\u6A21\u578B\uFF08\u5982 deepseek-flash\uFF09\u5E76\u5F00\u542F\u300C\u4F5C\u7B54\u542B\u56FE\u9898\u300D\u3002";
+    el("p", "foot", pageAnswer).textContent = "\u7F16\u7A0B\u9898\u63D0\u4EA4\u5373\u8BC4\u6D4B\uFF1A\u4F5C\u7B54\u4F1A\u5B9E\u65F6\u751F\u6210\u63D0\u4EA4\u8BB0\u5F55\u4E0E\u4F5C\u7B54\u5EA6\uFF0C\u6210\u7EE9\u7531\u8BC4\u6D4B\u7ED3\u679C\u51B3\u5B9A\uFF0C\u4E0E\u5BA2\u89C2\u9898\u5224\u5206\u8DEF\u5F84\u4E0D\u540C\u3002";
     let drag = null;
     let suppressClickUntil = 0;
     ball.addEventListener("pointerdown", (e) => {
@@ -1820,6 +1858,21 @@ input:disabled, button:disabled { opacity: .5; cursor: not-allowed; }
     panel.addEventListener("keydown", (e) => {
       if (e.key === "Escape") closePanel();
     });
+    tabAnswer.addEventListener("click", () => switchTab("answer"));
+    tabModel.addEventListener("click", () => switchTab("model"));
+    tabbar.addEventListener("keydown", (e) => {
+      const cur = activePage === "model" ? tabModel : tabAnswer;
+      let next = null;
+      if (e.key === "ArrowRight" || e.key === "ArrowDown") next = cur === tabAnswer ? tabModel : tabAnswer;
+      else if (e.key === "ArrowLeft" || e.key === "ArrowUp") next = cur === tabModel ? tabAnswer : tabModel;
+      else if (e.key === "Home") next = tabAnswer;
+      else if (e.key === "End") next = tabModel;
+      if (!next || next === cur) return;
+      e.preventDefault();
+      switchTab(next === tabModel ? "model" : "answer");
+      next.focus();
+    });
+    switchTab(activePage);
     peek.addEventListener("click", () => {
       const show = !key.classList.contains("reveal");
       key.classList.toggle("reveal", show);
@@ -1909,6 +1962,25 @@ input:disabled, button:disabled { opacity: .5; cursor: not-allowed; }
     if (!shadow) return;
     open ? closePanel() : openPanel();
   }
+  function switchTab(name) {
+    if (!shadow) return;
+    activePage = name === "model" ? "model" : "answer";
+    const model = activePage === "model";
+    const a = shadow.getElementById("page-answer");
+    const m = shadow.getElementById("page-model");
+    if (a) a.hidden = model;
+    if (m) m.hidden = !model;
+    const tA = shadow.getElementById("tab-answer");
+    const tM = shadow.getElementById("tab-model");
+    if (tA) {
+      tA.setAttribute("aria-selected", String(!model));
+      tA.tabIndex = model ? -1 : 0;
+    }
+    if (tM) {
+      tM.setAttribute("aria-selected", String(model));
+      tM.tabIndex = model ? 0 : -1;
+    }
+  }
   function placePanel() {
     if (!shadow) return;
     const wrapEl = shadow.querySelector(".wrap");
@@ -1927,7 +1999,8 @@ input:disabled, button:disabled { opacity: .5; cursor: not-allowed; }
     ball.setAttribute("aria-expanded", "true");
     open = true;
     updateRunUI();
-    const first = shadow.getElementById("aa-model");
+    const pane = shadow.getElementById(activePage === "model" ? "page-model" : "page-answer");
+    const first = pane?.querySelector("select, input, button");
     if (first) first.focus();
   }
   function closePanel() {
@@ -1980,18 +2053,21 @@ input:disabled, button:disabled { opacity: .5; cursor: not-allowed; }
     const baseUrl = preset.customEndpoint ? normalizeBaseUrl(burl?.value) : preset.baseUrl;
     if (preset.customEndpoint && !baseUrl) {
       appendLog("err", "\u8BF7\u5148\u586B\u5199 OpenAI \u517C\u5BB9\u7AEF\u70B9\uFF08\u586B\u5230 /v1\uFF09");
+      switchTab("model");
       burl?.focus();
       return;
     }
     const model = resolveModel(preset, shadow.getElementById("aa-model-name")?.value);
     if (preset.customEndpoint && !model) {
       appendLog("err", "\u8BF7\u5148\u586B\u5199\u6A21\u578B id");
+      switchTab("model");
       shadow.getElementById("aa-model-name").focus();
       return;
     }
     const apiKey = shadow.getElementById("aa-key").value.trim();
     if (!apiKey) {
       appendLog("err", "\u8BF7\u5148\u586B\u5199 API Key\uFF08\u4EC5\u4FDD\u5B58\u5728\u672C\u673A\uFF09");
+      switchTab("model");
       shadow.getElementById("aa-key").focus();
       return;
     }

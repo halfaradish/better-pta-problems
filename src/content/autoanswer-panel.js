@@ -75,6 +75,7 @@ const MAX_LOG_LINES = 200; // 日志上限：防长跑爆内存，超出丢最�
 
 const CSS = `
 :host { all: initial; }
+:host * { box-sizing: border-box; } /* all:initial 重置成 content-box，width:100% + padding 会横向溢出 */
 .wrap { position: fixed; right: 18px; bottom: 18px; z-index: 2147483000;
   font: 13px/1.5 system-ui, "Microsoft YaHei", "PingFang SC", sans-serif;
   color: var(--text); font-family: system-ui, "Microsoft YaHei", "PingFang SC", sans-serif; }
@@ -112,6 +113,16 @@ const CSS = `
 .panel[hidden] { display: none; }
 @keyframes aa-pop { from { transform: scale(.94) translateY(5px); opacity: 0; } }
 
+/* ---------- 分区标签（答题配置 / 模型配置） ---------- */
+.tabs { display: flex; gap: 4px; padding: 10px 14px 6px; }
+.tabs[role="tablist"] { border-bottom: 1px solid var(--hairline); }
+.tab { flex: 1; min-height: 26px; padding: 2px 8px; border: 1px solid transparent; border-radius: 8px;
+  background: none; color: var(--text-2); font: inherit; font-size: 12.5px; font-weight: 550;
+  letter-spacing: .02em; cursor: pointer; transition: background .12s ease, color .12s ease; }
+.tab:hover { background: var(--input-bg); color: var(--text); }
+.tab[aria-selected="true"] { background: var(--accent-soft); color: var(--accent-strong); }
+.tab:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
 .head { display: flex; align-items: center; gap: 8px; padding: 12px 14px 11px;
   border-bottom: 1px solid var(--hairline); }
 .head .title { font-weight: 650; font-size: 14px; letter-spacing: .01em; }
@@ -129,7 +140,11 @@ const CSS = `
 .collapse:hover { background: var(--input-bg); color: var(--text); }
 .collapse:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
-.body { padding: 13px 14px 12px; overflow: auto; display: flex; flex-direction: column; gap: 12px; }
+/* ---------- 分页容器（两个分区共用分页滚动） ---------- */
+.pages { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.pages > .page[hidden] { display: none; }
+.page { flex: 1; min-height: 0; padding: 12px 14px; overflow: auto;
+  display: flex; flex-direction: column; gap: 12px; }
 
 .field .flabel { display: block; margin-bottom: 5px; font-size: 12px; font-weight: 550; color: var(--text-2); }
 select { appearance: none; -webkit-appearance: none; width: 100%; padding: 7px 30px 7px 10px;
@@ -199,6 +214,7 @@ input:disabled, button:disabled { opacity: .5; cursor: not-allowed; }
   .ball { transition: none; }
   .panel { animation: none; }
   .wrap.dragging .ball { transition: none; }
+  .tab { transition: none; }
   .pill.run::before { animation: none; }
   .ring .fg { transition: none; }
 }
@@ -224,6 +240,7 @@ let host = null;        // shadow host（body 直挂，显隐由 sync 控制）
 let shadow = null;
 let settings = null;
 let open = false;
+let activePage = 'answer'; // 分区标签：'answer'（答题配置，默认）| 'model'（模型配置）；会话内记忆
 
 // 悬浮球位置（拖拽记忆）：{r, b} = 距右/下边距 px，存 storage.local——
 // 屏幕几何因设备而异，不进 sync；null = 用 CSS 默认（右下 18px）
@@ -411,9 +428,33 @@ function mount() {
   collapse.setAttribute('aria-label', '收起面板');
   collapse.textContent = '—';
 
-  const body = el('div', 'body', panel);
+  // —— 分区标签：模型配置（服务/端点/模型/API Key）与答题配置分两页 ——
+  const tabbar = el('div', 'tabs', panel);
+  tabbar.setAttribute('role', 'tablist');
+  tabbar.setAttribute('aria-label', '面板分区');
+  const tabAnswer = el('button', 'tab', tabbar);
+  tabAnswer.id = 'tab-answer';
+  tabAnswer.setAttribute('role', 'tab');
+  tabAnswer.setAttribute('aria-controls', 'page-answer');
+  tabAnswer.textContent = '答题配置';
+  const tabModel = el('button', 'tab', tabbar);
+  tabModel.id = 'tab-model';
+  tabModel.setAttribute('role', 'tab');
+  tabModel.setAttribute('aria-controls', 'page-model');
+  tabModel.textContent = '模型配置';
 
-  const fModel = el('div', 'field', body);
+  // —— 分页容器：答题配置（默认）与模型配置 ——
+  const pages = el('div', 'pages', panel);
+  const pageAnswer = el('div', 'page', pages);
+  pageAnswer.id = 'page-answer';
+  pageAnswer.setAttribute('role', 'tabpanel');
+  pageAnswer.setAttribute('aria-labelledby', 'tab-answer');
+  const pageModel = el('div', 'page', pages);
+  pageModel.id = 'page-model';
+  pageModel.setAttribute('role', 'tabpanel');
+  pageModel.setAttribute('aria-labelledby', 'tab-model');
+
+  const fModel = el('div', 'field', pageModel);
   el('label', 'flabel', fModel).textContent = '服务';
   fModel.querySelector('label').htmlFor = 'aa-model';
   const sel = el('select', '', fModel);
@@ -427,7 +468,7 @@ function mount() {
   el('p', 'hint', fModel); // 文案由 applyPreset 按所选服务填（下拉挪动/新增预设只改 PRESETS）
 
   // 「自定义」服务多一行「端点」输入（任意 OpenAI 兼容根地址），预设服务不显示
-  const fBase = el('div', 'field', body);
+  const fBase = el('div', 'field', pageModel);
   fBase.id = 'aa-base-field';
   fBase.hidden = true;
   el('label', 'flabel', fBase).textContent = '端点';
@@ -442,7 +483,7 @@ function mount() {
   el('p', 'hint', fBase).textContent = 'OpenAI 兼容根地址，填到 /v1 即可（误粘 /chat/completions 会自动剥掉）';
 
   // 可自填模型的网关 / 自定义服务（editableModel）多一行「模型」输入，DeepSeek 这类固定适配不显示
-  const fModelName = el('div', 'field', body);
+  const fModelName = el('div', 'field', pageModel);
   fModelName.id = 'aa-model-field';
   fModelName.hidden = true;
   el('label', 'flabel', fModelName).textContent = '模型';
@@ -456,7 +497,7 @@ function mount() {
   el('p', 'hint', fModelName).textContent = '留空即用该服务的默认模型';
 
   // 编程题语言：默认跟随编辑器当前语言；select 选项 = 本题集允许语言（exams 白名单 + 静态显示名映射）
-  const fLang = el('div', 'field', body);
+  const fLang = el('div', 'field', pageAnswer);
   el('label', 'flabel', fLang).textContent = '语言（编程题）';
   fLang.querySelector('label').htmlFor = 'aa-lang';
   const lsel = el('select', '', fLang);
@@ -466,7 +507,7 @@ function mount() {
   oFollow.textContent = '跟随编辑器当前语言';
   el('p', 'hint', fLang).textContent = '本题集允许的语言；作答按所选语言出码并提交评测';
 
-  const fKey = el('div', 'field', body);
+  const fKey = el('div', 'field', pageModel);
   el('label', 'flabel', fKey).textContent = 'API Key';
   fKey.querySelector('label').htmlFor = 'aa-key';
   const keyrow = el('div', 'keyrow', fKey);
@@ -485,7 +526,7 @@ function mount() {
   peek.setAttribute('aria-label', '显示或隐藏 API Key');
   el('p', 'hint', fKey).textContent = '每个服务各存一把 Key，切服务自动带出；仅保存在本机浏览器';
 
-  const sw = el('label', 'switchrow', body);
+  const sw = el('label', 'switchrow', pageAnswer);
   sw.htmlFor = 'aa-overwrite';
   const stxt = el('span', 'stxt', sw);
   el('b', '', stxt).textContent = '覆盖已作答';
@@ -494,7 +535,7 @@ function mount() {
   ovw.id = 'aa-overwrite';
   ovw.type = 'checkbox';
 
-  const swImg = el('label', 'switchrow', body);
+  const swImg = el('label', 'switchrow', pageAnswer);
   swImg.htmlFor = 'aa-images';
   const stxtImg = el('span', 'stxt', swImg);
   el('b', '', stxtImg).textContent = '作答含图题';
@@ -503,25 +544,25 @@ function mount() {
   imgs.id = 'aa-images';
   imgs.type = 'checkbox';
 
-  const start = el('button', 'start', body);
+  const start = el('button', 'start', pageAnswer);
   start.id = 'start';
   start.type = 'button';
   start.textContent = '开始答题';
 
-  const logsHead = el('div', 'logs-head', body);
+  const logsHead = el('div', 'logs-head', pageAnswer);
   el('b', '', logsHead).textContent = '日志';
   const clear = el('button', 'clear', logsHead);
   clear.id = 'clear';
   clear.type = 'button';
   clear.textContent = '清空';
-  const logs = el('div', 'logs', body);
+  const logs = el('div', 'logs', pageAnswer);
   logs.id = 'logs';
   logs.setAttribute('role', 'log');
   logs.setAttribute('aria-live', 'polite');
 
-  el('p', 'foot', body).textContent = '实验功能：答题中平台不反馈对错，完成后请自行核对结果。';
-  el('p', 'foot', body).textContent = '文本模型看不见图片：题干/选项含图的题要么跳过，要么切到视觉模型（如 deepseek-flash）并开启「作答含图题」。';
-  el('p', 'foot', body).textContent = '编程题提交即评测：作答会实时生成提交记录与作答度，成绩由评测结果决定，与客观题判分路径不同。';
+  el('p', 'foot', pageAnswer).textContent = '实验功能：答题中平台不反馈对错，完成后请自行核对结果。';
+  el('p', 'foot', pageAnswer).textContent = '文本模型看不见图片：题干/选项含图的题要么跳过，要么切到视觉模型（如 deepseek-flash）并开启「作答含图题」。';
+  el('p', 'foot', pageAnswer).textContent = '编程题提交即评测：作答会实时生成提交记录与作答度，成绩由评测结果决定，与客观题判分路径不同。';
 
   // —— 事件绑定 ——
   // 拖拽与点击共用球：pointer 位移超过阈值才算拖动（拖完抑制紧随的 click，防松手把面板又开合一次）
@@ -563,6 +604,22 @@ function mount() {
   });
   collapse.addEventListener('click', closePanel);
   panel.addEventListener('keydown', e => { if (e.key === 'Escape') closePanel(); });
+  // 分区标签：点击换页（完整 tabs 语义 = roving tabindex + 方向键/Home/End）
+  tabAnswer.addEventListener('click', () => switchTab('answer'));
+  tabModel.addEventListener('click', () => switchTab('model'));
+  tabbar.addEventListener('keydown', e => {
+    const cur = activePage === 'model' ? tabModel : tabAnswer;
+    let next = null;
+    if (e.key === 'ArrowRight' || e.key === 'ArrowDown') next = cur === tabAnswer ? tabModel : tabAnswer;
+    else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') next = cur === tabModel ? tabAnswer : tabModel;
+    else if (e.key === 'Home') next = tabAnswer;
+    else if (e.key === 'End') next = tabModel;
+    if (!next || next === cur) return;
+    e.preventDefault();
+    switchTab(next === tabModel ? 'model' : 'answer');
+    next.focus();
+  });
+  switchTab(activePage); // 恢复上次所在分区（须在两个分页字段建好之后调用）
   peek.addEventListener('click', () => {
     const show = !key.classList.contains('reveal');
     key.classList.toggle('reveal', show);
@@ -662,6 +719,22 @@ function togglePanel() {
   open ? closePanel() : openPanel();
 }
 
+/* ---------- 分区切换（答题配置 / 模型配置） ---------- */
+
+function switchTab(name) {
+  if (!shadow) return;
+  activePage = name === 'model' ? 'model' : 'answer';
+  const model = activePage === 'model';
+  const a = shadow.getElementById('page-answer');
+  const m = shadow.getElementById('page-model');
+  if (a) a.hidden = model;
+  if (m) m.hidden = !model;
+  const tA = shadow.getElementById('tab-answer');
+  const tM = shadow.getElementById('tab-model');
+  if (tA) { tA.setAttribute('aria-selected', String(!model)); tA.tabIndex = model ? -1 : 0; }
+  if (tM) { tM.setAttribute('aria-selected', String(model)); tM.tabIndex = model ? 0 : -1; }
+}
+
 // 面板随球所在象限换边：球在右半屏 → 默认朝左展开，左半屏 → 朝右；
 // 下半屏 → 默认往上弹，上半屏 → 往下弹（CSS 的 pos-left / pos-top）
 function placePanel() {
@@ -683,7 +756,9 @@ function openPanel() {
   ball.setAttribute('aria-expanded', 'true');
   open = true;
   updateRunUI();
-  const first = shadow.getElementById('aa-model');
+  // 聚焦当前分区页的第一个控件（答题配置=语言 select，模型配置=服务 select）
+  const pane = shadow.getElementById(activePage === 'model' ? 'page-model' : 'page-answer');
+  const first = pane?.querySelector('select, input, button');
   if (first) first.focus();
 }
 
@@ -741,18 +816,21 @@ async function startRun() {
   const baseUrl = preset.customEndpoint ? normalizeBaseUrl(burl?.value) : preset.baseUrl;
   if (preset.customEndpoint && !baseUrl) {
     appendLog('err', '请先填写 OpenAI 兼容端点（填到 /v1）');
+    switchTab('model'); // 出错字段在模型配置页：先切过去再聚焦
     burl?.focus();
     return;
   }
   const model = resolveModel(preset, shadow.getElementById('aa-model-name')?.value);
   if (preset.customEndpoint && !model) {
     appendLog('err', '请先填写模型 id');
+    switchTab('model');
     shadow.getElementById('aa-model-name').focus();
     return;
   }
   const apiKey = shadow.getElementById('aa-key').value.trim();
   if (!apiKey) {
     appendLog('err', '请先填写 API Key（仅保存在本机）');
+    switchTab('model');
     shadow.getElementById('aa-key').focus();
     return;
   }
