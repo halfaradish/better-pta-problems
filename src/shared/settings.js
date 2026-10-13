@@ -91,3 +91,35 @@ export function onSettingsChanged(cb) {
     if (area === 'sync' && changes.settings) cb({ ...DEFAULTS, ...changes.settings.newValue });
   });
 }
+
+/* ---------- 配置备份（弹窗的导入/导出共用） ---------- */
+
+// 导出文件信封解包：兼容 { app, settings } 信封与裸设置对象两种形态
+export function unwrapExport(raw) {
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)
+    && raw.settings && typeof raw.settings === 'object' && !Array.isArray(raw.settings)) {
+    return raw.settings;
+  }
+  return raw;
+}
+
+// 导入清洗：只收与 DEFAULTS 同名同型的字段（旧版字段经 migrate 先行归档），其余丢默认；
+// 返回可直接落盘的对象（settingsVersion 固定当前版）
+export function sanitizeSettings(raw) {
+  const src = (raw && typeof raw === 'object' && !Array.isArray(raw)) ? raw : {};
+  const next = {};
+  for (const [k, dv] of Object.entries(DEFAULTS)) {
+    const v = src[k];
+    if (typeof dv === 'boolean') next[k] = typeof v === 'boolean' ? v : dv;
+    else if (typeof dv === 'string') next[k] = typeof v === 'string' ? v : dv;
+    else if (typeof dv === 'number') next[k] = (typeof v === 'number' && Number.isFinite(v)) ? v : dv;
+    else if (k === 'autoAnswerApiKeys') {
+      // Key 映射逐条过滤：只留字符串值的条目
+      const map = (v && typeof v === 'object' && !Array.isArray(v)) ? v : {};
+      next[k] = {};
+      for (const [gk, gv] of Object.entries(map)) if (typeof gv === 'string') next[k][gk] = gv;
+    } else next[k] = (v && typeof v === 'object' && !Array.isArray(v)) ? v : dv;
+  }
+  next.settingsVersion = SETTINGS_VERSION;
+  return next;
+}

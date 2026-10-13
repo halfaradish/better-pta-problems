@@ -92,6 +92,29 @@
   function saveSettings(next) {
     return storage.set(next);
   }
+  function unwrapExport(raw) {
+    if (raw && typeof raw === "object" && !Array.isArray(raw) && raw.settings && typeof raw.settings === "object" && !Array.isArray(raw.settings)) {
+      return raw.settings;
+    }
+    return raw;
+  }
+  function sanitizeSettings(raw) {
+    const src = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+    const next = {};
+    for (const [k, dv] of Object.entries(DEFAULTS)) {
+      const v = src[k];
+      if (typeof dv === "boolean") next[k] = typeof v === "boolean" ? v : dv;
+      else if (typeof dv === "string") next[k] = typeof v === "string" ? v : dv;
+      else if (typeof dv === "number") next[k] = typeof v === "number" && Number.isFinite(v) ? v : dv;
+      else if (k === "autoAnswerApiKeys") {
+        const map = v && typeof v === "object" && !Array.isArray(v) ? v : {};
+        next[k] = {};
+        for (const [gk, gv] of Object.entries(map)) if (typeof gv === "string") next[k][gk] = gv;
+      } else next[k] = v && typeof v === "object" && !Array.isArray(v) ? v : dv;
+    }
+    next.settingsVersion = SETTINGS_VERSION;
+    return next;
+  }
 
   // src/popup/index.js
   var $ = (id) => document.getElementById(id);
@@ -215,6 +238,54 @@
   $("reset").addEventListener("click", async () => {
     if (hasChrome) await saveSettings({ ...DEFAULTS });
     load();
+  });
+  var backupStatus = $("backupStatus");
+  var showBackup = (text, cls) => {
+    backupStatus.textContent = text;
+    backupStatus.className = "status" + (cls ? " " + cls : "");
+  };
+  $("exportSettings").addEventListener("click", async () => {
+    if (!hasChrome) return showBackup("\u65E0\u6269\u5C55\u73AF\u5883\u4E0D\u53EF\u5BFC\u51FA", "err");
+    try {
+      const settings = await loadSettings();
+      const d = /* @__PURE__ */ new Date();
+      const p = (n) => String(n).padStart(2, "0");
+      const payload = {
+        app: "better-pta-problems",
+        settingsVersion: SETTINGS_VERSION,
+        exportedAt: `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`,
+        settings
+      };
+      const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `better-pta-settings-${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+      showBackup("\u5DF2\u5BFC\u51FA\uFF08\u542B API Key\uFF0C\u8BF7\u59A5\u5584\u4FDD\u7BA1\uFF09", "ok");
+    } catch (err) {
+      showBackup("\u5BFC\u51FA\u5931\u8D25\uFF1A" + (err?.message || err), "err");
+    }
+  });
+  $("importSettings").addEventListener("click", () => {
+    if (!hasChrome) return showBackup("\u65E0\u6269\u5C55\u73AF\u5883\u4E0D\u53EF\u5BFC\u5165", "err");
+    $("importFile").click();
+  });
+  $("importFile").addEventListener("change", async (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    if (!confirm("\u5BFC\u5165\u5C06\u8986\u76D6\u5F53\u524D\u5168\u90E8\u8BBE\u7F6E\uFF08\u542B\u5404\u670D\u52A1 API Key\uFF09\uFF0C\u786E\u5B9A\uFF1F")) return;
+    try {
+      const parsed = JSON.parse(await file.text());
+      const next = sanitizeSettings(migrate(unwrapExport(parsed)));
+      await saveSettings(next);
+      await load();
+      showBackup("\u5DF2\u5BFC\u5165\u5E76\u751F\u6548", "ok");
+    } catch (err) {
+      showBackup("\u5BFC\u5165\u5931\u8D25\uFF1A" + (err?.message || "\u6587\u4EF6\u4E0D\u662F\u6709\u6548\u7684\u914D\u7F6E"), "err");
+    }
   });
   try {
     $("version").textContent = "v" + chrome.runtime.getManifest().version;

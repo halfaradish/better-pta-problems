@@ -1,7 +1,10 @@
 /* 更好的题目集 · 设置弹窗
  * 设置的默认值与版本迁移统一取自 src/shared/settings.js（与内容脚本同一份）。
  */
-import { DEFAULTS, HAS_CHROME_STORAGE, SETTINGS_VERSION, loadSettings, saveSettings } from '../shared/settings.js';
+import {
+  DEFAULTS, HAS_CHROME_STORAGE, SETTINGS_VERSION,
+  loadSettings, migrate, sanitizeSettings, saveSettings, unwrapExport,
+} from '../shared/settings.js';
 
 const $ = id => document.getElementById(id);
 let stored = { ...DEFAULTS };
@@ -135,6 +138,61 @@ $('testReminder').addEventListener('click', async () => {
 $('reset').addEventListener('click', async () => {
   if (hasChrome) await saveSettings({ ...DEFAULTS });
   load();
+});
+
+/* ---------- 配置备份：导出 / 导入（页脚第二行） ---------- */
+
+const backupStatus = $('backupStatus');
+const showBackup = (text, cls) => {
+  backupStatus.textContent = text;
+  backupStatus.className = 'status' + (cls ? ' ' + cls : '');
+};
+
+$('exportSettings').addEventListener('click', async () => {
+  if (!hasChrome) return showBackup('无扩展环境不可导出', 'err');
+  try {
+    const settings = await loadSettings(); // 迁移后的当前全量设置（含各服务 API Key）
+    const d = new Date();
+    const p = n => String(n).padStart(2, '0');
+    const payload = {
+      app: 'better-pta-problems',
+      settingsVersion: SETTINGS_VERSION,
+      exportedAt: `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`,
+      settings,
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `better-pta-settings-${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+    showBackup('已导出（含 API Key，请妥善保管）', 'ok');
+  } catch (err) {
+    showBackup('导出失败：' + (err?.message || err), 'err');
+  }
+});
+
+$('importSettings').addEventListener('click', () => {
+  if (!hasChrome) return showBackup('无扩展环境不可导入', 'err');
+  $('importFile').click();
+});
+
+$('importFile').addEventListener('change', async e => {
+  const file = e.target.files?.[0];
+  e.target.value = ''; // 允许重选同一文件
+  if (!file) return;
+  if (!confirm('导入将覆盖当前全部设置（含各服务 API Key），确定？')) return;
+  try {
+    const parsed = JSON.parse(await file.text());
+    // 信封/裸对象两种形态 → 旧版字段走迁移 → 只收认识且同型的字段
+    const next = sanitizeSettings(migrate(unwrapExport(parsed)));
+    await saveSettings(next);
+    await load(); // 重渲染弹窗为新配置
+    showBackup('已导入并生效', 'ok');
+  } catch (err) {
+    showBackup('导入失败：' + (err?.message || '文件不是有效的配置'), 'err');
+  }
 });
 
 try { $('version').textContent = 'v' + chrome.runtime.getManifest().version; } catch (_) { /* 非扩展环境保留静态文案 */ }

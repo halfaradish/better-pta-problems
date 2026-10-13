@@ -44,7 +44,7 @@
     }
     * { box-sizing: border-box; }
     body {
-      width: 360px; margin: 0; padding: 7px 16px 4px;
+      width: 360px; margin: 0; padding: 6px 16px 2px;
       background: var(--bg); color: var(--text);
       font: 13px/1.5 system-ui, "Microsoft YaHei", "PingFang SC", sans-serif;
       -webkit-font-smoothing: antialiased;
@@ -53,14 +53,14 @@
     input:focus-visible, textarea:focus-visible { outline: none; }
 
     /* ---------- 头部 ---------- */
-    .head { display: flex; align-items: center; gap: 10px; padding-bottom: 4px; }
+    .head { display: flex; align-items: center; gap: 10px; padding-bottom: 2px; }
     .head img { width: 30px; height: 30px; border-radius: 8px; }
     .head-title { display: flex; align-items: center; gap: 7px; font-size: 15px; font-weight: 650; letter-spacing: .01em; }
     .ver { font-size: 11px; font-weight: 500; line-height: 17px; padding: 0 7px; border: 1px solid var(--input-border); border-radius: 9999px; background: var(--input-bg); color: var(--text-2); }
     .head-sub { margin-top: 0; font-size: 12px; color: var(--text-3); }
 
     main > * + * { border-top: 1px solid var(--hairline); }
-    section, details { padding: 4px 0 5px; }
+    section, details { padding: 3px 0 4px; }
 
     /* ---------- 开关（原生 checkbox 样式化，保留键盘与读屏语义） ---------- */
     .switch {
@@ -85,7 +85,7 @@
     /* ---------- 主开关行：面板的锚点控件，开启时整行淡蓝 ---------- */
     .master {
       display: flex; align-items: center; justify-content: space-between; gap: 12px;
-      margin: 0 -16px; padding: 5px 16px;
+      margin: 0 -16px; padding: 3px 16px;
       transition: background .18s ease;
     }
     .master:has(#enabled:checked) { background: var(--accent-soft); }
@@ -94,7 +94,7 @@
     .when-on, .when-off { display: none; font-size: 12px; color: var(--text-2); }
     .master:has(#enabled:checked) .when-on { display: block; }
     .master:not(:has(#enabled:checked)) .when-off { display: block; }
-    .rows { padding: 1px 0 0; }
+    .rows { padding: 0; }
 
     /* ---------- 可折叠区块（课程识别） ---------- */
     summary {
@@ -143,15 +143,21 @@
     button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
     .btn-primary { min-width: 100px; border-color: transparent; background: var(--accent-soft); color: var(--accent-strong); font-weight: 500; }
     .btn-primary:hover:not(:disabled) { border-color: transparent; filter: brightness(.96); }
-    .btn-ghost { min-height: 28px; padding: 4px 10px; font-size: 12px; }
+    .btn-ghost { min-height: 24px; padding: 3px 10px; font-size: 12px; }
 
-    /* ---------- 页脚 ---------- */
+    /* ---------- 页脚（两行：仓库链接 / 配置管理） ---------- */
     footer {
       display: flex; align-items: center; justify-content: space-between; gap: 10px;
-      margin-top: 1px; padding-top: 6px; border-top: 1px solid var(--hairline);
+      flex-wrap: wrap; row-gap: 0;
+      margin-top: 0; padding-top: 4px; border-top: 1px solid var(--hairline);
     }
+    .foot-backup {
+      flex-basis: 100%; display: flex; align-items: center; gap: 10px;
+      margin-top: 1px; min-width: 0;
+    }
+    .foot-backup button { flex: none; white-space: nowrap; } /* 文案挤入时不许按钮换行，长状态文本由状态位消化 */
     .repo {
-      display: inline-flex; align-items: center; gap: 6px; min-width: 0; min-height: 28px;
+      display: inline-flex; align-items: center; gap: 6px; min-width: 0; min-height: 24px;
       color: var(--text-2); font-size: 12px; text-decoration: none;
     }
     .repo:hover { color: var(--accent); }
@@ -167,7 +173,7 @@
   <header class="head">
     <img src="../icons/icon48.png" alt="" width="30" height="30">
     <div class="head-text">
-      <div class="head-title">更好的题目集 <span class="ver" id="version">v0.9.0</span></div>
+      <div class="head-title">更好的题目集 <span class="ver" id="version">v0.9.1</span></div>
       <div class="head-sub">PTA 题目集列表增强</div>
     </div>
   </header>
@@ -233,7 +239,13 @@
       <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg>
       <span>halfaradish/better-pta-problems</span>
     </a>
-    <button type="button" id="reset" class="btn-ghost">恢复默认</button>
+    <div class="foot-backup">
+      <button type="button" id="exportSettings" class="btn-ghost" title="导出全部设置为 JSON 文件（含各服务 API Key，请妥善保管）">导出配置</button>
+      <button type="button" id="importSettings" class="btn-ghost" title="从 JSON 文件导入设置（覆盖当前全部配置）">导入配置</button>
+      <button type="button" id="reset" class="btn-ghost">恢复默认</button>
+      <span id="backupStatus" class="status" role="status" aria-live="polite"></span>
+      <input type="file" id="importFile" accept="application/json,.json" hidden>
+    </div>
   </footer>
 
   <script src="popup.js"></script>
