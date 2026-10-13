@@ -2,7 +2,10 @@
 // DOM 相关的 collectPage/collectProgramming/cleanText/handleRun 依赖 document，走内容脚本 + IAB 真机回归（见 docs/自动答题初探.md）。
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { assembleImgMessage, buildPrompt, normalizeBaseUrl, normalizeTF, parseChoiceAnswer, parseFillAnswers, TYPE_BY_NAME } from '../src/content/autoanswer.js';
+import {
+  assembleImgMessage, buildPrompt, COMPILER_LABELS, compilerIdFromLabel, normalizeBaseUrl, normalizeTF,
+  parseChoiceAnswer, parseCodeAnswer, parseFillAnswers, TYPE_BY_NAME,
+} from '../src/content/autoanswer.js';
 import { PRESETS, resolveModel } from '../src/content/autoanswer-panel.js';
 
 test('parseChoiceAnswer：裸字母 / 带句点 / JSON 文本 / 代码围栏', () => {
@@ -58,11 +61,75 @@ test('buildPrompt：三种题型的指令与填空占位符', () => {
   assert.match(fill[1].content, /本题为 2 个/);
 });
 
+test('buildPrompt：编程题——带语言名 + 围栏输出，不含 JSON 指令', () => {
+  const p = buildPrompt({ kind: 'PROGRAMMING', text: '本题目要求读入n个整数…', langLabel: 'C (gcc)', options: [], blanks: 0 });
+  assert.match(p[0].content, /代码围栏块/);
+  assert.doesNotMatch(p[0].content, /JSON/);
+  assert.match(p[1].content, /用「C \(gcc\)」/);
+  assert.match(p[1].content, /代码围栏/);
+  assert.doesNotMatch(p[1].content, /只输出一个 JSON/);
+  // 空语言回退文案
+  const p2 = buildPrompt({ kind: 'PROGRAMMING', text: '…', langLabel: '', options: [], blanks: 0 });
+  assert.match(p2[1].content, /编辑器当前语言/);
+});
 
 test('TYPE_BY_NAME：侧栏题型 → exam-submissions 的 problemType', () => {
   assert.equal(TYPE_BY_NAME['判断题'], 'TRUE_OR_FALSE');
   assert.equal(TYPE_BY_NAME['单选题'], 'MULTIPLE_CHOICE');
   assert.equal(TYPE_BY_NAME['填空题'], 'FILL_IN_THE_BLANK');
+  assert.equal(TYPE_BY_NAME['编程题'], 'PROGRAMMING');
+});
+
+test('parseCodeAnswer：代码围栏优先，多围栏取最长块', () => {
+  const c1 = parseCodeAnswer('```c\nint main() { return 0; }\n```');
+  assert.equal(c1, 'int main() { return 0; }\n');
+  const c2 = parseCodeAnswer('```python\nprint(1)\n```');
+  assert.equal(c2, 'print(1)\n');
+  // 围栏可以不带语言标
+  assert.equal(parseCodeAnswer('```\nx = 1\n```'), 'x = 1\n');
+  // 先解释后贴码：取最长块（解释块短）
+  const mixed = '思路：用一次遍历。```c\nint a;\nint b;\n```\n说明完毕。```c\nint long_code;\nint longer;\nint longest_line_here;\n```';
+  assert.equal(parseCodeAnswer(mixed), 'int long_code;\nint longer;\nint longest_line_here;\n');
+});
+
+test('parseCodeAnswer：JSON 包裹回退，代码里的花括号击不穿', () => {
+  // 代码含大量花括号时贪婪 {…} 不能当 JSON——只有整串合法 JSON 且有 answer 字段才走这一支
+  const bare = '{"answer":"int main() { while (1) { ; } }"}';
+  assert.equal(parseCodeAnswer(bare), 'int main() { while (1) { ; } }\n');
+  // 伪 JSON（花括号不成对）落入围栏分支
+  assert.equal(parseCodeAnswer('```c\nif (x) { y(); }\n```'), 'if (x) { y(); }\n');
+});
+
+test('parseCodeAnswer：裸代码回退与自然语言拒绝', () => {
+  // 没有围栏但整体像源码（含换行/分号/花括号）：剥残留围栏标记后收下
+  assert.equal(parseCodeAnswer('int x;\nprintf("%d", x);'), 'int x;\nprintf("%d", x);\n');
+  assert.equal(parseCodeAnswer('```c\nint y;\n```'), 'int y;\n'); // 只闭合一半围栏也剥
+  // 纯自然语言（无代码特征）拒绝
+  assert.equal(parseCodeAnswer('抱歉，这道题我不会'), null);
+  assert.equal(parseCodeAnswer('以上是完整说明。'), null);
+  assert.equal(parseCodeAnswer(''), null);
+  assert.equal(parseCodeAnswer(null), null);
+});
+
+test('COMPILER_LABELS：38 种语言与菜单显示名（初探 §10.5 抽样实证）', () => {
+  assert.equal(Object.keys(COMPILER_LABELS).length, 38);
+  assert.equal(COMPILER_LABELS.GCC, 'C (gcc)');
+  assert.equal(COMPILER_LABELS.PYTHON3, 'Python (python3)');
+  assert.equal(COMPILER_LABELS.KOTLIN, 'Kotlin (kotlinc)');
+  assert.equal(COMPILER_LABELS.CANGJIE, '仓颉 (cjc)');
+  assert.equal(COMPILER_LABELS.MODERN_GCC, 'C (gcc c11)');
+  assert.equal(COMPILER_LABELS.CAT, 'Plaintext (cat)');
+});
+
+test('compilerIdFromLabel：显示名反查编译器 id，未知返回 null', () => {
+  assert.equal(compilerIdFromLabel('C (gcc)'), 'GCC');
+  assert.equal(compilerIdFromLabel('C (gcc c11)'), 'MODERN_GCC');
+  assert.equal(compilerIdFromLabel(' Kotlin (kotlinc) '), 'KOTLIN'); // 含空白也规整
+  assert.equal(compilerIdFromLabel('Python (python3)'), 'PYTHON3');
+  assert.equal(compilerIdFromLabel('仓颉 (cjc)'), 'CANGJIE');
+  assert.equal(compilerIdFromLabel('Bogus (none)'), null);
+  assert.equal(compilerIdFromLabel(''), null);
+  assert.equal(compilerIdFromLabel(null), null);
 });
 
 test('resolveModel：可自填网关用输入值（trim，空回默认），固定适配无视输入', () => {

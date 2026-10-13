@@ -16,6 +16,7 @@ test('migrate：旧版设置升级到 v5，删掉不再持久化的 grouped，�
   assert.equal(next.autoAnswerBaseUrl, '');
   assert.equal(next.autoAnswerOverwrite, false);
   assert.equal(next.autoAnswerImages, false); // 含图题默认跳过（视觉模型需用户显式开启）
+  assert.equal(next.autoAnswerLanguage, ''); // 编程题语言默认跟随编辑器当前（不固定）
 });
 
 test('migrate：已是 v5 的设置不再改动', () => {

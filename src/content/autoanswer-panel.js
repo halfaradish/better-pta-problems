@@ -9,7 +9,10 @@
  * 关掉面板 / 翻到别的页面都不打断运行；运行中悬浮球常驻并显示整体进度环。
  */
 import { loadSettings, saveSettings } from '../shared/settings.js';
-import { EXAM_PROBLEMS_RE, handleRun, isRunning, normalizeBaseUrl, setEventSink } from './autoanswer.js';
+import {
+  COMPILER_LABELS, EXAM_PROBLEMS_RE, fetchAllowedCompilers,
+  handleRun, isRunning, normalizeBaseUrl, setEventSink,
+} from './autoanswer.js';
 
 // 模型适配 presets：往这里加即可挂进面板下拉。
 // gateway 对应 autoanswer.js chatOnce 的协议分支（opencode 网关需要 x-opencode-session 等头）；
@@ -382,6 +385,17 @@ function mount() {
   mname.spellcheck = false;
   el('p', 'hint', fModelName).textContent = '留空即用该服务的默认模型';
 
+  // 编程题语言：默认跟随编辑器当前语言；select 选项 = 本题集允许语言（exams 白名单 + 静态显示名映射）
+  const fLang = el('div', 'field', body);
+  el('label', 'flabel', fLang).textContent = '语言（编程题）';
+  fLang.querySelector('label').htmlFor = 'aa-lang';
+  const lsel = el('select', '', fLang);
+  lsel.id = 'aa-lang';
+  const oFollow = el('option', '', lsel);
+  oFollow.value = '';
+  oFollow.textContent = '跟随编辑器当前语言';
+  el('p', 'hint', fLang).textContent = '本题集允许的语言；作答按所选语言出码并提交评测';
+
   const fKey = el('div', 'field', body);
   el('label', 'flabel', fKey).textContent = 'API Key';
   fKey.querySelector('label').htmlFor = 'aa-key';
@@ -435,6 +449,7 @@ function mount() {
 
   el('p', 'foot', body).textContent = '实验功能：答题中平台不反馈对错，完成后请自行核对结果。';
   el('p', 'foot', body).textContent = '文本模型看不见图片：题干/选项含图的题要么跳过，要么切到视觉模型（如 deepseek-flash）并开启「作答含图题」。';
+  el('p', 'foot', body).textContent = '编程题提交即评测：作答会实时生成提交记录与作答度，成绩由评测结果决定，与客观题判分路径不同。';
 
   // —— 事件绑定 ——
   ball.addEventListener('click', () => togglePanel());
@@ -462,11 +477,14 @@ function mount() {
   key.value = ((settings || {}).autoAnswerApiKey || '').trim();
   ovw.checked = !!((settings || {}).autoAnswerOverwrite);
   imgs.checked = !!((settings || {}).autoAnswerImages);
+  // 语言选项异步填充（拉本题集白名单后再恢复上次固定值）
+  refreshLangOptions();
   applyPreset();
   sel.addEventListener('change', () => { applyPreset(); persist(); });
   burl.addEventListener('change', persist);
   mname.addEventListener('change', persist);
   key.addEventListener('change', persist);
+  lsel.addEventListener('change', persist);
   ovw.addEventListener('change', persist);
   imgs.addEventListener('change', persist);
   clear.addEventListener('click', () => {
@@ -486,6 +504,82 @@ function unmount() {
   host = null;
   shadow = null;
   open = false;
+  langPsId = null; // 下次挂载重新拉本题集的语言白名单
+}
+
+/* ---------- 语言选项（编程题：本题集允许语言白名单） ---------- */
+
+let langPsId = null; // 已填充过选项的题集 key（3s 轮询防重拉）
+async function refreshLangOptions() {
+  if (!shadow) return;
+  const psId = (location.pathname.match(EXAM_PROBLEMS_RE) || [])[1];
+  if (!psId || langPsId === psId) return;
+  langPsId = psId;
+  const lsel = shadow.getElementById('aa-lang');
+  if (!lsel) return;
+  const want = (settings || {}).autoAnswerLanguage || '';
+  let allowed = null;
+  try { allowed = await fetchAllowedCompilers(psId); } catch (_) { /* 拉不到退化静态表 */ }
+  if (!shadow) return; // 拉取期间面板可能已被卸载
+  const ids = Array.isArray(allowed) && allowed.length ? allowed : Object.keys(COMPILER_LABELS);
+  while (lsel.options.length > 1) lsel.remove(1);
+  for (const id of ids) {
+    const o = el('option', '', lsel);
+    o.value = id;
+    o.textContent = COMPILER_LABELS[id] || id;
+  }
+  lsel.value = [...lsel.options].some(o => o.value === want) ? want : '';
+  if (want && lsel.value !== want) {
+    appendLog('warn', `上次固定语言「${COMPILER_LABELS[want] || want}」不在本题集允许列表，已改回跟随当前`);
+  }
+}
+
+function togglePanel() {
+  if (!shadow) return;
+  open ? closePanel() : openPanel();
+}
+
+function openPanel() {
+  if (!shadow) return;
+  const panel = shadow.getElementById('panel');
+  const ball = shadow.getElementById('ball');
+  panel.hidden = false;
+  ball.setAttribute('aria-expanded', 'true');
+  open = true;
+  updateRunUI();
+  const first = shadow.getElementById('aa-model');
+  if (first) first.focus();
+}
+
+function closePanel() {
+  if (!shadow) return;
+  const panel = shadow.getElementById('panel');
+  const ball = shadow.getElementById('ball');
+  if (panel) panel.hidden = true;
+  if (ball) {
+    ball.setAttribute('aria-expanded', 'false');
+    ball.focus();
+  }
+  open = false;
+}
+
+/* ---------- 配置持久化（与弹窗/其他入口合并写，避免互相抹掉） ---------- */
+
+async function persist() {
+  if (!shadow) return;
+  const apiKey = shadow.getElementById('aa-key').value.trim();
+  const overwrite = shadow.getElementById('aa-overwrite').checked;
+  const withImages = shadow.getElementById('aa-images').checked;
+  const gw = shadow.getElementById('aa-model');
+  const gateway = PRESETS[gw.value] ? gw.value : 'deepseek';
+  const baseUrl = (shadow.getElementById('aa-base')?.value || '').trim(); // 「自定义」才用得上，存着无妨
+  const model = (shadow.getElementById('aa-model-name')?.value || '').trim();
+  const lang = shadow.getElementById('aa-lang');
+  const language = lang ? lang.value.trim() : '';
+  try {
+    const fresh = await loadSettings();
+    await saveSettings({ ...fresh, autoAnswerApiKey: apiKey, autoAnswerOverwrite: overwrite, autoAnswerImages: withImages, autoAnswerGateway: gateway, autoAnswerBaseUrl: baseUrl, autoAnswerModel: model, autoAnswerLanguage: language });
+  } catch (_) { /* 存储失败不阻断 UI */ }
 }
 
 /* ---------- 开始答题 ---------- */
@@ -517,6 +611,7 @@ async function startRun() {
   }
   const overwrite = shadow.getElementById('aa-overwrite').checked;
   const withImages = shadow.getElementById('aa-images').checked;
+  const language = (shadow.getElementById('aa-lang')?.value || '').trim();
   await persist();
   const result = await handleRun({
     baseUrl,
@@ -525,6 +620,7 @@ async function startRun() {
     overwrite,
     images: withImages,
     gateway: preset.gateway,
+    language,
   });
   if (!result.ok && result.error === '已有一次答题在运行中') appendLog('warn', '已有一次答题在运行中');
 }
@@ -536,6 +632,7 @@ export function sync(s) {
   settings = s || settings;
   const shouldShow = !!settings && !!settings.autoAnswer && EXAM_PROBLEMS_RE.test(location.pathname);
   if (shouldShow && !host) mount();
+  if (shouldShow) refreshLangOptions(); // 换题集后语言白名单要重拉（内部有 psId 防抖）
   if (!shouldShow && host) {
     if (isRunning()) {
       // 运行中不卸载（球上还有进度环）；面板收起即可

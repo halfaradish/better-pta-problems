@@ -110,6 +110,9 @@ async function init() {
   aaPanel.armOnce();
   aaPanel.sync(settings);
 
+  // 编程题跨文档续跑：上一页写完草稿会整页跳转过来，由续跑单按阶段恢复
+  void autoanswer.resumeRelay(settings).catch(() => { /* 续跑自身会复位 */ });
+
   // React 重渲染 / SPA 路由切换 → 重建视图；插件自身的 DOM 变动不触发。
   // 自动答题收题时的临时克隆（.bps-clone）与悬浮球 host（.bps-aa）也算插件自己的变动
   const mo = new MutationObserver(muts => {
@@ -151,12 +154,15 @@ async function init() {
 window.BPS = {
   init, sync, teardown: view.teardown, DEFAULTS,
   // 自动答题调试与回归入口：run 走完整流程（配合 __BPS_LLM_MOCK__ 可 mock LLM），
-  // collect 只收集当前题型页的题目（验证提取纯度用）
+  // collect 收集客观题、programming 收集编程题（一页一题形态，验证提取纯度用）；
+  // resumeRelay 手动触发编程题跨文档续跑的恢复（真机回归用）
   autoAnswer: {
     run: (config = {}) => autoanswer.handleRun(config),
     collect: () => autoanswer.collectPage(),
     types: () => autoanswer.sidebarTypes(),
+    programming: () => autoanswer.collectProgramming(),
   },
+  resumeRelay: () => autoanswer.resumeRelay(settings),
   setSettings: async patch => {
     settings = { ...settings, ...patch };
     await saveSettings(settings);

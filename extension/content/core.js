@@ -39,6 +39,8 @@
     // 覆盖已作答的题目（默认跳过已答，避免把用户的正确答案改错）
     autoAnswerImages: false,
     // 含图题作答（需视觉模型如 deepseek-flash：图片下载编码进 prompt；默认关闭=含图题跳过）
+    autoAnswerLanguage: "",
+    // 编程题固定语言（exams 接口白名单的编译器 id）；空 = 跟随各题编辑器当前语言
     settingsVersion: 0
     // 0 = 旧版设置；v4 起「列表/分组」不再持久化（改为按路由的会话内状态）
   };
@@ -248,7 +250,8 @@
   var TYPE_BY_NAME = {
     "\u5224\u65AD\u9898": "TRUE_OR_FALSE",
     "\u5355\u9009\u9898": "MULTIPLE_CHOICE",
-    "\u586B\u7A7A\u9898": "FILL_IN_THE_BLANK"
+    "\u586B\u7A7A\u9898": "FILL_IN_THE_BLANK",
+    "\u7F16\u7A0B\u9898": "PROGRAMMING"
   };
   var EXAM_PROBLEMS_RE = /^\/problem-sets\/(\d+)\/exam\/problems(\/type\/(\d+))?/;
   var LETTERS = "ABCDEFGHIJ";
@@ -313,9 +316,17 @@
   function buildPrompt(q) {
     const lines = [];
     lines.push("\u4F60\u662F\u7B97\u6CD5\u4E0E\u6570\u636E\u7ED3\u6784\u8BFE\u7A0B\u7684\u7B54\u9898\u52A9\u624B\u3002\u5FFD\u7565\u9898\u5E72\u4E2D\u7684\u9898\u53F7\u3001\u5206\u503C\u3001\u4F5C\u8005\u3001\u5355\u4F4D\u7B49\u5143\u4FE1\u606F\u3002");
-    lines.push("\u53EA\u8F93\u51FA\u4E00\u4E2A JSON \u5BF9\u8C61\uFF0C\u4E0D\u8981\u5305\u542B\u4EFB\u4F55\u89E3\u91CA\u6587\u5B57\u6216\u4EE3\u7801\u56F4\u680F\u3002");
+    if (q.kind === "PROGRAMMING") {
+      lines.push(`\u9898\u578B\uFF1A\u7F16\u7A0B\u9898\u3002\u8BF7\u7528\u300C${q.langLabel || "\u7F16\u8F91\u5668\u5F53\u524D\u8BED\u8A00"}\u300D\u5199\u4E00\u4E2A\u5B8C\u6574\u3001\u53EF\u76F4\u63A5\u63D0\u4EA4\u8BC4\u6D4B\u7684\u7A0B\u5E8F\uFF1A`);
+      lines.push("\u6309\u9898\u9762\u7684\u8F93\u5165\u683C\u5F0F\u8BFB\u5165\u6570\u636E\uFF08\u4E0D\u8981\u8F93\u51FA\u4EA4\u4E92\u5F0F\u63D0\u793A\u8BED\uFF09\uFF0C\u4E25\u683C\u6309\u8F93\u51FA\u683C\u5F0F\u6253\u5370\u7ED3\u679C\u3002");
+      lines.push("\u53EA\u7528\u8BE5\u8BED\u8A00\u7684\u6807\u51C6\u5E93\uFF08\u65E0\u628A\u63E1\u4E0D\u8981\u5F15\u7B2C\u4E09\u65B9\u5E93\uFF09\uFF1B\u7559\u610F\u9898\u9762\u7ED9\u51FA\u7684\u65F6\u95F4/\u5185\u5B58/\u4EE3\u7801\u957F\u5EA6\u9650\u5236\u3002");
+      lines.push("\u8F93\u51FA\u53EA\u5305\u542B\u4E00\u4E2A\u4EE3\u7801\u56F4\u680F\u5757\uFF08``` \u5305\u88F9\uFF09\uFF0C\u56F4\u680F\u5185\u662F\u5B8C\u6574\u7A0B\u5E8F\u6E90\u7801\uFF0C\u4E0D\u8981\u4EFB\u4F55\u89E3\u91CA\u6587\u5B57\u3002");
+    } else {
+      lines.push("\u53EA\u8F93\u51FA\u4E00\u4E2A JSON \u5BF9\u8C61\uFF0C\u4E0D\u8981\u5305\u542B\u4EFB\u4F55\u89E3\u91CA\u6587\u5B57\u6216\u4EE3\u7801\u56F4\u680F\u3002");
+    }
     lines.push("");
-    if (q.kind === "TRUE_OR_FALSE") {
+    if (q.kind === "PROGRAMMING") {
+    } else if (q.kind === "TRUE_OR_FALSE") {
       lines.push('\u9898\u578B\uFF1A\u5224\u65AD\u9898\u3002\u5224\u65AD\u9648\u8FF0\u7684\u6B63\u8BEF\uFF0Canswer \u53EA\u80FD\u662F "TRUE" \u6216 "FALSE"\u3002');
       lines.push('\u8F93\u51FA\u683C\u5F0F\uFF1A{"answer":"TRUE"}');
     } else if (q.kind === "MULTIPLE_CHOICE") {
@@ -335,9 +346,258 @@
       lines.push("\u53EF\u9009\u5B57\u6BCD\uFF1A" + q.options.map((o) => o.letter).join("\u3001"));
     }
     return [
-      { role: "system", content: "\u4F60\u662F\u4E25\u8C28\u7684\u7B54\u9898\u52A9\u624B\uFF0C\u53EA\u8F93\u51FA\u8981\u6C42\u7684 JSON\uFF0C\u4E0D\u8981\u8F93\u51FA\u4EFB\u4F55\u5176\u4ED6\u6587\u5B57\u3002" },
+      {
+        role: "system",
+        content: q.kind === "PROGRAMMING" ? "\u4F60\u662F\u4E25\u8C28\u7684\u7B54\u9898\u52A9\u624B\uFF0C\u53EA\u8F93\u51FA\u4E00\u4E2A\u4EE3\u7801\u56F4\u680F\u5757\uFF08``` \u5305\u88F9\u7684\u5B8C\u6574\u7A0B\u5E8F\u6E90\u7801\uFF09\uFF0C\u4E0D\u8981\u8F93\u51FA\u4EFB\u4F55\u5176\u4ED6\u6587\u5B57\u3002" : "\u4F60\u662F\u4E25\u8C28\u7684\u7B54\u9898\u52A9\u624B\uFF0C\u53EA\u8F93\u51FA\u8981\u6C42\u7684 JSON\uFF0C\u4E0D\u8981\u8F93\u51FA\u4EFB\u4F55\u5176\u4ED6\u6587\u5B57\u3002"
+      },
       { role: "user", content: lines.join("\n") }
     ];
+  }
+  var COMPILER_LABELS = {
+    GCC: "C (gcc)",
+    MODERN_GCC: "C (gcc c11)",
+    GXX: "C++ (g++)",
+    CLANG: "C (clang)",
+    CLANGXX: "C++ (clang++)",
+    JAVAC: "Java (javac)",
+    PYTHON2: "Python (python2)",
+    PYTHON3: "Python (python3)",
+    RUBY: "Ruby (ruby)",
+    BASH: "Bash (bash)",
+    CAT: "Plaintext (cat)",
+    CLISP: "Common Lisp (sbcl)",
+    FPC: "Pascal (fpc)",
+    GO: "Go (go)",
+    GHC: "Haskell (ghc)",
+    LUA: "Lua (lua)",
+    LUAJIT: "Lua (luajit)",
+    MCS: "C# (dotnet)",
+    NODE: "JavaScript (node)",
+    OCAMLC: "OCaml (ocamlc)",
+    PHP: "PHP (php)",
+    PERL: "Perl (perl)",
+    AWK: "AWK (awk)",
+    DMD: "D (dmd)",
+    RKT: "Racket (racket)",
+    VALAC: "Vala (valac)",
+    VBNC: "Visual Basic (dotnet)",
+    KOTLIN: "Kotlin (kotlinc)",
+    SWIFT: "Swift (swiftc)",
+    OBJC: "Objective-C (clang)",
+    FORTRAN: "Fortran95 (gfortran)",
+    OCTAVE: "Octave (octave-cli)",
+    RLANG: "R (R)",
+    ASM: "ASM (nasm.sh)",
+    RUST: "Rust (rustc)",
+    SCALA: "Scala (scalac)",
+    PYPY3: "Python (pypy3)",
+    CANGJIE: "\u4ED3\u9889 (cjc)"
+  };
+  function parseCodeAnswer(raw) {
+    const s = String(raw ?? "").trim();
+    if (!s) return null;
+    const jsonMatch = s.match(/^\{[\s\S]*\}$/);
+    if (jsonMatch) {
+      try {
+        const o = JSON.parse(jsonMatch[0]);
+        if (typeof o.answer === "string" && o.answer.trim()) return o.answer.trim() + "\n";
+      } catch (_) {
+      }
+    }
+    const fences = [...s.matchAll(/```[A-Za-z0-9+#_.-]*(?:\r?\n)([\s\S]*?)```/g)];
+    if (fences.length) {
+      const block = fences.map((f) => f[1]).sort((a, b) => b.length - a.length)[0];
+      return block.replace(/\n+$/, "") + "\n";
+    }
+    if (/[\n;{}]/.test(s) && !/^(抱歉|对不起|无法|这不是)/.test(s)) {
+      const stripped = s.replace(/^[A-Za-z0-9+#_.-]*```|^```[A-Za-z0-9+#_.-]*/g, "").replace(/```[A-Za-z0-9+#_.-]*$|```$/g, "").trim();
+      return stripped ? stripped + "\n" : null;
+    }
+    return null;
+  }
+  async function fetchAllowedCompilers(psId) {
+    const data = await fetch(`/api/problem-sets/${psId}/exams`, {
+      headers: { accept: "application/json" },
+      credentials: "include"
+    }).then((r) => r.json());
+    const list = data?.problemSet?.problemSetConfig?.compilers;
+    return Array.isArray(list) && list.length ? list : null;
+  }
+  function answerFormEl() {
+    return document.querySelector('[class*="CodingProblemAnswerForm"]');
+  }
+  function editableCm() {
+    const form = answerFormEl();
+    return form && [...form.querySelectorAll(".cm-content")].find((x) => x.getAttribute("contenteditable") === "true") || null;
+  }
+  function submitButton() {
+    return [...document.querySelectorAll("main button")].find((b) => (b.textContent || "").trim() === "\u63D0\u4EA4\u672C\u9898\u4F5C\u7B54") || null;
+  }
+  function langLabelOf() {
+    const form = answerFormEl();
+    return form?.querySelector(".select__single-value")?.textContent?.replace(/\s+/g, " ").trim() || "";
+  }
+  function collectProgramming() {
+    const mainEl = document.querySelector("main");
+    const form = answerFormEl();
+    if (!mainEl || !form) return null;
+    const cm = [...form.querySelectorAll(".cm-content")].find((x) => x.getAttribute("contenteditable") === "true");
+    if (!cm) return null;
+    const pspId = (location.search.match(/problemSetProblemId=(\d+)/) || [])[1];
+    if (!pspId) return null;
+    const stem = [...mainEl.querySelectorAll("img")].filter((i) => !form.contains(i)).map((i) => i.getAttribute("src") ? i.src : null).filter(Boolean);
+    const imgInfo = { options: {}, stem, total: stem.length };
+    const text = cleanText(mainEl, '[class*="CodingProblemAnswerForm"]');
+    return {
+      id: pspId,
+      label: (text.match(/\d+-\d+/) || [])[0] || null,
+      // 例题号形如 7-1（页面标题开头）
+      kind: "PROGRAMMING",
+      text,
+      langLabel: langLabelOf(),
+      hasImg: imgInfo.total > 0,
+      imgInfo,
+      answered: String(cm.textContent || "").trim().length > 0
+      // 草稿代码非空视作已答
+    };
+  }
+  function programmingIds(psId, typeId) {
+    const out = [];
+    const seen = /* @__PURE__ */ new Set();
+    const re = new RegExp(`^/problem-sets/${psId}/exam/problems/type/${typeId}\\?problemSetProblemId=(\\d+)$`);
+    for (const a of document.querySelectorAll("a[href]")) {
+      const m = (a.getAttribute("href") || "").match(re);
+      if (m && !seen.has(m[1])) {
+        seen.add(m[1]);
+        out.push(m[1]);
+      }
+    }
+    return out;
+  }
+  function compilerIdFromLabel(label) {
+    const l = String(label || "").replace(/\s+/g, " ").trim();
+    for (const [id, name] of Object.entries(COMPILER_LABELS)) if (name === l) return id;
+    return null;
+  }
+  async function getDraftDetail(pspId) {
+    const d = await fetch(`/api/problem-sets/problems/${pspId}/exam-draft`, {
+      headers: { accept: "application/json" },
+      credentials: "include"
+    }).then((r) => r.json()).catch(() => null);
+    return d?.answer?.detail || null;
+  }
+  async function saveDraft(pspId, detail, compilerId, program) {
+    if (!compilerId) return { ok: false, status: null };
+    const body = JSON.stringify({
+      answer: {
+        detail: {
+          problemId: detail?.problemId ?? "0",
+          problemSetProblemId: detail?.problemSetProblemId || pspId,
+          customTestData: detail?.customTestData,
+          // 原样保留（可为 null）
+          programmingSubmissionDetail: { compiler: compilerId, program }
+        }
+      }
+    });
+    let lastStatus = null;
+    let lastErr = null;
+    for (let attempt = 1; attempt <= 4; attempt++) {
+      try {
+        const res = await pacedDraftPost(pspId, body);
+        lastStatus = res.status;
+        if (res.ok) return { ok: true, status: res.status };
+      } catch (err) {
+        lastErr = err;
+        lastStatus = lastStatus ?? null;
+      }
+      if (attempt < 4) await sleep(lastStatus === 429 ? 3e3 : 800);
+    }
+    return { ok: false, status: lastStatus, err: lastErr ? String(lastErr.message || lastErr) : null };
+  }
+  var lastDraftPostAt = 0;
+  async function pacedDraftPost(pspId, body) {
+    const gap = Date.now() - lastDraftPostAt;
+    if (gap < 2200) await sleep(2200 - gap);
+    const res = await fetch(`/api/problem-sets/problems/${pspId}/exam-draft`, {
+      method: "POST",
+      headers: { accept: "application/json", "Content-Type": "application/json" },
+      credentials: "include",
+      body
+    });
+    lastDraftPostAt = Date.now();
+    return res;
+  }
+  function stripDraftHttpCache(pspId) {
+    try {
+      const raw = JSON.parse(localStorage.getItem("user-cache") || "{}");
+      const pat = raw.PAT_HTTP_CACHE ? JSON.parse(raw.PAT_HTTP_CACHE) : null;
+      if (!pat) return;
+      let hit = false;
+      for (const k of Object.keys(pat)) if (/\/exam-draft/.test(k) && new RegExp(`/problems/${pspId}/`).test(k)) {
+        delete pat[k];
+        hit = true;
+      }
+      if (hit) {
+        raw.PAT_HTTP_CACHE = JSON.stringify(pat);
+        localStorage.setItem("user-cache", JSON.stringify(raw));
+      }
+    } catch (_) {
+    }
+  }
+  async function prepNextProblemCache(nextId) {
+    try {
+      const raw = JSON.parse(localStorage.getItem("user-cache") || "{}");
+      const key = `codingProblem_${nextId}`;
+      const entry = raw[key] || null;
+      const cacheProgram = String(entry?.program ?? "");
+      let detailProgram = null;
+      if (cacheProgram) {
+        const detail = await getDraftDetail(nextId);
+        detailProgram = detail?.programmingSubmissionDetail?.program ?? "";
+      }
+      if (!cacheProgram || cacheProgram === detailProgram) {
+        delete raw[key];
+        localStorage.setItem("user-cache", JSON.stringify(raw));
+        return { cleaned: true };
+      }
+      return { cleaned: false, staleUserInput: true };
+    } catch (_) {
+      return { cleaned: false };
+    }
+  }
+  function clearCodingProblemCache(id) {
+    try {
+      const raw = JSON.parse(localStorage.getItem("user-cache") || "{}");
+      if ("codingProblem_" + id in raw === false) return;
+      delete raw["codingProblem_" + id];
+      localStorage.setItem("user-cache", JSON.stringify(raw));
+    } catch (_) {
+    }
+  }
+  async function waitHydrate(expectEnabled) {
+    for (let i = 0; i < 200; i++) {
+      await sleep(100);
+      const b = submitButton();
+      if (!b) continue;
+      if (b.disabled === !expectEnabled) {
+        await sleep(250);
+        const b2 = submitButton();
+        if (b2 && b2.disabled === b.disabled) return { ok: true, disabled: b.disabled };
+      }
+    }
+    return { ok: false };
+  }
+  async function settleEditorState() {
+    let prev = null;
+    for (let i = 0; i < 120; i++) {
+      await sleep(100);
+      const cm = editableCm();
+      if (!cm) continue;
+      const sig = `${(cm.textContent || "").slice(0, 40)}|${submitButton()?.disabled ?? "none"}`;
+      if (sig === prev) return true;
+      prev = sig;
+    }
+    return false;
   }
   function cleanText(el2, extraRemoveSel = "") {
     const clone = el2.cloneNode(true);
@@ -432,6 +692,24 @@
     };
     q.texts.forEach((inp, i) => setInput(inp, answers[i] ?? ""));
     return true;
+  }
+  async function submitProgramming() {
+    const btn = submitButton();
+    if (!btn) return { saved: false, reason: "\u627E\u4E0D\u5230\u300C\u63D0\u4EA4\u672C\u9898\u4F5C\u7B54\u300D\u6309\u94AE" };
+    if (btn.disabled) return { saved: false, reason: "\u63D0\u4EA4\u6309\u94AE\u4E0D\u53EF\u7528\uFF08\u4EE3\u7801\u4E3A\u7A7A\uFF09" };
+    const mark = performance.now();
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      btn.click();
+      for (let i = 0; i < 50; i++) {
+        await sleep(100);
+        const hit = performance.getEntriesByType("resource").some((e) => e.startTime > mark && /\/exam-submissions(\?|$)/.test(e.name));
+        if (hit) {
+          await sleep(300);
+          return { saved: true };
+        }
+      }
+    }
+    return { saved: false, reason: "\u70B9\u51FB\u63D0\u4EA4\u540E\u672A\u89C1 exam-submissions \u8BF7\u6C42" };
   }
   async function saveTypePage() {
     const btn = [...document.querySelectorAll("button")].find((b) => (b.textContent || "").trim() === "\u4FDD\u5B58" && !b.disabled);
@@ -596,6 +874,250 @@
       return { ok: false, reason: "\u5199\u5165\u5931\u8D25\uFF1A" + (err?.message || err) };
     }
   }
+  var RELAY_KEY = "__BPS_AA_PROG_RELAY__";
+  function readRelay() {
+    try {
+      return JSON.parse(sessionStorage.getItem(RELAY_KEY)) || null;
+    } catch (_) {
+      return null;
+    }
+  }
+  function writeRelay(r) {
+    try {
+      sessionStorage.setItem(RELAY_KEY, JSON.stringify(r));
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+  function clearRelay() {
+    try {
+      sessionStorage.removeItem(RELAY_KEY);
+    } catch (_) {
+    }
+  }
+  function startProgrammingRelay(psId, progTypes, cfg) {
+    const problems = [];
+    for (const t of progTypes) {
+      for (const id of programmingIds(psId, t.typeId)) problems.push({ id, typeId: t.typeId, typeName: t.typeName });
+    }
+    if (!problems.length) throw new Error("\u300C\u7F16\u7A0B\u9898\u300D\u627E\u4E0D\u5230\u9898\u76EE\u951A\u70B9\uFF08\u9898\u76EE\u603B\u89C8\u6536\u8D77\uFF1F\u70B9\u5F00\u540E\u91CD\u8BD5\uFF09");
+    const relay = {
+      v: 1,
+      cfg: { ...cfg },
+      psId,
+      problems,
+      pi: 0,
+      phase: "collect",
+      // collect → verify →（advance）→ collect → …
+      summary: { applied: 0, skippedAnswered: 0, skippedImage: 0, failed: [] }
+    };
+    if (!writeRelay(relay)) throw new Error("sessionStorage \u4E0D\u53EF\u5199\uFF0C\u65E0\u6CD5\u8DE8\u9875\u7EED\u8DD1\u7F16\u7A0B\u9898");
+    const first = problems[0];
+    fire({ kind: "log", level: "info", text: `\u7F16\u7A0B\u9898 ${problems.length} \u9898\uFF1A\u8F6C\u300C\u9010\u9898\u6574\u9875\u88C5\u8F7D\u300D\u6A21\u5F0F\uFF0C\u65E5\u5FD7\u968F\u5404\u9875\u51FA\u73B0` });
+    pageScript("if (!window.__BPS_CONFIRM__) { window.__BPS_CONFIRM__ = window.confirm; window.confirm = function(){ return true; }; }");
+    try {
+      location.href = `/problem-sets/${psId}/exam/problems/type/${first.typeId}?problemSetProblemId=${first.id}`;
+    } catch (_) {
+    }
+    return true;
+  }
+  async function resumeRelay(settings3) {
+    const r = readRelay();
+    if (!r || r.v !== 1) return;
+    if (!(settings3 && settings3.autoAnswer)) {
+      clearRelay();
+      fire({ kind: "log", level: "warn", text: "\u7F16\u7A0B\u9898\u7EED\u8DD1\u53D6\u6D88\uFF1A\u603B\u5F00\u5173\u672A\u5F00\u542F" });
+      return;
+    }
+    const prob = r.problems[r.pi];
+    if (!prob) {
+      clearRelay();
+      fire({ kind: "log", level: "warn", text: "\u7F16\u7A0B\u9898\u7EED\u8DD1\u53D6\u6D88\uFF1A\u7EED\u8DD1\u5355\u5DF2\u8D8A\u754C" });
+      return;
+    }
+    if (!new RegExp(`problemSetProblemId=${prob.id}$`).test(location.search)) {
+      clearRelay();
+      fire({ kind: "log", level: "warn", text: "\u7F16\u7A0B\u9898\u7EED\u8DD1\u53D6\u6D88\uFF1A\u9875\u9762\u4E0D\u5728 " + (prob.id || "").slice(-4) + " \u4E0A\uFF08\u5DF2\u843D\u4F4D\u9898\u76EE\u4FDD\u6301\u5404\u81EA\u72B6\u6001\uFF09" });
+      return;
+    }
+    running = true;
+    suppressLeaveConfirm();
+    fire({ kind: "state", running: true });
+    try {
+      stripDraftHttpCache(prob.id);
+      if (r.phase === "verify") {
+        await relayVerify(r, prob);
+      } else {
+        await settleEditorState();
+        await relayCollect(r, prob);
+      }
+    } catch (err) {
+      abortRelay(r, err?.message || String(err));
+    }
+  }
+  function relaySummaryLine(r) {
+    const s = r.summary;
+    return `\u4F5C\u7B54 ${s.applied} \xB7 \u8DF3\u8FC7\u5DF2\u7B54 ${s.skippedAnswered} \xB7 \u8DF3\u8FC7\u542B\u56FE ${s.skippedImage} \xB7 \u5931\u8D25 ${s.failed.length}${r.cfg.drySave ? "\uFF08dry\uFF0C\u672A\u63D0\u4EA4\uFF09" : ""}`;
+  }
+  function abortRelay(r, reason) {
+    clearRelay();
+    fire({ kind: "log", level: "err", text: "\u7F16\u7A0B\u9898\u7EED\u8DD1\u4E2D\u6B62\uFF1A" + reason });
+    fire({ kind: "log", level: "info", text: relaySummaryLine(r) });
+    fire({ kind: "state", running: false, error: reason });
+    running = false;
+    restoreLeaveConfirm();
+  }
+  async function relayNext(r, record, text) {
+    if (record === "ok") {
+      r.summary.applied += 1;
+      if (text) fire({ kind: "log", level: "ok", text });
+    }
+    if (record === "skip") {
+      r.summary.skippedAnswered += 1;
+      if (text) fire({ kind: "log", level: "info", text });
+    }
+    const nextIdx = r.pi + 1;
+    if (nextIdx >= r.problems.length) {
+      const line = relaySummaryLine(r);
+      try {
+        sessionStorage.setItem("__BPS_AA_SUMMARY_DONE__", JSON.stringify({ ok: !r.summary.failed.length, line, failed: r.summary.failed }));
+      } catch (_) {
+      }
+      clearRelay();
+      running = false;
+      restoreLeaveConfirm();
+      const lvl = r.summary.failed.length ? "warn" : "ok";
+      fire({ kind: "log", level: lvl, text: "\u7F16\u7A0B\u9898\u8DE8\u9875\u7EED\u8DD1\u7ED3\u675F\uFF1A" + line });
+      fire({ kind: "state", running: false });
+      return;
+    }
+    r.pi = nextIdx;
+    r.phase = "collect";
+    r.hint = null;
+    const next = r.problems[r.pi];
+    await prepNextProblemCache(next.id);
+    if (!writeRelay(r)) {
+      abortRelay(r, "sessionStorage \u5199\u5165\u5931\u8D25");
+      return;
+    }
+    running = false;
+    restoreLeaveConfirm();
+    try {
+      location.href = `/problem-sets/${r.psId}/exam/problems/type/${next.typeId}?problemSetProblemId=${next.id}`;
+    } catch (_) {
+    }
+  }
+  async function relayCollect(r, prob) {
+    const q = collectProgramming();
+    if (!q) {
+      r.summary.failed.push({ id: prob.id, reason: "\u7F16\u7A0B\u9898\u9875\u9762\u6536\u4E0D\u5230\u9898\u76EE" });
+      return relayNext(r, "fail");
+    }
+    const label = q.label || prob.id.slice(-4);
+    if (q.answered && !r.cfg.overwrite) return relayNext(r, "skip", `${label}\uFF1A\u8DF3\u8FC7\uFF0C\u5DF2\u4F5C\u7B54`);
+    if (q.hasImg && !r.cfg.images) {
+      r.summary.skippedImage += 1;
+      fire({ kind: "log", level: "warn", text: `${label}\uFF1A\u8DF3\u8FC7\uFF0C\u9898\u5E72\u542B\u56FE\u7247\uFF08\u672A\u5F00\u300C\u4F5C\u7B54\u542B\u56FE\u9898\u300D\uFF09` });
+      return relayNext(r, "fail");
+    }
+    const detail = await getDraftDetail(prob.id);
+    const compilerId = r.cfg.language ? r.cfg.language : compilerIdFromLabel(q.langLabel) || (detail?.programmingSubmissionDetail?.compiler || null);
+    if (!compilerId) {
+      r.summary.failed.push({ id: prob.id, reason: `\u8BFB\u4E0D\u5230\u5F53\u524D\u8BED\u8A00\u300C${q.langLabel || "\uFF08\u7A7A\uFF09"}\u300D\uFF0C\u65E0\u6CD5\u786E\u5B9A\u7F16\u8BD1\u5668` });
+      return relayNext(r, "fail");
+    }
+    const wantLangLabel = COMPILER_LABELS[compilerId] || q.langLabel || "";
+    const messages = buildPrompt({ ...q, langLabel: wantLangLabel });
+    let raw = null;
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        raw = globalThis.__BPS_LLM_MOCK__ ? await globalThis.__BPS_LLM_MOCK__(messages) : await chatOnce(r.cfg, messages);
+        break;
+      } catch (err) {
+        if (attempt === 2) {
+          r.summary.failed.push({ id: prob.id, reason: "LLM \u8C03\u7528\u5931\u8D25\uFF1A" + (err?.message || err) });
+          return relayNext(r, "fail");
+        }
+        await sleep(900);
+      }
+    }
+    const code = parseCodeAnswer(raw);
+    if (!code) {
+      r.summary.failed.push({ id: prob.id, reason: "LLM \u8F93\u51FA\u89E3\u6790\u4E0D\u51FA\u4EE3\u7801\uFF1A" + String(raw).slice(0, 60) });
+      return relayNext(r, "fail");
+    }
+    if (code.length > 16384) {
+      r.summary.failed.push({ id: prob.id, reason: `\u4EE3\u7801\u8D85\u957F\uFF08${code.length} \u5B57\u7B26\uFF0C\u5E73\u53F0\u9650 16KB\uFF09` });
+      return relayNext(r, "fail");
+    }
+    const written = await saveDraft(prob.id, detail, compilerId, code);
+    if (!written.ok) {
+      r.summary.failed.push({ id: prob.id, reason: `\u8349\u7A3F\u5199\u5165\u5931\u8D25\uFF08HTTP ${written.status ?? "\u672A\u77E5"}${written.err ? "\uFF1A" + written.err : ""}\uFF09` });
+      return relayNext(r, "fail");
+    }
+    stripDraftHttpCache(prob.id);
+    clearCodingProblemCache(prob.id);
+    r.phase = "verify";
+    r.hint = { label, compilerId, wantLangLabel, head: (code.split("\n")[0] || "").trim().slice(0, 24), detail };
+    if (!writeRelay(r)) {
+      abortRelay(r, "sessionStorage \u5199\u5165\u5931\u8D25");
+      return;
+    }
+    running = false;
+    try {
+      location.reload();
+    } catch (_) {
+    }
+  }
+  async function relayVerify(r, prob) {
+    const hint = r.hint;
+    if (!hint || !hint.head) {
+      abortRelay(r, "verify \u9636\u6BB5\u7F3A\u5C11 hint\uFF08replay \u72B6\u6001\u9519\u4E71\uFF09");
+      return;
+    }
+    const label = hint.label || prob.id.slice(-4);
+    const wantLangLabel = hint.wantLangLabel || "";
+    const compilerId = hint.compilerId;
+    const head = String(hint.head || "").trim();
+    const detail = hint.detail || null;
+    const hyd = await waitHydrate(true);
+    const cmText = editableCm()?.textContent || "";
+    if (!hyd.ok || head && !cmText.includes(head)) {
+      const rollback = await saveDraft(prob.id, detail, compilerId, "");
+      stripDraftHttpCache(prob.id);
+      clearCodingProblemCache(prob.id);
+      r.summary.failed.push({ id: prob.id, reason: "\u6C34\u5408\u6821\u9A8C\u5931\u8D25\uFF08\u7F16\u8F91\u5668\u672A\u56DE\u5E26\u4EE3\u7801\uFF09" + (rollback.ok ? "\uFF0C\u8349\u7A3F\u5DF2\u64A4\u9500" : "\uFF0C\u8349\u7A3F\u6B8B\u7559\u9700\u4EBA\u5DE5\u6838\u5BF9") });
+      if (!rollback.ok) return abortRelay(r, "\u8349\u7A3F\u64A4\u9500\u5931\u8D25\uFF08\u6B8B\u7559\u4EE3\u7801\uFF09\uFF0C\u9700\u4EBA\u5DE5\u6838\u5BF9\u540E\u518D\u8BD5");
+      return relayNext(r, "fail");
+    }
+    const mountedLabel = langLabelOf();
+    if (mountedLabel !== wantLangLabel) {
+      const rollback = await saveDraft(prob.id, detail, compilerId, "");
+      stripDraftHttpCache(prob.id);
+      clearCodingProblemCache(prob.id);
+      r.summary.failed.push({ id: prob.id, reason: `\u8BED\u8A00\u4E0D\u4E00\u81F4\uFF08\u8349\u7A3F ${wantLangLabel}\uFF0C\u5B9E\u6302\u300C${mountedLabel || "\u672A\u77E5"}\u300D\uFF09\uFF0C\u5DF2\u5F03\u7B54\u9632\u9519\u914D` + (rollback.ok ? "\uFF0C\u8349\u7A3F\u5DF2\u64A4\u9500" : "\uFF0C\u8349\u7A3F\u6B8B\u7559\u9700\u4EBA\u5DE5\u6838\u5BF9") });
+      if (!rollback.ok) return abortRelay(r, "\u8349\u7A3F\u64A4\u9500\u5931\u8D25\uFF08\u6B8B\u7559\u4EE3\u7801\uFF09\uFF0C\u9700\u4EBA\u5DE5\u6838\u5BF9\u540E\u518D\u8BD5");
+      return relayNext(r, "fail");
+    }
+    if (r.cfg.drySave) {
+      const rollback = await saveDraft(prob.id, detail, compilerId, "");
+      stripDraftHttpCache(prob.id);
+      clearCodingProblemCache(prob.id);
+      if (!rollback.ok) return abortRelay(r, "dry\uFF1A\u6C34\u5408\u6821\u9A8C\u901A\u8FC7\u540E\u64A4\u9500\u8349\u7A3F\u5931\u8D25\uFF0C\u6B8B\u7559\u9700\u4EBA\u5DE5\u6838\u5BF9");
+      return relayNext(r, "ok", `${label} \u2192 ${head}\u2026\uFF08dry\uFF1A\u8349\u7A3F\u6C34\u5408\u6821\u9A8C\u901A\u8FC7\u540E\u5DF2\u64A4\u9500\uFF0C\u672A\u63D0\u4EA4\uFF09`);
+    }
+    const saved = await submitProgramming();
+    if (!saved.saved) {
+      const rollback = await saveDraft(prob.id, detail, compilerId, "");
+      stripDraftHttpCache(prob.id);
+      clearCodingProblemCache(prob.id);
+      r.summary.failed.push({ id: prob.id, reason: "\u63D0\u4EA4\u5931\u8D25\uFF1A" + saved.reason + (rollback.ok ? "\uFF0C\u8349\u7A3F\u5DF2\u64A4\u9500" : "\uFF0C\u8349\u7A3F\u6B8B\u7559\u542B\u672C\u6B21\u4EE3\u7801\uFF0C\u9700\u4EBA\u5DE5\u6838\u5BF9") });
+      if (!rollback.ok) return abortRelay(r, "\u8349\u7A3F\u64A4\u9500\u5931\u8D25\uFF08\u6B8B\u7559\u4EE3\u7801\uFF09\uFF0C\u9700\u4EBA\u5DE5\u6838\u5BF9\u540E\u518D\u8BD5");
+      return relayNext(r, "fail");
+    }
+    return relayNext(r, "ok", `${label} \u2192 ${head}\u2026\uFF08\u5DF2\u63D0\u4EA4\u8BC4\u6D4B\uFF09`);
+  }
   function pageScript(code) {
     const s = document.createElement("script");
     s.textContent = code;
@@ -616,7 +1138,18 @@
   function setEventSink(fn) {
     eventSink = typeof fn === "function" ? fn : null;
   }
+  var debugTrace = [];
   function fire(event) {
+    debugTrace.push({ ...event, t: Date.now() });
+    if (debugTrace.length > 40) debugTrace.splice(0, debugTrace.length - 40);
+    try {
+      sessionStorage.setItem("__BPS_AA_TRACE__", JSON.stringify(debugTrace));
+    } catch (_) {
+    }
+    try {
+      sessionStorage.setItem("__BPS_AA_LAST_EVENT__", JSON.stringify({ ...event, at: Date.now() }));
+    } catch (_) {
+    }
     try {
       eventSink?.(event);
     } catch (_) {
@@ -633,6 +1166,10 @@
       fire({ kind: "log", level: "warn", text: "\u5DF2\u6709\u4E00\u6B21\u7B54\u9898\u5728\u8FD0\u884C\u4E2D" });
       return { ok: false, error: "\u5DF2\u6709\u4E00\u6B21\u7B54\u9898\u5728\u8FD0\u884C\u4E2D" };
     }
+    if (readRelay()) {
+      fire({ kind: "log", level: "warn", text: "\u7F16\u7A0B\u9898\u8DE8\u9875\u7EED\u8DD1\u6B63\u5728\u8FDB\u884C\uFF08\u770B\u5404\u9875\u60AC\u6D6E\u7403\u72B6\u6001\uFF09\uFF1B\u672C\u9875\u82E5\u5DF2\u4E0D\u5728\u9898\u76EE\u4E0A\u5219\u7EED\u8DD1\u4F1A\u81EA\u884C\u53D6\u6D88" });
+      return { ok: false, error: "\u7F16\u7A0B\u9898\u8DE8\u9875\u7EED\u8DD1\u6B63\u5728\u8FDB\u884C" };
+    }
     const m = location.pathname.match(EXAM_PROBLEMS_RE);
     if (!m || !m[3]) {
       fire({ kind: "log", level: "err", text: "\u8BF7\u5148\u8FDB\u5165\u9898\u578B\u9875\uFF08\u5224\u65AD/\u5355\u9009/\u586B\u7A7A\u6807\u7B7E\uFF09\u518D\u5F00\u59CB" });
@@ -647,6 +1184,8 @@
       overwrite: !!config.overwrite,
       images: !!config.images,
       // 作答含图题（需视觉模型；未开则含图题照旧跳过）
+      language: config.language || "",
+      // 编程题固定语言（白名单 id）；空 = 跟随各题编辑器当前语言
       drySave: !!config.drySave
     };
     if (globalThis.__BPS_LLM_MOCK__ && !cfg.drySave) {
@@ -660,7 +1199,9 @@
     running = true;
     suppressLeaveConfirm();
     const summary = { types: [], applied: 0, skippedAnswered: 0, skippedImage: 0, failed: [], savedTypes: 0, saveFails: [] };
+    const progTypes = [];
     let ret = null;
+    let relayStarted = false;
     try {
       fire({ kind: "state", running: true });
       fire({ kind: "log", level: "info", text: `\u5F00\u59CB\u7B54\u9898\uFF08\u6BCF\u9898\u4E00\u6B21\u8BF7\u6C42\uFF0C${cfg.overwrite ? "\u8986\u76D6\u5DF2\u4F5C\u7B54" : "\u8DF3\u8FC7\u5DF2\u7B54"}${cfg.images ? "\uFF0C\u542B\u56FE\u9898\u4F5C\u7B54" : ""}\uFF09` });
@@ -677,20 +1218,24 @@
         if (!EXAM_PROBLEMS_RE.test(location.pathname) || !location.pathname.includes(psId)) {
           throw new Error("\u5DF2\u79BB\u5F00\u539F\u9898\u76EE\u9875\uFF0C\u4E2D\u6B62");
         }
+        const type = TYPE_BY_NAME[t.typeName];
+        const isProg = type === "PROGRAMMING";
         if (!location.pathname.endsWith(`/type/${t.typeId}`)) {
           const link = [...document.querySelectorAll("a[href]")].find((a) => (a.getAttribute("href") || "").match(`^/problem-sets/${psId}/exam/problems/type/${t.typeId}$`));
           if (!link) throw new Error(`\u627E\u4E0D\u5230\u300C${t.typeName}\u300D\u7684\u9875\u9762\u94FE\u63A5`);
           link.click();
-          const type2 = TYPE_BY_NAME[t.typeName];
           let ready = false;
           for (let i = 0; i < 60 && !ready; i++) {
             await sleep(100);
-            ready = location.pathname.endsWith(`/type/${t.typeId}`) && collectPage().filter((q) => q.kind === type2).length >= t.total;
+            ready = location.pathname.endsWith(`/type/${t.typeId}`) && (isProg ? programmingIds(psId, t.typeId).length > 0 || !!editableCm() : collectPage().filter((q) => q.kind === type).length >= t.total);
           }
           if (!ready) throw new Error(`\u300C${t.typeName}\u300D\u9875\u9762\u672A\u5C31\u7EEA\uFF08\u4FA7\u680F\u7EDF\u8BA1 ${t.total} \u9898\uFF09`);
         }
         await sleep(300);
-        const type = TYPE_BY_NAME[t.typeName];
+        if (isProg) {
+          progTypes.push(t);
+          continue;
+        }
         const questions = collectPage().filter((q) => q.kind === type);
         if (!questions.length) throw new Error(`\u300C${t.typeName}\u300D\u9875\u9762\u6536\u96C6\u4E0D\u5230\u9898\u76EE`);
         fire({ kind: "log", level: "info", text: `\u300C${t.typeName}\u300D\u5171 ${questions.length} \u9898\uFF0C\u5F00\u59CB\u4F5C\u7B54` });
@@ -748,14 +1293,21 @@
         summary.types.push({ type: t.typeName, total: questions.length, applied: pg.applied, skippedAnswered: pg.skippedAnswered, skippedImage: pg.skippedImage, failed: stats.failed.length, saved: saved?.saved === true });
       }
       ret = { ok: true, summary };
+      if (progTypes.length) {
+        if (startProgrammingRelay(psId, progTypes, cfg)) {
+          relayStarted = true;
+          summary.types.push({ type: "\u7F16\u7A0B\u9898", total: progTypes.reduce((n, x) => n + x.total, 0), applied: 0, skippedAnswered: 0, skippedImage: 0, failed: 0, saved: false });
+          ret = { ok: true, relay: true, summary };
+        }
+      }
     } catch (err) {
       ret = { ok: false, error: err?.message || String(err), summary };
     } finally {
       running = false;
-      restoreLeaveConfirm();
+      if (!relayStarted) restoreLeaveConfirm();
       if (ret.ok) {
         const failN = ret.summary.failed.length;
-        fire({ kind: "log", level: failN ? "warn" : "ok", text: `\u5B8C\u6210\uFF1A\u4F5C\u7B54 ${ret.summary.applied} \xB7 \u8DF3\u8FC7\u5DF2\u7B54 ${ret.summary.skippedAnswered} \xB7 \u8DF3\u8FC7\u542B\u56FE ${ret.summary.skippedImage} \xB7 \u5931\u8D25 ${failN}${cfg.drySave ? "\uFF08\u672A\u4FDD\u5B58\uFF09" : ""}` });
+        fire({ kind: "log", level: failN ? "warn" : "ok", text: `${ret.relay ? "\u5BA2\u89C2\u9898\u5B8C\u6210\uFF08\u7F16\u7A0B\u9898\u5DF2\u8F6C\u9010\u9875\u7EED\u8DD1\uFF0C\u65E5\u5FD7\u968F\u5404\u9875\u51FA\u73B0\uFF09" : `\u5B8C\u6210\uFF1A\u4F5C\u7B54 ${ret.summary.applied} \xB7 \u8DF3\u8FC7\u5DF2\u7B54 ${ret.summary.skippedAnswered} \xB7 \u8DF3\u8FC7\u542B\u56FE ${ret.summary.skippedImage} \xB7 \u5931\u8D25 ${failN}${cfg.drySave ? "\uFF08\u672A\u4FDD\u5B58\uFF09" : ""}`}` });
         fire({ kind: "state", running: false });
       } else {
         fire({ kind: "log", level: "err", text: "\u5DF2\u4E2D\u6B62\uFF1A" + ret.error });
@@ -1097,6 +1649,15 @@ input:disabled, button:disabled { opacity: .5; cursor: not-allowed; }
     mname.autocomplete = "off";
     mname.spellcheck = false;
     el("p", "hint", fModelName).textContent = "\u7559\u7A7A\u5373\u7528\u8BE5\u670D\u52A1\u7684\u9ED8\u8BA4\u6A21\u578B";
+    const fLang = el("div", "field", body);
+    el("label", "flabel", fLang).textContent = "\u8BED\u8A00\uFF08\u7F16\u7A0B\u9898\uFF09";
+    fLang.querySelector("label").htmlFor = "aa-lang";
+    const lsel = el("select", "", fLang);
+    lsel.id = "aa-lang";
+    const oFollow = el("option", "", lsel);
+    oFollow.value = "";
+    oFollow.textContent = "\u8DDF\u968F\u7F16\u8F91\u5668\u5F53\u524D\u8BED\u8A00";
+    el("p", "hint", fLang).textContent = "\u672C\u9898\u96C6\u5141\u8BB8\u7684\u8BED\u8A00\uFF1B\u4F5C\u7B54\u6309\u6240\u9009\u8BED\u8A00\u51FA\u7801\u5E76\u63D0\u4EA4\u8BC4\u6D4B";
     const fKey = el("div", "field", body);
     el("label", "flabel", fKey).textContent = "API Key";
     fKey.querySelector("label").htmlFor = "aa-key";
@@ -1145,6 +1706,7 @@ input:disabled, button:disabled { opacity: .5; cursor: not-allowed; }
     logs.setAttribute("aria-live", "polite");
     el("p", "foot", body).textContent = "\u5B9E\u9A8C\u529F\u80FD\uFF1A\u7B54\u9898\u4E2D\u5E73\u53F0\u4E0D\u53CD\u9988\u5BF9\u9519\uFF0C\u5B8C\u6210\u540E\u8BF7\u81EA\u884C\u6838\u5BF9\u7ED3\u679C\u3002";
     el("p", "foot", body).textContent = "\u6587\u672C\u6A21\u578B\u770B\u4E0D\u89C1\u56FE\u7247\uFF1A\u9898\u5E72/\u9009\u9879\u542B\u56FE\u7684\u9898\u8981\u4E48\u8DF3\u8FC7\uFF0C\u8981\u4E48\u5207\u5230\u89C6\u89C9\u6A21\u578B\uFF08\u5982 deepseek-flash\uFF09\u5E76\u5F00\u542F\u300C\u4F5C\u7B54\u542B\u56FE\u9898\u300D\u3002";
+    el("p", "foot", body).textContent = "\u7F16\u7A0B\u9898\u63D0\u4EA4\u5373\u8BC4\u6D4B\uFF1A\u4F5C\u7B54\u4F1A\u5B9E\u65F6\u751F\u6210\u63D0\u4EA4\u8BB0\u5F55\u4E0E\u4F5C\u7B54\u5EA6\uFF0C\u6210\u7EE9\u7531\u8BC4\u6D4B\u7ED3\u679C\u51B3\u5B9A\uFF0C\u4E0E\u5BA2\u89C2\u9898\u5224\u5206\u8DEF\u5F84\u4E0D\u540C\u3002";
     ball.addEventListener("click", () => togglePanel());
     collapse.addEventListener("click", closePanel);
     panel.addEventListener("keydown", (e) => {
@@ -1169,6 +1731,7 @@ input:disabled, button:disabled { opacity: .5; cursor: not-allowed; }
     key.value = ((settings || {}).autoAnswerApiKey || "").trim();
     ovw.checked = !!(settings || {}).autoAnswerOverwrite;
     imgs.checked = !!(settings || {}).autoAnswerImages;
+    refreshLangOptions();
     applyPreset();
     sel.addEventListener("change", () => {
       applyPreset();
@@ -1177,6 +1740,7 @@ input:disabled, button:disabled { opacity: .5; cursor: not-allowed; }
     burl.addEventListener("change", persist);
     mname.addEventListener("change", persist);
     key.addEventListener("change", persist);
+    lsel.addEventListener("change", persist);
     ovw.addEventListener("change", persist);
     imgs.addEventListener("change", persist);
     clear.addEventListener("click", () => {
@@ -1194,6 +1758,77 @@ input:disabled, button:disabled { opacity: .5; cursor: not-allowed; }
     host = null;
     shadow = null;
     open = false;
+    langPsId = null;
+  }
+  var langPsId = null;
+  async function refreshLangOptions() {
+    if (!shadow) return;
+    const psId = (location.pathname.match(EXAM_PROBLEMS_RE) || [])[1];
+    if (!psId || langPsId === psId) return;
+    langPsId = psId;
+    const lsel = shadow.getElementById("aa-lang");
+    if (!lsel) return;
+    const want = (settings || {}).autoAnswerLanguage || "";
+    let allowed = null;
+    try {
+      allowed = await fetchAllowedCompilers(psId);
+    } catch (_) {
+    }
+    if (!shadow) return;
+    const ids = Array.isArray(allowed) && allowed.length ? allowed : Object.keys(COMPILER_LABELS);
+    while (lsel.options.length > 1) lsel.remove(1);
+    for (const id of ids) {
+      const o = el("option", "", lsel);
+      o.value = id;
+      o.textContent = COMPILER_LABELS[id] || id;
+    }
+    lsel.value = [...lsel.options].some((o) => o.value === want) ? want : "";
+    if (want && lsel.value !== want) {
+      appendLog("warn", `\u4E0A\u6B21\u56FA\u5B9A\u8BED\u8A00\u300C${COMPILER_LABELS[want] || want}\u300D\u4E0D\u5728\u672C\u9898\u96C6\u5141\u8BB8\u5217\u8868\uFF0C\u5DF2\u6539\u56DE\u8DDF\u968F\u5F53\u524D`);
+    }
+  }
+  function togglePanel() {
+    if (!shadow) return;
+    open ? closePanel() : openPanel();
+  }
+  function openPanel() {
+    if (!shadow) return;
+    const panel = shadow.getElementById("panel");
+    const ball = shadow.getElementById("ball");
+    panel.hidden = false;
+    ball.setAttribute("aria-expanded", "true");
+    open = true;
+    updateRunUI();
+    const first = shadow.getElementById("aa-model");
+    if (first) first.focus();
+  }
+  function closePanel() {
+    if (!shadow) return;
+    const panel = shadow.getElementById("panel");
+    const ball = shadow.getElementById("ball");
+    if (panel) panel.hidden = true;
+    if (ball) {
+      ball.setAttribute("aria-expanded", "false");
+      ball.focus();
+    }
+    open = false;
+  }
+  async function persist() {
+    if (!shadow) return;
+    const apiKey = shadow.getElementById("aa-key").value.trim();
+    const overwrite = shadow.getElementById("aa-overwrite").checked;
+    const withImages = shadow.getElementById("aa-images").checked;
+    const gw = shadow.getElementById("aa-model");
+    const gateway = PRESETS[gw.value] ? gw.value : "deepseek";
+    const baseUrl = (shadow.getElementById("aa-base")?.value || "").trim();
+    const model = (shadow.getElementById("aa-model-name")?.value || "").trim();
+    const lang = shadow.getElementById("aa-lang");
+    const language = lang ? lang.value.trim() : "";
+    try {
+      const fresh = await loadSettings();
+      await saveSettings({ ...fresh, autoAnswerApiKey: apiKey, autoAnswerOverwrite: overwrite, autoAnswerImages: withImages, autoAnswerGateway: gateway, autoAnswerBaseUrl: baseUrl, autoAnswerModel: model, autoAnswerLanguage: language });
+    } catch (_) {
+    }
   }
   async function startRun() {
     if (isRunning()) return;
@@ -1225,6 +1860,7 @@ input:disabled, button:disabled { opacity: .5; cursor: not-allowed; }
     }
     const overwrite = shadow.getElementById("aa-overwrite").checked;
     const withImages = shadow.getElementById("aa-images").checked;
+    const language = (shadow.getElementById("aa-lang")?.value || "").trim();
     await persist();
     const result = await handleRun({
       baseUrl,
@@ -1232,7 +1868,8 @@ input:disabled, button:disabled { opacity: .5; cursor: not-allowed; }
       apiKey,
       overwrite,
       images: withImages,
-      gateway: preset.gateway
+      gateway: preset.gateway,
+      language
     });
     if (!result.ok && result.error === "\u5DF2\u6709\u4E00\u6B21\u7B54\u9898\u5728\u8FD0\u884C\u4E2D") appendLog("warn", "\u5DF2\u6709\u4E00\u6B21\u7B54\u9898\u5728\u8FD0\u884C\u4E2D");
   }
@@ -1240,6 +1877,7 @@ input:disabled, button:disabled { opacity: .5; cursor: not-allowed; }
     settings = s || settings;
     const shouldShow = !!settings && !!settings.autoAnswer && EXAM_PROBLEMS_RE.test(location.pathname);
     if (shouldShow && !host) mount();
+    if (shouldShow) refreshLangOptions();
     if (!shouldShow && host) {
       if (isRunning()) {
         if (shadow) closePanel();
@@ -2003,6 +2641,8 @@ input:disabled, button:disabled { opacity: .5; cursor: not-allowed; }
     }
     armOnce();
     sync(settings2);
+    void resumeRelay(settings2).catch(() => {
+    });
     const mo = new MutationObserver((muts) => {
       for (const m of muts) {
         const relevant = [...m.addedNodes, ...m.removedNodes].some((n) => n.nodeType === 1 && !n.closest?.(".bps-root") && !n.closest?.(".bps-clone") && !n.closest?.(".bps-aa"));
@@ -2037,12 +2677,15 @@ input:disabled, button:disabled { opacity: .5; cursor: not-allowed; }
     teardown,
     DEFAULTS,
     // 自动答题调试与回归入口：run 走完整流程（配合 __BPS_LLM_MOCK__ 可 mock LLM），
-    // collect 只收集当前题型页的题目（验证提取纯度用）
+    // collect 收集客观题、programming 收集编程题（一页一题形态，验证提取纯度用）；
+    // resumeRelay 手动触发编程题跨文档续跑的恢复（真机回归用）
     autoAnswer: {
       run: (config = {}) => handleRun(config),
       collect: () => collectPage(),
-      types: () => sidebarTypes()
+      types: () => sidebarTypes(),
+      programming: () => collectProgramming()
     },
+    resumeRelay: () => resumeRelay(settings2),
     setSettings: async (patch) => {
       settings2 = { ...settings2, ...patch };
       await saveSettings(settings2);
