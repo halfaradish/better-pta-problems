@@ -142,7 +142,11 @@ select:focus-visible { outline: none; border-color: var(--accent); box-shadow: 0
 .keyrow { position: relative; }
 .keyrow input, .mrow input { width: 100%; padding: 7px 10px; border: 1px solid var(--input-border);
   border-radius: 9px; background: var(--input-bg); color: var(--text); font: inherit; }
-.keyrow input { padding-right: 52px; } /* 右侧留给显示/隐藏按钮 */
+.keyrow input { padding-right: 52px; /* 右侧留给显示/隐藏按钮 */
+  /* 用 text-security 遮罩而不是 type=password：Chrome 密码管理器只盯真密码框，
+   * 真密码框的值一变就弹「要更新密码吗？」（把 API Key 当成 PTA 账号的新密码） */
+  -webkit-text-security: disc; }
+.keyrow input.reveal { -webkit-text-security: none; } /* 「显示」态：明文回显 */
 .keyrow input:focus-visible, .mrow input:focus-visible { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-ring); }
 .keyrow .peek { position: absolute; right: 5px; top: 50%; transform: translateY(-50%);
   height: 24px; padding: 0 7px; border: none; border-radius: 6px; background: none;
@@ -468,7 +472,9 @@ function mount() {
   const keyrow = el('div', 'keyrow', fKey);
   const key = el('input', '', keyrow);
   key.id = 'aa-key';
-  key.type = 'password';
+  // 必须 type=text：真密码框会触发浏览器密码管理器的「要更新密码吗？」（API Key 被当成
+  // PTA 账号新密码）；遮罩走 .keyrow input 的 -webkit-text-security，「显示」切 reveal 类
+  key.type = 'text';
   key.placeholder = 'sk-…';
   key.autocomplete = 'off';
   key.spellcheck = false;
@@ -558,8 +564,8 @@ function mount() {
   collapse.addEventListener('click', closePanel);
   panel.addEventListener('keydown', e => { if (e.key === 'Escape') closePanel(); });
   peek.addEventListener('click', () => {
-    const show = key.type === 'password';
-    key.type = show ? 'text' : 'password';
+    const show = !key.classList.contains('reveal');
+    key.classList.toggle('reveal', show);
     peek.textContent = show ? '隐藏' : '显示';
   });
   const applyPreset = () => {

@@ -1438,7 +1438,11 @@ select:focus-visible { outline: none; border-color: var(--accent); box-shadow: 0
 .keyrow { position: relative; }
 .keyrow input, .mrow input { width: 100%; padding: 7px 10px; border: 1px solid var(--input-border);
   border-radius: 9px; background: var(--input-bg); color: var(--text); font: inherit; }
-.keyrow input { padding-right: 52px; } /* \u53F3\u4FA7\u7559\u7ED9\u663E\u793A/\u9690\u85CF\u6309\u94AE */
+.keyrow input { padding-right: 52px; /* \u53F3\u4FA7\u7559\u7ED9\u663E\u793A/\u9690\u85CF\u6309\u94AE */
+  /* \u7528 text-security \u906E\u7F69\u800C\u4E0D\u662F type=password\uFF1AChrome \u5BC6\u7801\u7BA1\u7406\u5668\u53EA\u76EF\u771F\u5BC6\u7801\u6846\uFF0C
+   * \u771F\u5BC6\u7801\u6846\u7684\u503C\u4E00\u53D8\u5C31\u5F39\u300C\u8981\u66F4\u65B0\u5BC6\u7801\u5417\uFF1F\u300D\uFF08\u628A API Key \u5F53\u6210 PTA \u8D26\u53F7\u7684\u65B0\u5BC6\u7801\uFF09 */
+  -webkit-text-security: disc; }
+.keyrow input.reveal { -webkit-text-security: none; } /* \u300C\u663E\u793A\u300D\u6001\uFF1A\u660E\u6587\u56DE\u663E */
 .keyrow input:focus-visible, .mrow input:focus-visible { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-ring); }
 .keyrow .peek { position: absolute; right: 5px; top: 50%; transform: translateY(-50%);
   height: 24px; padding: 0 7px; border: none; border-radius: 6px; background: none;
@@ -1724,7 +1728,7 @@ input:disabled, button:disabled { opacity: .5; cursor: not-allowed; }
     const keyrow = el("div", "keyrow", fKey);
     const key = el("input", "", keyrow);
     key.id = "aa-key";
-    key.type = "password";
+    key.type = "text";
     key.placeholder = "sk-\u2026";
     key.autocomplete = "off";
     key.spellcheck = false;
@@ -1817,8 +1821,8 @@ input:disabled, button:disabled { opacity: .5; cursor: not-allowed; }
       if (e.key === "Escape") closePanel();
     });
     peek.addEventListener("click", () => {
-      const show = key.type === "password";
-      key.type = show ? "text" : "password";
+      const show = !key.classList.contains("reveal");
+      key.classList.toggle("reveal", show);
       peek.textContent = show ? "\u9690\u85CF" : "\u663E\u793A";
     });
     const applyPreset = () => {
