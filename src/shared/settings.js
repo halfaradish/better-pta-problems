@@ -17,7 +17,7 @@ export const DEFAULTS = {
   reminderEmail: '',      // 提醒邮件接收邮箱
   // 自动答题（实验）：入口为题目页的悬浮球面板（弹窗只留总开关），见 docs/自动答题初探.md §9
   autoAnswer: false,          // 题目列表页显示悬浮答题球（实验功能，默认关）
-  autoAnswerApiKey: '',       // 模型服务 API Key（DeepSeek / OpenCode Go），仅存本机扩展存储，答题时页面上下文直连
+  autoAnswerApiKeys: {},      // 每个模型服务各存一把 Key（键 = PRESETS 键），切服务不互相覆盖
   autoAnswerGateway: 'deepseek', // 悬浮面板选中的模型适配（content/autoanswer-panel.js 的 PRESETS 键）
   autoAnswerModel: '',        // 可自填网关的模型名（OpenCode Go / 自定义）；空 = 用适配预设的默认模型
   autoAnswerBaseUrl: '',      // 「自定义」服务的 OpenAI 兼容端点（填到 /v1；仅选自定义时用）
@@ -27,7 +27,7 @@ export const DEFAULTS = {
   settingsVersion: 0,     // 0 = 旧版设置；v4 起「列表/分组」不再持久化（改为按路由的会话内状态）
 };
 
-export const SETTINGS_VERSION = 5;
+export const SETTINGS_VERSION = 6;
 
 // 扩展环境用 chrome.storage.sync（跨设备同步）；预览页 / 独立打开的弹窗退化为内存
 export const HAS_CHROME_STORAGE = typeof chrome !== 'undefined' && !!chrome.storage?.sync;
@@ -40,6 +40,12 @@ export function migrate(raw) {
   const s = { ...DEFAULTS, ...(raw || {}) };
   if (needsMigration(s)) {
     delete s.grouped;                 // 旧版持久化的视图偏好，现已由会话内状态接管
+    // v6：API Key 改为按服务各存一把 —— 旧的单把 Key 归入当前选中的服务名下，
+    // 这样切服务不再互相覆盖；迁移后旧字段清掉
+    if (typeof s.autoAnswerApiKey === 'string' && s.autoAnswerApiKey) {
+      s.autoAnswerApiKeys = { ...(s.autoAnswerApiKeys || {}), [s.autoAnswerGateway || 'deepseek']: s.autoAnswerApiKey };
+    }
+    delete s.autoAnswerApiKey;
     s.settingsVersion = SETTINGS_VERSION;
   }
   return s;

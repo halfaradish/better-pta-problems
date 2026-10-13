@@ -52,6 +52,25 @@ export function resolveModel(preset, raw) {
   return preset.editableModel && v ? v : preset.model;
 }
 
+// —— 按服务读写的 API Key（autoAnswerApiKeys：键 = PRESETS 键，每个服务各存一把） ——
+
+// 读某服务当前的 Key（键不存在/旧版存储形态皆回空串）
+export function currentKey(s, gateway) {
+  const gw = PRESETS[gateway] ? gateway : 'deepseek';
+  const map = (s || {}).autoAnswerApiKeys;
+  return (map && typeof map === 'object' && !Array.isArray(map)) ? String(map[gw] ?? '').trim() : '';
+}
+
+// 写：返回把 value 归档到 gateway 名下后的设置对象（只动当前服务的键，其余原样保留；
+// 不改传入对象——它可能是与 DEFAULTS 共享引用的合并结果）
+export function withKeyFor(s, gateway, value) {
+  const gw = PRESETS[gateway] ? gateway : 'deepseek';
+  const prior = (s || {}).autoAnswerApiKeys;
+  const map = (prior && typeof prior === 'object' && !Array.isArray(prior)) ? { ...prior } : {};
+  map[gw] = String(value ?? '').trim();
+  return { ...s, autoAnswerApiKeys: map };
+}
+
 const MAX_LOG_LINES = 200; // 日志上限：防长跑爆内存，超出丢最旧
 
 const CSS = `
@@ -411,7 +430,7 @@ function mount() {
   peek.id = 'aa-peek';
   peek.textContent = '显示';
   peek.setAttribute('aria-label', '显示或隐藏 API Key');
-  el('p', 'hint', fKey).textContent = '仅保存在本机浏览器，答题时页面直连模型服务';
+  el('p', 'hint', fKey).textContent = '每个服务各存一把 Key，切服务自动带出；仅保存在本机浏览器';
 
   const sw = el('label', 'switchrow', body);
   sw.htmlFor = 'aa-overwrite';
@@ -474,13 +493,22 @@ function mount() {
   if (settings && PRESETS[settings.autoAnswerGateway]) sel.value = settings.autoAnswerGateway;
   burl.value = ((settings || {}).autoAnswerBaseUrl || '').trim();
   mname.value = ((settings || {}).autoAnswerModel || '').trim();
-  key.value = ((settings || {}).autoAnswerApiKey || '').trim();
+  key.value = currentKey(settings, sel.value); // 按当前服务的映射取回上文 Key
   ovw.checked = !!((settings || {}).autoAnswerOverwrite);
   imgs.checked = !!((settings || {}).autoAnswerImages);
   // 语言选项异步填充（拉本题集白名单后再恢复上次固定值）
   refreshLangOptions();
   applyPreset();
-  sel.addEventListener('change', () => { applyPreset(); persist(); });
+  // 服务切换：手头输入先归档给切换前的服务（keyOwner），再换上新服务的 Key；其余字段照旧 persist
+  let keyOwner = sel.value;
+  sel.addEventListener('change', async () => {
+    await saveKeyFor(keyOwner, key.value);
+    keyOwner = sel.value;
+    applyPreset();
+    const fresh = await loadSettings();
+    key.value = currentKey(fresh, sel.value);
+    await persist();
+  });
   burl.addEventListener('change', persist);
   mname.addEventListener('change', persist);
   key.addEventListener('change', persist);
@@ -565,6 +593,16 @@ function closePanel() {
 
 /* ---------- 配置持久化（与弹窗/其他入口合并写，避免互相抹掉） ---------- */
 
+// 把 value 归档到指定服务名下（切换服务时先把切换前的输入归回去用）
+async function saveKeyFor(gateway, value) {
+  try {
+    const fresh = await loadSettings();
+    const next = withKeyFor(fresh, gateway, value);
+    await saveSettings(next);
+    settings = next; // 面板闭包里的 settings 同步，后续 currentKey 读到一致的映射
+  } catch (_) { /* 存储失败不阻断 UI */ }
+}
+
 async function persist() {
   if (!shadow) return;
   const apiKey = shadow.getElementById('aa-key').value.trim();
@@ -578,7 +616,8 @@ async function persist() {
   const language = lang ? lang.value.trim() : '';
   try {
     const fresh = await loadSettings();
-    await saveSettings({ ...fresh, autoAnswerApiKey: apiKey, autoAnswerOverwrite: overwrite, autoAnswerImages: withImages, autoAnswerGateway: gateway, autoAnswerBaseUrl: baseUrl, autoAnswerModel: model, autoAnswerLanguage: language });
+    // Key 归档进当前服务的名下（withKeyFor 只动这一个键，其他服务的 Key 原样保留）
+    await saveSettings({ ...withKeyFor(fresh, gateway, apiKey), autoAnswerOverwrite: overwrite, autoAnswerImages: withImages, autoAnswerGateway: gateway, autoAnswerBaseUrl: baseUrl, autoAnswerModel: model, autoAnswerLanguage: language });
   } catch (_) { /* 存储失败不阻断 UI */ }
 }
 

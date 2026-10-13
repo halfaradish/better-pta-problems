@@ -27,8 +27,8 @@
     // 自动答题（实验）：入口为题目页的悬浮球面板（弹窗只留总开关），见 docs/自动答题初探.md §9
     autoAnswer: false,
     // 题目列表页显示悬浮答题球（实验功能，默认关）
-    autoAnswerApiKey: "",
-    // 模型服务 API Key（DeepSeek / OpenCode Go），仅存本机扩展存储，答题时页面上下文直连
+    autoAnswerApiKeys: {},
+    // 每个模型服务各存一把 Key（键 = PRESETS 键），切服务不互相覆盖
     autoAnswerGateway: "deepseek",
     // 悬浮面板选中的模型适配（content/autoanswer-panel.js 的 PRESETS 键）
     autoAnswerModel: "",
@@ -44,7 +44,7 @@
     settingsVersion: 0
     // 0 = 旧版设置；v4 起「列表/分组」不再持久化（改为按路由的会话内状态）
   };
-  var SETTINGS_VERSION = 5;
+  var SETTINGS_VERSION = 6;
   var HAS_CHROME_STORAGE = typeof chrome !== "undefined" && !!chrome.storage?.sync;
   function needsMigration(raw) {
     return (raw?.settingsVersion || 0) < SETTINGS_VERSION;
@@ -53,6 +53,10 @@
     const s = { ...DEFAULTS, ...raw || {} };
     if (needsMigration(s)) {
       delete s.grouped;
+      if (typeof s.autoAnswerApiKey === "string" && s.autoAnswerApiKey) {
+        s.autoAnswerApiKeys = { ...s.autoAnswerApiKeys || {}, [s.autoAnswerGateway || "deepseek"]: s.autoAnswerApiKey };
+      }
+      delete s.autoAnswerApiKey;
       s.settingsVersion = SETTINGS_VERSION;
     }
     return s;
@@ -1352,6 +1356,18 @@
     const v = String(raw || "").trim();
     return preset.editableModel && v ? v : preset.model;
   }
+  function currentKey(s, gateway) {
+    const gw = PRESETS[gateway] ? gateway : "deepseek";
+    const map = (s || {}).autoAnswerApiKeys;
+    return map && typeof map === "object" && !Array.isArray(map) ? String(map[gw] ?? "").trim() : "";
+  }
+  function withKeyFor(s, gateway, value) {
+    const gw = PRESETS[gateway] ? gateway : "deepseek";
+    const prior = (s || {}).autoAnswerApiKeys;
+    const map = prior && typeof prior === "object" && !Array.isArray(prior) ? { ...prior } : {};
+    map[gw] = String(value ?? "").trim();
+    return { ...s, autoAnswerApiKeys: map };
+  }
   var MAX_LOG_LINES = 200;
   var CSS = `
 :host { all: initial; }
@@ -1673,7 +1689,7 @@ input:disabled, button:disabled { opacity: .5; cursor: not-allowed; }
     peek.id = "aa-peek";
     peek.textContent = "\u663E\u793A";
     peek.setAttribute("aria-label", "\u663E\u793A\u6216\u9690\u85CF API Key");
-    el("p", "hint", fKey).textContent = "\u4EC5\u4FDD\u5B58\u5728\u672C\u673A\u6D4F\u89C8\u5668\uFF0C\u7B54\u9898\u65F6\u9875\u9762\u76F4\u8FDE\u6A21\u578B\u670D\u52A1";
+    el("p", "hint", fKey).textContent = "\u6BCF\u4E2A\u670D\u52A1\u5404\u5B58\u4E00\u628A Key\uFF0C\u5207\u670D\u52A1\u81EA\u52A8\u5E26\u51FA\uFF1B\u4EC5\u4FDD\u5B58\u5728\u672C\u673A\u6D4F\u89C8\u5668";
     const sw = el("label", "switchrow", body);
     sw.htmlFor = "aa-overwrite";
     const stxt = el("span", "stxt", sw);
@@ -1728,14 +1744,19 @@ input:disabled, button:disabled { opacity: .5; cursor: not-allowed; }
     if (settings && PRESETS[settings.autoAnswerGateway]) sel.value = settings.autoAnswerGateway;
     burl.value = ((settings || {}).autoAnswerBaseUrl || "").trim();
     mname.value = ((settings || {}).autoAnswerModel || "").trim();
-    key.value = ((settings || {}).autoAnswerApiKey || "").trim();
+    key.value = currentKey(settings, sel.value);
     ovw.checked = !!(settings || {}).autoAnswerOverwrite;
     imgs.checked = !!(settings || {}).autoAnswerImages;
     refreshLangOptions();
     applyPreset();
-    sel.addEventListener("change", () => {
+    let keyOwner = sel.value;
+    sel.addEventListener("change", async () => {
+      await saveKeyFor(keyOwner, key.value);
+      keyOwner = sel.value;
       applyPreset();
-      persist();
+      const fresh = await loadSettings();
+      key.value = currentKey(fresh, sel.value);
+      await persist();
     });
     burl.addEventListener("change", persist);
     mname.addEventListener("change", persist);
@@ -1813,6 +1834,15 @@ input:disabled, button:disabled { opacity: .5; cursor: not-allowed; }
     }
     open = false;
   }
+  async function saveKeyFor(gateway, value) {
+    try {
+      const fresh = await loadSettings();
+      const next = withKeyFor(fresh, gateway, value);
+      await saveSettings(next);
+      settings = next;
+    } catch (_) {
+    }
+  }
   async function persist() {
     if (!shadow) return;
     const apiKey = shadow.getElementById("aa-key").value.trim();
@@ -1826,7 +1856,7 @@ input:disabled, button:disabled { opacity: .5; cursor: not-allowed; }
     const language = lang ? lang.value.trim() : "";
     try {
       const fresh = await loadSettings();
-      await saveSettings({ ...fresh, autoAnswerApiKey: apiKey, autoAnswerOverwrite: overwrite, autoAnswerImages: withImages, autoAnswerGateway: gateway, autoAnswerBaseUrl: baseUrl, autoAnswerModel: model, autoAnswerLanguage: language });
+      await saveSettings({ ...withKeyFor(fresh, gateway, apiKey), autoAnswerOverwrite: overwrite, autoAnswerImages: withImages, autoAnswerGateway: gateway, autoAnswerBaseUrl: baseUrl, autoAnswerModel: model, autoAnswerLanguage: language });
     } catch (_) {
     }
   }

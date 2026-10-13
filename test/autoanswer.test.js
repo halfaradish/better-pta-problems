@@ -6,7 +6,7 @@ import {
   assembleImgMessage, buildPrompt, COMPILER_LABELS, compilerIdFromLabel, normalizeBaseUrl, normalizeTF,
   parseChoiceAnswer, parseCodeAnswer, parseFillAnswers, TYPE_BY_NAME,
 } from '../src/content/autoanswer.js';
-import { PRESETS, resolveModel } from '../src/content/autoanswer-panel.js';
+import { PRESETS, currentKey, resolveModel, withKeyFor } from '../src/content/autoanswer-panel.js';
 
 test('parseChoiceAnswer：裸字母 / 带句点 / JSON 文本 / 代码围栏', () => {
   for (const raw of ['C', 'c', 'C. 分治', 'C、', '```json\n{"answer":"C"}\n```']) {
@@ -139,6 +139,26 @@ test('resolveModel：可自填网关用输入值（trim，空回默认），固�
   assert.equal(resolveModel(PRESETS.opencode, null), 'glm-5.3-flash');
   assert.equal(resolveModel(PRESETS.deepseek, 'kimi-k6'), 'deepseek-flash');
   assert.equal(resolveModel(PRESETS.custom, ''), '');
+});
+
+test('currentKey/withKeyFor：API Key 按服务各存一把，切换服务不互相覆盖', () => {
+  // 写入 A 服务不动 B 服务
+  const s1 = withKeyFor({ autoAnswerApiKeys: { deepseek: 'sk-a' } }, 'opencode', ' sk-b ');
+  assert.deepEqual(s1.autoAnswerApiKeys, { deepseek: 'sk-a', opencode: 'sk-b' });
+  assert.equal(currentKey(s1, 'deepseek'), 'sk-a');
+  assert.equal(currentKey(s1, 'opencode'), 'sk-b');
+  // 更新同服务只换自己的
+  const s2 = withKeyFor(s1, 'deepseek', 'sk-a2');
+  assert.equal(currentKey(s2, 'deepseek'), 'sk-a2');
+  assert.equal(currentKey(s2, 'opencode'), 'sk-b');
+  // 旧版存储形态（无映射/映射坏掉）读到空串，写入从空映射起步
+  assert.equal(currentKey({}, 'deepseek'), '');
+  assert.equal(currentKey(null, 'deepseek'), '');
+  assert.equal(currentKey({ autoAnswerApiKeys: 'bad' }, 'deepseek'), '');
+  assert.deepEqual(withKeyFor(null, 'custom', 'sk-c').autoAnswerApiKeys, { custom: 'sk-c' });
+  // 未知网关回 deepseek，不写脏键
+  assert.deepEqual(withKeyFor({}, 'nope', 'sk-x').autoAnswerApiKeys, { deepseek: 'sk-x' });
+  assert.equal(currentKey({ autoAnswerApiKeys: { deepseek: 'sk-a' } }, 'nope'), 'sk-a');
 });
 
 test('normalizeBaseUrl：去空白/尾斜杠，误粘 /chat/completions 自动剥掉', () => {
