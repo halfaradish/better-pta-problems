@@ -7,6 +7,10 @@
  * 后端 CORS 约束（后端返回 Access-Control-Allow-Origin: * 即可，无需
  * host_permissions）。服务器地址格式：ip:port 或带 http(s):// 前缀，
  * 后端配置了 TOKEN 时可写成 ip:port/令牌（令牌以 X-Token 头透传）。
+ *
+ * 另承接图片转取（BPS_FETCH_IMAGE）：pta 的图源 images.ptausercontent.com
+ * 不放行页面 fetch（实测 CORS 拒绝），host_permissions 已针对该域，由
+ * service worker 带登录态取图转 data URL 交回内容脚本（自动答题含图链路）。
  */
 function normalizeServer(server) {
   const s = String(server || '').trim();
@@ -32,7 +36,32 @@ async function post(base, token, path, body) {
   return data;
 }
 
+// 图片转 data URL：分块 btoa 避免大图 String.fromCharCode.apply 栈溢出
+async function toDataUrl(src) {
+  const res = await fetch(src, { credentials: 'include' });
+  if (!res.ok) throw new Error('HTTP ' + res.status);
+  const blob = await res.blob();
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  let bin = '';
+  const CHUNK = 0x8000;
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    bin += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
+  }
+  return `data:${blob.type || 'application/octet-stream'};base64,${btoa(bin)}`;
+}
+
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  if (msg && msg.type === 'BPS_FETCH_IMAGE') {
+    if (typeof msg.src !== 'string' || !/^https?:\/\//i.test(msg.src)) {
+      sendResponse({ ok: false, reason: '图片地址无效' });
+      return false;
+    }
+    toDataUrl(msg.src).then(
+      dataUrl => sendResponse({ ok: true, dataUrl }),
+      err => sendResponse({ ok: false, reason: err?.message || String(err) }),
+    );
+    return true; // 异步 sendResponse
+  }
   if (!msg || (msg.type !== 'BPS_SYNC' && msg.type !== 'BPS_TEST')) return;
   (async () => {
     const base = normalizeServer(msg.server);

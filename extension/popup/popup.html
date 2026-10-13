@@ -60,7 +60,7 @@
     .head-sub { margin-top: 0; font-size: 12px; color: var(--text-3); }
 
     main > * + * { border-top: 1px solid var(--hairline); }
-    section, details { padding: 4px 0 4px; }
+    section, details { padding: 4px 0 5px; }
 
     /* ---------- 开关（原生 checkbox 样式化，保留键盘与读屏语义） ---------- */
     .switch {
@@ -112,20 +112,19 @@
     /* ---------- 字段 ---------- */
     .field { margin-top: 5px; }
     .field-label { display: block; margin-bottom: 3px; font-size: 12px; color: var(--text-2); }
-    input[type="text"], input[type="password"], textarea {
+    input[type="text"], textarea {
       width: 100%; padding: 5px 9px;
       border: 1px solid var(--input-border); border-radius: 8px;
       background: var(--input-bg); color: var(--text); font: inherit;
       transition: border-color .15s ease, background .15s ease, box-shadow .15s ease;
     }
-    input[type="text"]:focus, input[type="password"]:focus, textarea:focus {
+    input[type="text"]:focus, textarea:focus {
       outline: none; border-color: var(--accent); background: var(--bg);
       box-shadow: 0 0 0 3px var(--accent-ring);
     }
     input::placeholder, textarea::placeholder { color: var(--text-3); }
     textarea { resize: vertical; min-height: 64px; }
     .hint { margin: 3px 0 0; font-size: 12px; color: var(--text-3); }
-    .status-pre { white-space: pre-line; }
 
     /* ---------- 提醒区 ---------- */
     .sec-head { font-weight: 600; margin-bottom: 2px; }
@@ -191,6 +190,7 @@
         <label class="row"><span class="row-text">同教师课程归并</span><input type="checkbox" class="switch" id="mergeSimilar" checked></label>
         <label class="row"><span class="row-text">新标签页打开题目集</span><input type="checkbox" class="switch" id="openInNewTab" checked></label>
         <label class="row"><span class="row-text">答题进度<span class="q">考试型题目集</span></span><input type="checkbox" class="switch" id="progress" checked></label>
+        <label class="row"><span class="row-text">自动答题面板<span class="q">实验 · 题目页悬浮球</span></span><input type="checkbox" class="switch" id="autoAnswer"></label>
       </div>
     </section>
 
@@ -205,28 +205,6 @@
         <label class="field-label" for="rules">自定义规则</label>
         <textarea id="rules" rows="3" placeholder="例如：2025- => 2025级课程"></textarea>
         <p class="hint">每行一条「关键词=&gt;课程名」，包含匹配，优先于自动识别；无分隔符时按 作业/实验/考试/期中/复习题 等关键词识别</p>
-      </div>
-    </details>
-
-    <details>
-      <summary>自动答题（实验）<span class="caret" aria-hidden="true"></span></summary>
-      <div class="field">
-        <label class="field-label" for="autoAnswerBaseUrl">LLM 服务器地址</label>
-        <input type="text" id="autoAnswerBaseUrl" placeholder="例如 https://api.deepseek.com" autocomplete="off" spellcheck="false">
-        <p class="hint">OpenAI 兼容接口；端点需允许浏览器访问（主流厂商均可）</p>
-      </div>
-      <div class="field">
-        <label class="field-label" for="autoAnswerApiKey">API Key</label>
-        <input type="password" id="autoAnswerApiKey" placeholder="sk-…" autocomplete="off" spellcheck="false">
-      </div>
-      <div class="field">
-        <label class="field-label" for="autoAnswerModel">模型名</label>
-        <input type="text" id="autoAnswerModel" placeholder="例如 deepseek-chat" autocomplete="off" spellcheck="false">
-      </div>
-      <label class="row"><span class="row-text">覆盖已作答<span class="q">默认跳过已答题</span></span><input type="checkbox" class="switch" id="autoAnswerOverwrite"></label>
-      <div class="test-row">
-        <button type="button" id="autoAnswerStart" class="btn-primary">开始答题</button>
-        <span id="autoAnswerStatus" class="status status-pre" role="status" aria-live="polite"></span>
       </div>
     </details>
 

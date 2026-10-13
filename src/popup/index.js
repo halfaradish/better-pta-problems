@@ -19,18 +19,13 @@ async function load() {
   $('reminderEmail').value = stored.reminderEmail || '';
   applyReminderEnabled();
   resumeTestCooldown();
-  $('autoAnswerBaseUrl').value = stored.autoAnswerBaseUrl || '';
-  $('autoAnswerApiKey').value = stored.autoAnswerApiKey || '';
-  $('autoAnswerModel').value = stored.autoAnswerModel || '';
-  $('autoAnswerOverwrite').checked = !!stored.autoAnswerOverwrite;
-  if (!hasChrome) { $('autoAnswerStart').disabled = true; $('autoAnswerStart').title = '需在扩展环境使用'; }
+  $('autoAnswer').checked = !!stored.autoAnswer;
 }
 
 function collect() {
-  // 保留 settingsVersion 等非 UI 字段，避免保存时把迁移标记抹掉
+  // 只回传弹窗 UI 承载的字段；非 UI 字段由 save() 从最新存储合并
+  // （悬浮面板也在改 autoAnswer* 字段，弹窗打开时的快照可能已过期）
   return {
-    ...stored,
-    settingsVersion: Math.max(stored.settingsVersion || 0, SETTINGS_VERSION),
     enabled: $('enabled').checked,
     badge: $('badge').checked,
     countdown: $('countdown').checked,
@@ -42,15 +37,14 @@ function collect() {
     reminderEnabled: $('reminderEnabled').checked,
     reminderServer: $('reminderServer').value.trim(),
     reminderEmail: $('reminderEmail').value.trim(),
-    autoAnswerBaseUrl: $('autoAnswerBaseUrl').value.trim(),
-    autoAnswerApiKey: $('autoAnswerApiKey').value.trim(),
-    autoAnswerModel: $('autoAnswerModel').value.trim(),
-    autoAnswerOverwrite: $('autoAnswerOverwrite').checked,
+    autoAnswer: $('autoAnswer').checked,
   };
 }
 
-function save() {
-  if (hasChrome) saveSettings(collect());
+async function save() {
+  if (!hasChrome) return;
+  const fresh = await loadSettings();
+  await saveSettings({ ...fresh, ...collect(), settingsVersion: Math.max(fresh.settingsVersion || 0, SETTINGS_VERSION) });
 }
 
 /* ---------- 邮件提醒开关与测试邮件冷却 ---------- */
@@ -101,15 +95,12 @@ async function resumeTestCooldown() {
   if (left > 0) startTestCooldown(left);
 }
 
-for (const k of ['enabled', 'badge', 'countdown', 'mergeSimilar', 'openInNewTab', 'progress', 'autoAnswerOverwrite']) $(k).addEventListener('change', save);
+for (const k of ['enabled', 'badge', 'countdown', 'mergeSimilar', 'openInNewTab', 'progress', 'autoAnswer']) $(k).addEventListener('change', save);
 $('separators').addEventListener('input', save);
 $('rules').addEventListener('input', save);
 $('reminderServer').addEventListener('input', save);
 $('reminderEmail').addEventListener('input', save);
 $('reminderEnabled').addEventListener('change', () => { save(); applyReminderEnabled(); });
-$('autoAnswerBaseUrl').addEventListener('input', save);
-$('autoAnswerApiKey').addEventListener('input', save);
-$('autoAnswerModel').addEventListener('input', save);
 
 $('testReminder').addEventListener('click', async () => {
   if (testBusy || $('testReminder').disabled) return;
@@ -144,72 +135,6 @@ $('testReminder').addEventListener('click', async () => {
 $('reset').addEventListener('click', async () => {
   if (hasChrome) await saveSettings({ ...DEFAULTS });
   load();
-});
-
-/* ---------- 自动答题 ---------- */
-const aa = {
-  status: $('autoAnswerStatus'),
-  button: $('autoAnswerStart'),
-  show(text, cls) {
-    this.status.textContent = text;
-    this.status.className = 'status status-pre' + (cls ? ' ' + cls : '');
-  },
-};
-
-// 自动答题按运行时事件刷新状态（内容脚本在题目页持续广播，弹窗关了也不影响运行）
-if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
-  chrome.runtime.onMessage.addListener(msg => {
-    if (msg?.type !== 'BPS_AUTOANSWER_EVENT') return;
-    if (msg.event === 'typedone') {
-      const parts = [`成功 ${msg.applied}`];
-      if (msg.skippedAnswered) parts.push(`跳过已答 ${msg.skippedAnswered}`);
-      if (msg.skippedImage) parts.push(`跳过含图 ${msg.skippedImage}`);
-      if (msg.failed) parts.push(`失败 ${msg.failed}`);
-      parts.push(msg.saved ? '已保存' : '未保存');
-      aa.show(`「${msg.typeName}」完成：${parts.join('，')}`);
-    } else if (msg.event === 'progress') {
-      aa.show(`正在答题（${msg.typeName}）：${msg.done}/${msg.total}…`);
-    } else if (msg.event === 'done') {
-      if (msg.error) {
-        aa.show('已中止：' + msg.error, 'err');
-      } else {
-        const fails = (msg.summary.failed || []).map(f => f.reason).filter(Boolean);
-        const lines = [`完成：成功 ${msg.summary.applied}，失败 ${msg.summary.failed.length}${msg.summary.skippedAnswered ? `，跳过已答 ${msg.summary.skippedAnswered}` : ''}${msg.summary.skippedImage ? `，跳过含图 ${msg.summary.skippedImage}` : ''}`];
-        if (msg.summary.saveFails?.length) lines.push('保存失败：' + msg.summary.saveFails.join('；'));
-        if (fails.length) lines.push('失败原因：' + fails.join('；'));
-        aa.show(lines.join('\n'), msg.summary.failed.length || msg.summary.saveFails.length ? 'err' : 'ok');
-      }
-    }
-  });
-}
-
-aa.button.addEventListener('click', async () => {
-  if (aa.button.disabled) return;
-  const show = (t, c) => aa.show(t, c);
-  const cfg = {
-    baseUrl: $('autoAnswerBaseUrl').value.trim(),
-    apiKey: $('autoAnswerApiKey').value.trim(),
-    model: $('autoAnswerModel').value.trim(),
-    overwrite: $('autoAnswerOverwrite').checked,
-  };
-  if (!cfg.baseUrl.startsWith('http')) return show('服务器地址需以 http(s):// 开头', 'err');
-  if (!cfg.baseUrl || !cfg.apiKey || !cfg.model) return show('请先填写服务器地址、API Key 与模型名', 'err');
-  save(); // 先落盘，运行中重开弹窗也能读到同样配置
-  show('正在连接题目页…');
-  try {
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (!tab || !/^https:\/\/(www\.)?pintia\.cn\/problem-sets\/\d+\/exam\/problems\/type\//.test(tab.url || '')) {
-      return show('请先在题目列表的某个题型页（判断/单选/填空）使用', 'err');
-    }
-    const res = await chrome.tabs.sendMessage(tab.id, { type: 'BPS_AUTOANSWER_RUN', config: cfg });
-    if (res?.ok) show('已开始。作答逐题写在题目页表单上，可关闭此弹窗，完成后回到此弹窗看结果');
-    else show('无法开始：' + (res?.error || '未知错误'), 'err');
-  } catch (err) {
-    const msg = err?.message || String(err);
-    show(msg.includes('Could not establish connection') || msg.includes('message port closed')
-      ? '题目页未就绪：刷新 PTA 页面后重试'
-      : '失败：' + msg, 'err');
-  }
 });
 
 try { $('version').textContent = 'v' + chrome.runtime.getManifest().version; } catch (_) { /* 非扩展环境保留静态文案 */ }

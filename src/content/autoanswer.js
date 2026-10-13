@@ -117,14 +117,15 @@ export function buildPrompt(q) {
   ];
 }
 
-/* ---------- 页面侧：收题 ---------- */
+/* ---------- 页面侧：收题（客观题，一页平铺） ---------- */
 
 // 克隆题容器并剥离视觉噪音，返回可直接阅读的纯文本。
 // 噪音：按钮（题号/复制/格式/全屏/收起）、CodeMirror 行号列（.cm-gutters）、
 // 每空旁的「N 分」分数胶囊、输入框本身（填空位置用 [空N] 标记）。
 // 克隆临时挂在 body 上（fixed 移出视口 + bps-clone 类）以获得真实的 innerText，
 // index.js 的 MutationObserver 会忽略这类节点。
-function cleanText(el) {
+// extraRemoveSel：额外剔除选择器（编程题用它剔除答题表单子树，只留题干）。
+function cleanText(el, extraRemoveSel = '') {
   const clone = el.cloneNode(true);
   clone.classList.add('bps-clone');
   clone.style.cssText = 'position:fixed;left:-99999px;top:0;margin:0;max-width:900px';
@@ -134,7 +135,7 @@ function cleanText(el) {
     bi += 1;
     inp.replaceWith(document.createTextNode(`[空${bi}]`));
   }
-  for (const n of clone.querySelectorAll('button, input, textarea, [class*="cm-gutters"]')) n.remove();
+  for (const n of clone.querySelectorAll('button, input, textarea, [class*="cm-gutters"]' + (extraRemoveSel ? ', ' + extraRemoveSel : ''))) n.remove();
   for (const n of clone.querySelectorAll('*')) {
     if ((n.textContent || '').trim().match(/^\d+\s*分$/) && !n.querySelector('*')) n.remove();
   }
@@ -162,19 +163,32 @@ export function collectPage() {
       options = radios.map((r, i) => {
         const label = r.closest('label');
         const t = (label?.innerText || '').replace(/\s+/g, ' ').trim();
-        return { idx: i, letter: LETTERS[i] || '?' + i, text: t };
+        // 贴在选项 label 里的图属于该选项；src 绝对化（imag 的 .src），便于页面上下文带登录态下载
+        const optImg = label?.querySelector('img');
+        const imgSrc = optImg && optImg.getAttribute('src') ? optImg.src : null;
+        return { idx: i, letter: LETTERS[i] || '?' + i, text: t, imgSrc };
       });
     } else if (texts.length) { kind = 'FILL_IN_THE_BLANK'; blanks = texts.length; }
     else continue;
+    // 其余 img 都按题干图处理（初探 §7.1：题干图与选项图在 PTA 都常见）
+    const optImg = {};
+    for (const o of options) if (o.imgSrc) optImg[o.letter] = o.imgSrc;
+    const optSrcs = new Set(Object.values(optImg));
+    const imgs = [...el.querySelectorAll('img')]
+      .map(i => (i.getAttribute('src') ? i.src : null))
+      .filter(s => s && !optSrcs.has(s));
+    const imgInfo = { options: optImg, stem: imgs, total: imgs.length + Object.keys(optImg).length };
     out.push({
       id: el.id,
+      label: (el.querySelector('button')?.textContent || '').trim(), // 题号（如 2-3），日志里用它指代题目
       kind,
       el,
       radios,
       texts,
       options,
       blanks,
-      hasImg: !!el.querySelector('img'),
+      imgInfo,
+      hasImg: imgInfo.total > 0,
       answered: radios.length ? radios.some(r => r.checked) : texts.some(t => String(t.value || '').trim() !== ''),
       text: cleanText(el),
     });
@@ -245,16 +259,29 @@ function parseJsonLoose(text) {
   try { return JSON.parse(m[0]); } catch (_) { return null; }
 }
 
+// 端点规整（纯函数，单测覆盖）：去空白与尾斜杠；用户误粘完整 /chat/completions 时剥掉后缀
+// （请求时再统一拼回），如 https://api.x.com/v1/chat/completions → https://api.x.com/v1
+export function normalizeBaseUrl(raw) {
+  let s = String(raw || '').trim();
+  s = s.replace(/\/+$/, '').replace(/\/chat\/completions$/i, '').replace(/\/+$/, '');
+  return s;
+}
+
 async function chatOnce(cfg, messages) {
-  const base = String(cfg.baseUrl || '').trim().replace(/\/+$/, '');
+  const base = normalizeBaseUrl(cfg.baseUrl);
+  const headers = {
+    'Content-Type': 'application/json',
+    Authorization: 'Bearer ' + String(cfg.apiKey || '').trim(),
+  };
+  // OpenCode Go 网关要求：每个会话带稳定的 x-opencode-session（利于路由/缓存，
+  // 不带可能被拒 400）。DeepSeek 官方 API 不需要，不附加多余头。
+  if (cfg.gateway === 'opencode') {
+    headers['x-opencode-session'] = sessionHeader();
+    headers['User-Agent'] = 'better-pta-problems/0.9'; // 网关要求自建 UA（浏览器会忽略，仅为直连场景保留）
+  }
   const res = await fetch(base + '/chat/completions', {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: 'Bearer ' + String(cfg.apiKey || '').trim(),
-      'x-opencode-session': sessionHeader(),
-      'User-Agent': 'better-pta-problems/0.9',
-    },
+    headers,
     body: JSON.stringify({ model: cfg.model, temperature: 0, messages }),
   });
   if (!res.ok) {
@@ -267,9 +294,90 @@ async function chatOnce(cfg, messages) {
   return text;
 }
 
-// 单题作答：调用（每题独立请求，失败重试 1 次）→ 解析 → 填表。返回 string 错误原因或 null
-async function answerOne(q, cfg, overwrite) {
-  const messages = buildPrompt(q);
+// 页面上下文带登录态取图并转 data URL（初探结论：ptausercontent 图源可直接带登录态获取）。
+// 页面 fetch 走 CORS——实测 ptausercontent 不放行页面 fetch，因此失败后转取：
+// 经 chrome.runtime 让 background fetch（该域已在 host_permissions，含图转取见 background/index.js）。
+// 页面世界无 chrome.runtime（真机扩展才可用时 background 可用），两层都失败则该题报失败不拖累其他题。
+function toDataUrlPage(src) {
+  return fetch(src, { credentials: 'include' }).then(res => {
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    return res.blob();
+  }).then(blob => new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(String(r.result));
+    r.onerror = () => reject(new Error('FileReader 读取失败'));
+    r.readAsDataURL(blob);
+  }));
+}
+
+const hasBgFetch = typeof chrome !== 'undefined' && !!chrome.runtime?.sendMessage;
+
+async function toDataUrl(src) {
+  try {
+    return await toDataUrlPage(src);
+  } catch (_) { /* 页面层（CORS 等）失败 → background 转取 */ }
+  if (!hasBgFetch) throw new Error('页面 fetch 被拒且无 background 可转取');
+  const rsp = await new Promise((resolve, reject) => {
+    let settled = false;
+    try {
+      chrome.runtime.sendMessage({ type: 'BPS_FETCH_IMAGE', src }, rsp => {
+        if (chrome.runtime.lastError) return reject(new Error(chrome.runtime.lastError.message));
+        settled = true;
+        resolve(rsp);
+      });
+    } catch (err) { return reject(err); }
+    setTimeout(() => { if (!settled) reject(new Error('background 转取无响应')); }, 15000);
+  });
+  if (!rsp?.ok) throw new Error('background 转取失败：' + (rsp?.reason || 'no response'));
+  return rsp.dataUrl;
+}
+
+// 带图 content 组装（纯函数，单测覆盖）：原文本在前、题干图逐张标注、选项图按字母映射。
+// OpenAI 兼容视觉格式：user.content = [{type:'text'},{type:'image_url'}] 交替
+export function assembleImgMessage(userContent, imgs) {
+  const stem = imgs.stem || [];
+  const parts = [{
+    type: 'text',
+    text: `${userContent}\n\n（本题含配图：题干图在前，选项图随后并标注归属选项。请同时依据图片内容作答，仍只输出一个 JSON，不要解释。）`,
+  }];
+  stem.forEach((url, i) => {
+    parts.push({ type: 'text', text: `（题干配图 ${i + 1}/${stem.length}）` });
+    parts.push({ type: 'image_url', image_url: { url } });
+  });
+  for (const [letter, url] of Object.entries(imgs.options || {})) {
+    parts.push({ type: 'text', text: `（选项 ${letter} 的配图）` });
+    parts.push({ type: 'image_url', image_url: { url } });
+  }
+  return parts;
+}
+
+// 单题图片下载（输入 collectPage 的 imgInfo；串行取图，题内数量少够用）
+async function downloadImgs(imgInfo) {
+  const out = { stem: [], options: {} };
+  for (const src of imgInfo.stem) out.stem.push(await toDataUrl(src));
+  for (const [letter, src] of Object.entries(imgInfo.options)) out.options[letter] = await toDataUrl(src);
+  return out;
+}
+
+// 单题作答：调用（每题独立请求，失败重试 1 次）→ 解析 → 填表。
+// 返回 { ok: true, text: 作答内容展示串 } 或 { ok: false, reason }
+async function answerOne(q, cfg) {
+  // 含图题仅在「作答含图题」开启时走视觉链路；下载失败按单题失败处理，不拖垮整页
+  let images = null;
+  if (cfg.images && q.hasImg) {
+    try {
+      images = await downloadImgs(q.imgInfo);
+    } catch (err) {
+      return { ok: false, reason: '含图题图片加载失败：' + (err?.message || err) };
+    }
+    if (!images.stem.length && !Object.keys(images.options).length) {
+      return { ok: false, reason: '含图题未取到可用图片地址' };
+    }
+  }
+  const basePrompt = buildPrompt(q);
+  const messages = images
+    ? [{ role: 'system', content: basePrompt[0].content }, { role: 'user', content: assembleImgMessage(basePrompt[1].content, images) }]
+    : basePrompt;
   let raw = null;
   for (let attempt = 1; attempt <= 2; attempt++) {
     try {
@@ -278,30 +386,33 @@ async function answerOne(q, cfg, overwrite) {
         : await chatOnce(cfg, messages);
       break;
     } catch (err) {
-      if (attempt === 2) return 'LLM 调用失败：' + (err?.message || err);
+      if (attempt === 2) return { ok: false, reason: 'LLM 调用失败：' + (err?.message || err) };
       await sleep(900);
     }
   }
   const json = parseJsonLoose(raw);
-  if (!json) return 'LLM 输出无法解析：' + String(raw).slice(0, 60);
+  if (!json) return { ok: false, reason: 'LLM 输出无法解析：' + String(raw).slice(0, 60) };
   try {
     if (q.kind === 'MULTIPLE_CHOICE') {
       const letter = parseChoiceAnswer(json.answer, q.radios.length);
-      if (!letter) return 'LLM 字母答案无效：' + String(json.answer).slice(0, 20);
-      if (!fillRadio(q, letter)) return '写入选项失败';
+      if (!letter) return { ok: false, reason: 'LLM 字母答案无效：' + String(json.answer).slice(0, 20) };
+      if (!fillRadio(q, letter)) return { ok: false, reason: '写入选项失败' };
+      return { ok: true, text: letter };
     } else if (q.kind === 'TRUE_OR_FALSE') {
       const tf = normalizeTF(json.answer);
-      if (!tf) return 'LLM 判断答案无效：' + String(json.answer).slice(0, 20);
-      if (!fillRadio(q, tf === 'TRUE' ? 'A' : 'B')) return '写入选项失败'; // DOM 顺序固定 [T, F]
+      if (!tf) return { ok: false, reason: 'LLM 判断答案无效：' + String(json.answer).slice(0, 20) };
+      if (!fillRadio(q, tf === 'TRUE' ? 'A' : 'B')) return { ok: false, reason: '写入选项失败' }; // DOM 顺序固定 [T, F]
+      return { ok: true, text: tf };
     } else {
       const answers = parseFillAnswers(json, q.blanks);
-      if (!answers) return `LLM 填空答案数量不符（需 ${q.blanks} 空）`;
+      if (!answers) return { ok: false, reason: `LLM 填空答案数量不符（需 ${q.blanks} 空）` };
       fillBlank(q, answers);
+      const shown = answers.join('、');
+      return { ok: true, text: shown.length > 28 ? shown.slice(0, 28) + '…' : shown };
     }
   } catch (err) {
-    return '写入失败：' + (err?.message || err);
+    return { ok: false, reason: '写入失败：' + (err?.message || err) };
   }
-  return null;
 }
 
 /* ---------- 运行编排 ---------- */
@@ -328,9 +439,17 @@ export function isRunning() {
   return running;
 }
 
-// 来源（弹窗）只负责回调事件；运行本身与弹窗生命周期无关
-function emit(event) {
-  try { chrome.runtime?.sendMessage?.({ type: 'BPS_AUTOANSWER_EVENT', ...event }).catch?.(() => {}); } catch (_) { /* 预览页无运行时 */ }
+/* ---------- 事件流（悬浮面板消费） ---------- */
+// 面板注册 sink 接收结构化事件；无面板时引擎照常运行（sink 未注册则丢弃）
+// 事件：{kind:'log', level:'info'|'ok'|'warn'|'err', text}
+//       {kind:'progress', done, total, typeName}
+//       {kind:'state', running, error?}
+let eventSink = null;
+export function setEventSink(fn) {
+  eventSink = typeof fn === 'function' ? fn : null;
+}
+function fire(event) {
+  try { eventSink?.(event); } catch (_) { /* 面板异常不阻断运行 */ }
 }
 
 const progressOf = stats => ({
@@ -341,29 +460,45 @@ const progressOf = stats => ({
 });
 
 export async function handleRun(config = {}) {
-  if (running) return { ok: false, error: '已有一次答题在运行中' };
+  if (running) { fire({ kind: 'log', level: 'warn', text: '已有一次答题在运行中' }); return { ok: false, error: '已有一次答题在运行中' }; }
   const m = location.pathname.match(EXAM_PROBLEMS_RE);
-  if (!m || !m[3]) return { ok: false, error: '请先进入题目列表的某个题型页（判断/单选/填空标签）再开始' };
+  if (!m || !m[3]) { fire({ kind: 'log', level: 'err', text: '请先进入题型页（判断/单选/填空标签）再开始' }); return { ok: false, error: '请先进入题目列表的某个题型页（判断/单选/填空标签）再开始' }; }
   const psId = m[1];
   const cfg = {
-    baseUrl: config.baseUrl || config.autoAnswerBaseUrl || '',
-    apiKey: config.apiKey || config.autoAnswerApiKey || '',
-    model: config.model || config.autoAnswerModel || '',
-    overwrite: !!(config.overwrite ?? config.autoAnswerOverwrite),
+    baseUrl: config.baseUrl || '',
+    apiKey: config.apiKey || '',
+    model: config.model || '',
+    gateway: config.gateway || '',
+    overwrite: !!config.overwrite,
+    images: !!config.images, // 作答含图题（需视觉模型；未开则含图题照旧跳过）
     drySave: !!config.drySave,
   };
+  if (globalThis.__BPS_LLM_MOCK__ && !cfg.drySave) {
+    // mock + 真保存 = 测试误入真实题集。面板按钮对真实用户没有 mock，此护栏只拦调试场景
+    cfg.drySave = true;
+    fire({ kind: 'log', level: 'warn', text: '检测到 __BPS_LLM_MOCK__：本次运行自动改为 dry run（不点保存）' });
+  }
   if (!cfg.baseUrl || !cfg.apiKey || !cfg.model) {
-    return { ok: false, error: '请先在弹窗填写服务器地址、API Key 与模型名' };
+    fire({ kind: 'log', level: 'err', text: '请先选择模型并填写 API Key' });
+    return { ok: false, error: '请先填写 API Key' };
   }
 
   running = true;
   suppressLeaveConfirm();
   const summary = { types: [], applied: 0, skippedAnswered: 0, skippedImage: 0, failed: [], savedTypes: 0, saveFails: [] };
+  let ret = null;
   try {
+    fire({ kind: 'state', running: true });
+    fire({ kind: 'log', level: 'info', text: `开始答题（每题一次请求，${cfg.overwrite ? '覆盖已作答' : '跳过已答'}${cfg.images ? '，含图题作答' : ''}）` });
     const types = sidebarTypes().filter(t => TYPE_BY_NAME[t.typeName] || false).filter(t => t.total > 0);
     const unknown = sidebarTypes().filter(t => !(t.typeName in TYPE_BY_NAME) && t.total > 0);
     if (!types.length) throw new Error('本页侧栏没有可作答的题型');
-    if (unknown.length) summary.failed.push({ id: '-', reason: `暂不支持题型：${unknown.map(u => u.typeName).join('、')}（跳过）` });
+    if (unknown.length) {
+      summary.failed.push({ id: '-', reason: `暂不支持题型：${unknown.map(u => u.typeName).join('、')}（跳过）` });
+      fire({ kind: 'log', level: 'warn', text: `暂不支持题型：${unknown.map(u => u.typeName).join('、')}，已跳过` });
+    }
+    const totalOverall = types.reduce((n, t) => n + t.total, 0);
+    let processedOverall = 0;
 
     for (const t of types) {
       // 用户在运行中点了别的题目集 → 中止，绝不跨题集作答
@@ -375,6 +510,8 @@ export async function handleRun(config = {}) {
           .find(a => (a.getAttribute('href') || '').match(`^/problem-sets/${psId}/exam/problems/type/${t.typeId}$`));
         if (!link) throw new Error(`找不到「${t.typeName}」的页面链接`);
         link.click();
+        // 等 SPA 渲染出该题型页的题目：URL 与「该题型的容器数」都对才就绪
+        // （路由先切内容后到，旧题型页的容器不能拿来充数）
         // 等 SPA 渲染出该题型页的题目：URL 与「该题型的容器数」都对才就绪
         // （路由先切内容后到，旧题型页的容器不能拿来充数）
         const type = TYPE_BY_NAME[t.typeName];
@@ -391,22 +528,26 @@ export async function handleRun(config = {}) {
       const type = TYPE_BY_NAME[t.typeName];
       const questions = collectPage().filter(q => q.kind === type);
       if (!questions.length) throw new Error(`「${t.typeName}」页面收集不到题目`);
+      fire({ kind: 'log', level: 'info', text: `「${t.typeName}」共 ${questions.length} 题，开始作答` });
 
       const stats = { ok: [], skippedAnswered: 0, skippedImage: 0, failed: [] };
       let done = 0;
-      const queue = questions.map((q, i) => ({ q, i }));
+      const queue = questions.map(q => ({ q }));
       let cursor = 0;
-      const emitProgress = () => emit({ event: 'progress', typeName: t.typeName, done, total: questions.length });
+      const tick = () => {
+        processedOverall += 1;
+        fire({ kind: 'progress', done: processedOverall, total: totalOverall, typeName: t.typeName });
+      };
       const worker = async () => {
         while (cursor < queue.length) {
           const { q } = queue[cursor++];
           done += 1;
-          if (q.answered && !cfg.overwrite) { stats.skippedAnswered += 1; emitProgress(); continue; }
-          if (q.hasImg) { stats.skippedImage += 1; emitProgress(); continue; }
-          const err = await answerOne(q, cfg, cfg.overwrite);
-          if (err) stats.failed.push({ id: q.id, reason: err });
-          else stats.ok.push(q.id);
-          emitProgress();
+          if (q.answered && !cfg.overwrite) { stats.skippedAnswered += 1; fire({ kind: 'log', level: 'info', text: `${q.label || q.id.slice(-4)}：跳过，已作答` }); tick(); continue; }
+          if (q.hasImg && !cfg.images) { stats.skippedImage += 1; fire({ kind: 'log', level: 'warn', text: `${q.label || q.id.slice(-4)}：跳过，含图片（未开「作答含图题」）` }); tick(); continue; }
+          const r = await answerOne(q, cfg);
+          if (r.ok) { stats.ok.push(q.id); fire({ kind: 'log', level: 'ok', text: `${q.label || q.id.slice(-4)} → ${r.text}` }); }
+          else { stats.failed.push({ id: q.id, reason: r.reason }); fire({ kind: 'log', level: 'err', text: `${q.label || q.id.slice(-4)}：${r.reason}` }); }
+          tick();
         }
       };
       await Promise.all(Array.from({ length: Math.min(3, queue.length) }, worker));
@@ -418,6 +559,7 @@ export async function handleRun(config = {}) {
         saved = await saveTypePage();
         if (saved.saved) summary.savedTypes += 1;
         else summary.saveFails.push(`${t.typeName}：${saved.reason}`);
+        fire({ kind: 'log', level: saved.saved ? 'ok' : 'err', text: saved.saved ? `「${t.typeName}」已保存` : `「${t.typeName}」保存失败：${saved.reason}` });
       } else if (!filled) {
         saved = { saved: false, reason: '本页无需新答案，未保存' };
       }
@@ -428,17 +570,24 @@ export async function handleRun(config = {}) {
       summary.skippedImage += pg.skippedImage;
       summary.failed.push(...stats.failed);
       summary.types.push({ type: t.typeName, total: questions.length, applied: pg.applied, skippedAnswered: pg.skippedAnswered, skippedImage: pg.skippedImage, failed: stats.failed.length, saved: saved?.saved === true });
-      emit({ event: 'typedone', typeName: t.typeName, ...pg, saved: saved?.saved === true });
     }
-    const result = { ok: true, summary };
-    emit({ event: 'done', summary });
-    return result;
+    ret = { ok: true, summary };
   } catch (err) {
-    const message = err?.message || String(err);
-    emit({ event: 'done', summary, error: message });
-    return { ok: false, error: message, summary };
+    ret = { ok: false, error: err?.message || String(err), summary };
   } finally {
+    // 先复位运行标志，再发完成事件——面板收到事件时 isRunning() 必须已是 false，
+    // 否则 UI 会永远停在“答题中”。confirm 的恢复同理（面板可能立刻重新打开面板导航）。
     running = false;
     restoreLeaveConfirm();
+
+    if (ret.ok) {
+      const failN = ret.summary.failed.length;
+      fire({ kind: 'log', level: failN ? 'warn' : 'ok', text: `完成：作答 ${ret.summary.applied} · 跳过已答 ${ret.summary.skippedAnswered} · 跳过含图 ${ret.summary.skippedImage} · 失败 ${failN}${cfg.drySave ? '（未保存）' : ''}` });
+      fire({ kind: 'state', running: false });
+    } else {
+      fire({ kind: 'log', level: 'err', text: '已中止：' + ret.error });
+      fire({ kind: 'state', running: false, error: ret.error });
+    }
   }
+  return ret;
 }

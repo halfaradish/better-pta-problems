@@ -9,10 +9,13 @@ test('migrate：旧版设置升级到 v5，删掉不再持久化的 grouped，�
   assert.equal('grouped' in next, false);
   assert.equal(next.enabled, false);
   assert.equal(next.separators, DEFAULTS.separators); // 缺失字段补默认值
-  assert.equal(next.autoAnswerBaseUrl, '');
+  assert.equal(next.autoAnswer, false);             // 悬浮球总开关默认关
   assert.equal(next.autoAnswerApiKey, '');
+  assert.equal(next.autoAnswerGateway, 'deepseek'); // 面板选中的模型适配默认 DeepSeek
   assert.equal(next.autoAnswerModel, '');
+  assert.equal(next.autoAnswerBaseUrl, '');
   assert.equal(next.autoAnswerOverwrite, false);
+  assert.equal(next.autoAnswerImages, false); // 含图题默认跳过（视觉模型需用户显式开启）
 });
 
 test('migrate：已是 v5 的设置不再改动', () => {

@@ -11,6 +11,7 @@ import { DEFAULTS, loadSettings, onSettingsChanged, saveSettings } from '../shar
 import { LIST_PATH_RE, SET_HREF_RE } from '../shared/paths.js';
 import * as agg from './aggregate.js';
 import * as autoanswer from './autoanswer.js';
+import * as aaPanel from './autoanswer-panel.js';
 import { buildCourseRenameMap } from './classify.js';
 import { decorate, extractItems } from './decorate.js';
 import * as progress from './progress.js';
@@ -98,16 +99,23 @@ function scheduleSync() {
 
 async function init() {
   settings = await loadSettings({ persistMigration: true });
-  onSettingsChanged(s => { settings = s; sync(true); reminders.syncRemindersDirect(settings); });
+  onSettingsChanged(s => {
+    settings = s; sync(true); reminders.syncRemindersDirect(settings);
+    aaPanel.sync(s); // 悬浮球显隐随开关与页面形状走
+  });
 
   try { performance.setResourceTimingBufferSize(1000); } catch (_) { /* ignore */ }
 
+  // 自动答题悬浮球面板（题目列表页 + 总开关打开时出现）
+  aaPanel.armOnce();
+  aaPanel.sync(settings);
+
   // React 重渲染 / SPA 路由切换 → 重建视图；插件自身的 DOM 变动不触发。
-  // 自动答题收题时的临时克隆（.bps-clone）也算插件自己的变动
+  // 自动答题收题时的临时克隆（.bps-clone）与悬浮球 host（.bps-aa）也算插件自己的变动
   const mo = new MutationObserver(muts => {
     for (const m of muts) {
       const relevant = [...m.addedNodes, ...m.removedNodes]
-        .some(n => n.nodeType === 1 && !n.closest?.('.bps-root') && !n.closest?.('.bps-clone'));
+        .some(n => n.nodeType === 1 && !n.closest?.('.bps-root') && !n.closest?.('.bps-clone') && !n.closest?.('.bps-aa'));
       if (relevant) { scheduleSync(); return; }
     }
   });
@@ -127,21 +135,10 @@ async function init() {
   }, true);
 
   setInterval(() => sync(), 3000);                    // 兜底：路由切换 / 遗漏的变动
-  setInterval(() => { if (view.state.root) view.refreshCountdowns(settings); }, 60000);
-
-  // 自动答题：弹窗「开始答题」→ 本页内容脚本执行（收题 → LLM → 填表 → 保存）。
-  // 立即应答启动结果；运行进度/结束经 BPS_AUTOANSWER_EVENT 广播（不依赖弹窗生命周期）。
-  // 只有扩展环境注册监听；预览页没有 chrome.runtime，只走下方 BPS 调试入口
-  if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
-    chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
-      if (msg?.type !== 'BPS_AUTOANSWER_RUN') return undefined;
-      if (autoanswer.isRunning()) { sendResponse({ ok: false, error: '已有一次答题在运行中' }); return; }
-      sendResponse({ ok: true, started: true });
-      autoanswer.handleRun(msg.config)
-        .catch(err => console.warn('[更好的题目集] 自动答题运行异常:', err?.message || err));
-      return undefined; // 应答已同步完成，不占异步通道
-    });
-  }
+  setInterval(() => {
+    if (view.state.root) view.refreshCountdowns(settings);
+    aaPanel.sync(settings); // SPA 换题集/换路由后悬浮球跟着显隐
+  }, 3000);
 
   // 打开 PTA 任意页面即同步一次邮件提醒订阅（延迟 2s 避开页面首屏请求；
   // 预占节流窗口：若聚合钩子先完成推送，到点后不再重复拉取）

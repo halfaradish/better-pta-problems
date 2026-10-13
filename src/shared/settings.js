@@ -15,11 +15,14 @@ export const DEFAULTS = {
   reminderEnabled: true,  // 题目关闭邮件提醒总开关（与下面两项配置配合；关闭即暂停同步）
   reminderServer: '',     // 邮件提醒后端地址（ip:port，可加 /令牌 后缀）；空 = 关闭
   reminderEmail: '',      // 提醒邮件接收邮箱
-  // 自动答题（实验）：OpenAI 兼容接口三项 + 覆盖重答开关，见 docs/自动答题初探.md §9
-  autoAnswerBaseUrl: '',  // 例如 https://api.deepseek.com（端点需允许浏览器跨域）；空 = 未配置
-  autoAnswerApiKey: '',
-  autoAnswerModel: '',
+  // 自动答题（实验）：入口为题目页的悬浮球面板（弹窗只留总开关），见 docs/自动答题初探.md §9
+  autoAnswer: false,          // 题目列表页显示悬浮答题球（实验功能，默认关）
+  autoAnswerApiKey: '',       // 模型服务 API Key（DeepSeek / OpenCode Go），仅存本机扩展存储，答题时页面上下文直连
+  autoAnswerGateway: 'deepseek', // 悬浮面板选中的模型适配（content/autoanswer-panel.js 的 PRESETS 键）
+  autoAnswerModel: '',        // 可自填网关的模型名（OpenCode Go / 自定义）；空 = 用适配预设的默认模型
+  autoAnswerBaseUrl: '',      // 「自定义」服务的 OpenAI 兼容端点（填到 /v1；仅选自定义时用）
   autoAnswerOverwrite: false, // 覆盖已作答的题目（默认跳过已答，避免把用户的正确答案改错）
+  autoAnswerImages: false,    // 含图题作答（需视觉模型如 deepseek-flash：图片下载编码进 prompt；默认关闭=含图题跳过）
   settingsVersion: 0,     // 0 = 旧版设置；v4 起「列表/分组」不再持久化（改为按路由的会话内状态）
 };
 

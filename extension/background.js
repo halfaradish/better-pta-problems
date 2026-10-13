@@ -22,7 +22,30 @@
     if (!res.ok || data.ok === false) throw new Error(data.error || "HTTP " + res.status);
     return data;
   }
+  async function toDataUrl(src) {
+    const res = await fetch(src, { credentials: "include" });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const blob = await res.blob();
+    const bytes = new Uint8Array(await blob.arrayBuffer());
+    let bin = "";
+    const CHUNK = 32768;
+    for (let i = 0; i < bytes.length; i += CHUNK) {
+      bin += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
+    }
+    return `data:${blob.type || "application/octet-stream"};base64,${btoa(bin)}`;
+  }
   chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+    if (msg && msg.type === "BPS_FETCH_IMAGE") {
+      if (typeof msg.src !== "string" || !/^https?:\/\//i.test(msg.src)) {
+        sendResponse({ ok: false, reason: "\u56FE\u7247\u5730\u5740\u65E0\u6548" });
+        return false;
+      }
+      toDataUrl(msg.src).then(
+        (dataUrl) => sendResponse({ ok: true, dataUrl }),
+        (err) => sendResponse({ ok: false, reason: err?.message || String(err) })
+      );
+      return true;
+    }
     if (!msg || msg.type !== "BPS_SYNC" && msg.type !== "BPS_TEST") return;
     (async () => {
       const base = normalizeServer(msg.server);
