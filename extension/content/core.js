@@ -1374,10 +1374,13 @@
 .wrap { position: fixed; right: 18px; bottom: 18px; z-index: 2147483000;
   font: 13px/1.5 system-ui, "Microsoft YaHei", "PingFang SC", sans-serif;
   color: var(--text); font-family: system-ui, "Microsoft YaHei", "PingFang SC", sans-serif; }
+/* \u62D6\u62FD\u4F4D\u7F6E\u8BB0\u5FC6\u89C1 js \u7684 applyPos\uFF1Aright/bottom \u88AB storage.local \u7684 {r,b} inline \u8986\u76D6\uFF0C
+ * \u7403\u4E0D\u653E left/top \u2014\u2014 \u7A97\u53E3\u53D8\u5927\u65F6\u7403\u4ECD\u8D34\u53F3\u4E0B\u89D2\u9644\u8FD1\uFF0C\u4E0D\u4F1A\u98D8\u53BB\u89C6\u91CE\u5916 */
 
 /* ---------- \u60AC\u6D6E\u7403 ---------- */
 .ball { position: relative; width: 46px; height: 46px; border-radius: 50%; border: none; padding: 0;
-  cursor: pointer; display: grid; place-items: center; color: #fff;
+  cursor: grab; touch-action: none; /* \u89E6\u5C4F\u62D6\u7403\u4E0D\u6EDA\u9875\u9762 */
+  display: grid; place-items: center; color: #fff;
   background: linear-gradient(135deg, #1171cf 0%, #0a4991 100%);
   box-shadow: 0 4px 16px rgba(10, 73, 145, .38), 0 1px 3px rgba(16, 24, 40, .25);
   transition: transform .15s ease, box-shadow .15s ease; }
@@ -1388,6 +1391,7 @@
 .ring circle { fill: none; stroke-width: 3; }
 .ring .bg { stroke: rgba(255, 255, 255, .28); }
 .ring .fg { stroke: #8ff0b4; stroke-linecap: round; stroke-dasharray: 138.2; stroke-dashoffset: 138.2; transition: stroke-dashoffset .25s ease; }
+.wrap.dragging .ball { cursor: grabbing; transition: none; }
 
 /* ---------- \u9762\u677F ---------- */
 .panel { position: absolute; right: 0; bottom: 56px; width: 324px; max-width: calc(100vw - 24px);
@@ -1395,6 +1399,11 @@
   background: var(--bg); color: var(--text); border-radius: 14px; overflow: hidden;
   box-shadow: 0 16px 48px rgba(16, 24, 40, .22), 0 3px 10px rgba(16, 24, 40, .1), 0 0 0 1px var(--hairline);
   transform-origin: 100% 100%; animation: aa-pop .18s ease; }
+/* \u7403\u88AB\u62D6\u8D70\u540E\u6309\u5C4F\u5E55\u8C61\u9650\u6362\u8FB9\u5C55\u5F00\uFF08openPanel \u6302 pos-left / pos-top\uFF09\uFF1A\u53F3\u534A \u2192 \u9ED8\u8BA4\u671D\u5DE6\u5F00\uFF0C
+ * \u5DE6\u534A \u2192 \u671D\u53F3\u5F00\uFF1B\u4E0B\u534A \u2192 \u9ED8\u8BA4\u5F80\u4E0A\u5F39\uFF0C\u4E0A\u534A \u2192 \u5F80\u4E0B\u5F39 */
+.wrap.pos-left .panel { right: auto; left: 0; transform-origin: 0 100%; }
+.wrap.pos-top .panel { bottom: auto; top: 56px; transform-origin: 100% 0; }
+.wrap.pos-left.pos-top .panel { transform-origin: 0 0; }
 /* display:flex \u4F1A\u76D6\u8FC7 UA \u7684 [hidden]\uFF0C\u5FC5\u987B\u663E\u5F0F\u6536\u56DE\uFF08\u5426\u5219\u6536\u8D77\u9762\u677F\u65E0\u6548\u3001\u9762\u677F\u5E38\u663E\uFF09 */
 .panel[hidden] { display: none; }
 @keyframes aa-pop { from { transform: scale(.94) translateY(5px); opacity: 0; } }
@@ -1481,6 +1490,7 @@ input:disabled, button:disabled { opacity: .5; cursor: not-allowed; }
 @media (prefers-reduced-motion: reduce) {
   .ball { transition: none; }
   .panel { animation: none; }
+  .wrap.dragging .ball { transition: none; }
   .pill.run::before { animation: none; }
   .ring .fg { transition: none; }
 }
@@ -1505,6 +1515,10 @@ input:disabled, button:disabled { opacity: .5; cursor: not-allowed; }
   var shadow = null;
   var settings = null;
   var open = false;
+  var ballPos = null;
+  var BALL_SIZE = 46;
+  var BALL_MARGIN = 18;
+  var POS_KEY = "autoAnswerBallPos";
   var logLines = [];
   var lastProgress = null;
   var finished = false;
@@ -1515,6 +1529,36 @@ input:disabled, button:disabled { opacity: .5; cursor: not-allowed; }
     <circle class="bg" cx="24" cy="24" r="22"></circle>
     <circle class="fg" cx="24" cy="24" r="22"></circle>
   </svg>`;
+  function clampBallPos(p, innerW, innerH) {
+    const num = (v) => {
+      const n = Math.round(Number(v));
+      return Number.isFinite(n) ? n : 0;
+    };
+    const minX = BALL_MARGIN, minY = BALL_MARGIN;
+    const maxX = Math.max(minX, innerW - BALL_SIZE - BALL_MARGIN);
+    const maxY = Math.max(minY, innerH - BALL_SIZE - BALL_MARGIN);
+    return { r: Math.min(Math.max(num(p?.r), minX), maxX), b: Math.min(Math.max(num(p?.b), minY), maxY) };
+  }
+  function applyBallPos() {
+    if (!shadow || !ballPos) return;
+    const wrap = shadow.querySelector(".wrap");
+    if (!wrap) return;
+    wrap.style.right = `${ballPos.r}px`;
+    wrap.style.bottom = `${ballPos.b}px`;
+  }
+  function loadBallPos() {
+    try {
+      return chrome.storage.local.get({ [POS_KEY]: null }).then((v) => v?.[POS_KEY] || null);
+    } catch (_) {
+      return Promise.resolve(null);
+    }
+  }
+  function saveBallPos() {
+    try {
+      chrome.storage.local.set({ [POS_KEY]: ballPos });
+    } catch (_) {
+    }
+  }
   function el(tag, cls, parent) {
     const n = document.createElement(tag);
     if (cls) n.className = cls;
@@ -1723,7 +1767,51 @@ input:disabled, button:disabled { opacity: .5; cursor: not-allowed; }
     el("p", "foot", body).textContent = "\u5B9E\u9A8C\u529F\u80FD\uFF1A\u7B54\u9898\u4E2D\u5E73\u53F0\u4E0D\u53CD\u9988\u5BF9\u9519\uFF0C\u5B8C\u6210\u540E\u8BF7\u81EA\u884C\u6838\u5BF9\u7ED3\u679C\u3002";
     el("p", "foot", body).textContent = "\u6587\u672C\u6A21\u578B\u770B\u4E0D\u89C1\u56FE\u7247\uFF1A\u9898\u5E72/\u9009\u9879\u542B\u56FE\u7684\u9898\u8981\u4E48\u8DF3\u8FC7\uFF0C\u8981\u4E48\u5207\u5230\u89C6\u89C9\u6A21\u578B\uFF08\u5982 deepseek-flash\uFF09\u5E76\u5F00\u542F\u300C\u4F5C\u7B54\u542B\u56FE\u9898\u300D\u3002";
     el("p", "foot", body).textContent = "\u7F16\u7A0B\u9898\u63D0\u4EA4\u5373\u8BC4\u6D4B\uFF1A\u4F5C\u7B54\u4F1A\u5B9E\u65F6\u751F\u6210\u63D0\u4EA4\u8BB0\u5F55\u4E0E\u4F5C\u7B54\u5EA6\uFF0C\u6210\u7EE9\u7531\u8BC4\u6D4B\u7ED3\u679C\u51B3\u5B9A\uFF0C\u4E0E\u5BA2\u89C2\u9898\u5224\u5206\u8DEF\u5F84\u4E0D\u540C\u3002";
-    ball.addEventListener("click", () => togglePanel());
+    let drag = null;
+    let suppressClickUntil = 0;
+    ball.addEventListener("pointerdown", (e) => {
+      if (e.button !== 0 || !e.isPrimary) return;
+      const r = ball.getBoundingClientRect();
+      drag = { id: e.pointerId, dx: e.clientX - r.left, dy: e.clientY - r.top, sx: e.clientX, sy: e.clientY, moved: false };
+      try {
+        ball.setPointerCapture(e.pointerId);
+      } catch (_) {
+      }
+    });
+    ball.addEventListener("pointermove", (e) => {
+      if (!drag || e.pointerId !== drag.id) return;
+      if (!drag.moved) {
+        if (Math.hypot(e.clientX - drag.sx, e.clientY - drag.sy) < 5) return;
+        drag.moved = true;
+        wrap.classList.add("dragging");
+      }
+      ballPos = clampBallPos({
+        r: window.innerWidth - (e.clientX - drag.dx) - BALL_SIZE,
+        b: window.innerHeight - (e.clientY - drag.dy) - BALL_SIZE
+      }, window.innerWidth, window.innerHeight);
+      applyBallPos();
+    });
+    const endDrag = () => {
+      if (drag) wrap.classList.remove("dragging");
+      drag = null;
+    };
+    ball.addEventListener("pointerup", (e) => {
+      if (!drag || e.pointerId !== drag.id) return;
+      const wasMoved = drag.moved;
+      endDrag();
+      if (!wasMoved) return;
+      suppressClickUntil = Date.now() + 400;
+      saveBallPos();
+      if (open) placePanel();
+    });
+    ball.addEventListener("pointercancel", endDrag);
+    ball.addEventListener("click", () => {
+      if (Date.now() < suppressClickUntil) {
+        suppressClickUntil = 0;
+        return;
+      }
+      togglePanel();
+    });
     collapse.addEventListener("click", closePanel);
     panel.addEventListener("keydown", (e) => {
       if (e.key === "Escape") closePanel();
@@ -1772,6 +1860,11 @@ input:disabled, button:disabled { opacity: .5; cursor: not-allowed; }
     document.body.appendChild(host);
     renderLogs();
     updateRunUI();
+    loadBallPos().then((p) => {
+      if (!p || !shadow) return;
+      ballPos = clampBallPos(p, window.innerWidth, window.innerHeight);
+      applyBallPos();
+    });
   }
   function unmount() {
     if (!host) return;
@@ -1812,10 +1905,20 @@ input:disabled, button:disabled { opacity: .5; cursor: not-allowed; }
     if (!shadow) return;
     open ? closePanel() : openPanel();
   }
+  function placePanel() {
+    if (!shadow) return;
+    const wrapEl = shadow.querySelector(".wrap");
+    if (!wrapEl) return;
+    const cx = window.innerWidth - (ballPos?.r ?? 18) - BALL_SIZE / 2;
+    const cy = window.innerHeight - (ballPos?.b ?? 18) - BALL_SIZE / 2;
+    wrapEl.classList.toggle("pos-left", cx < window.innerWidth / 2);
+    wrapEl.classList.toggle("pos-top", cy < window.innerHeight / 2);
+  }
   function openPanel() {
     if (!shadow) return;
     const panel = shadow.getElementById("panel");
     const ball = shadow.getElementById("ball");
+    placePanel();
     panel.hidden = false;
     ball.setAttribute("aria-expanded", "true");
     open = true;
@@ -1921,6 +2024,12 @@ input:disabled, button:disabled { opacity: .5; cursor: not-allowed; }
     unregisterSink = () => setEventSink(null);
     document.addEventListener("visibilitychange", () => {
       if (!document.hidden && shadow) updateRunUI();
+    });
+    window.addEventListener("resize", () => {
+      if (!ballPos || !shadow) return;
+      ballPos = clampBallPos(ballPos, window.innerWidth, window.innerHeight);
+      applyBallPos();
+      if (open) placePanel();
     });
   }
   var armed = false;

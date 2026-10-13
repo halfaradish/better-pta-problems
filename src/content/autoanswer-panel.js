@@ -78,10 +78,13 @@ const CSS = `
 .wrap { position: fixed; right: 18px; bottom: 18px; z-index: 2147483000;
   font: 13px/1.5 system-ui, "Microsoft YaHei", "PingFang SC", sans-serif;
   color: var(--text); font-family: system-ui, "Microsoft YaHei", "PingFang SC", sans-serif; }
+/* 拖拽位置记忆见 js 的 applyPos：right/bottom 被 storage.local 的 {r,b} inline 覆盖，
+ * 球不放 left/top —— 窗口变大时球仍贴右下角附近，不会飘去视野外 */
 
 /* ---------- 悬浮球 ---------- */
 .ball { position: relative; width: 46px; height: 46px; border-radius: 50%; border: none; padding: 0;
-  cursor: pointer; display: grid; place-items: center; color: #fff;
+  cursor: grab; touch-action: none; /* 触屏拖球不滚页面 */
+  display: grid; place-items: center; color: #fff;
   background: linear-gradient(135deg, #1171cf 0%, #0a4991 100%);
   box-shadow: 0 4px 16px rgba(10, 73, 145, .38), 0 1px 3px rgba(16, 24, 40, .25);
   transition: transform .15s ease, box-shadow .15s ease; }
@@ -92,6 +95,7 @@ const CSS = `
 .ring circle { fill: none; stroke-width: 3; }
 .ring .bg { stroke: rgba(255, 255, 255, .28); }
 .ring .fg { stroke: #8ff0b4; stroke-linecap: round; stroke-dasharray: 138.2; stroke-dashoffset: 138.2; transition: stroke-dashoffset .25s ease; }
+.wrap.dragging .ball { cursor: grabbing; transition: none; }
 
 /* ---------- 面板 ---------- */
 .panel { position: absolute; right: 0; bottom: 56px; width: 324px; max-width: calc(100vw - 24px);
@@ -99,6 +103,11 @@ const CSS = `
   background: var(--bg); color: var(--text); border-radius: 14px; overflow: hidden;
   box-shadow: 0 16px 48px rgba(16, 24, 40, .22), 0 3px 10px rgba(16, 24, 40, .1), 0 0 0 1px var(--hairline);
   transform-origin: 100% 100%; animation: aa-pop .18s ease; }
+/* 球被拖走后按屏幕象限换边展开（openPanel 挂 pos-left / pos-top）：右半 → 默认朝左开，
+ * 左半 → 朝右开；下半 → 默认往上弹，上半 → 往下弹 */
+.wrap.pos-left .panel { right: auto; left: 0; transform-origin: 0 100%; }
+.wrap.pos-top .panel { bottom: auto; top: 56px; transform-origin: 100% 0; }
+.wrap.pos-left.pos-top .panel { transform-origin: 0 0; }
 /* display:flex 会盖过 UA 的 [hidden]，必须显式收回（否则收起面板无效、面板常显） */
 .panel[hidden] { display: none; }
 @keyframes aa-pop { from { transform: scale(.94) translateY(5px); opacity: 0; } }
@@ -185,6 +194,7 @@ input:disabled, button:disabled { opacity: .5; cursor: not-allowed; }
 @media (prefers-reduced-motion: reduce) {
   .ball { transition: none; }
   .panel { animation: none; }
+  .wrap.dragging .ball { transition: none; }
   .pill.run::before { animation: none; }
   .ring .fg { transition: none; }
 }
@@ -211,6 +221,13 @@ let shadow = null;
 let settings = null;
 let open = false;
 
+// 悬浮球位置（拖拽记忆）：{r, b} = 距右/下边距 px，存 storage.local——
+// 屏幕几何因设备而异，不进 sync；null = 用 CSS 默认（右下 18px）
+let ballPos = null;
+const BALL_SIZE = 46;
+const BALL_MARGIN = 18;   // 拖拽吸附极限：至少留出一半球身在外面
+const POS_KEY = 'autoAnswerBallPos';
+
 // 面板会话内状态：日志无论开关都累计（重开面板能接着看）
 const logLines = [];
 let lastProgress = null;   // { done, total }
@@ -223,6 +240,36 @@ const svgRing = `
     <circle class="bg" cx="24" cy="24" r="22"></circle>
     <circle class="fg" cx="24" cy="24" r="22"></circle>
   </svg>`;
+
+/* ---------- 悬浮球位置：应用 / 夹取 / 记忆 ---------- */
+
+// 位置夹取：保证球整体在视口内，只留 MARGIN 的吸附空间
+export function clampBallPos(p, innerW, innerH) {
+  const num = v => { const n = Math.round(Number(v)); return Number.isFinite(n) ? n : 0; };
+  const minX = BALL_MARGIN, minY = BALL_MARGIN;
+  const maxX = Math.max(minX, innerW - BALL_SIZE - BALL_MARGIN);
+  const maxY = Math.max(minY, innerH - BALL_SIZE - BALL_MARGIN);
+  return { r: Math.min(Math.max(num(p?.r), minX), maxX), b: Math.min(Math.max(num(p?.b), minY), maxY) };
+}
+
+function applyBallPos() {
+  if (!shadow || !ballPos) return;
+  const wrap = shadow.querySelector('.wrap');
+  if (!wrap) return;
+  wrap.style.right = `${ballPos.r}px`;
+  wrap.style.bottom = `${ballPos.b}px`;
+}
+
+// 位置是设备/窗口属性，不随 settings 走 sync；非扩展环境（预览页）无记忆即默认位
+function loadBallPos() {
+  try {
+    return chrome.storage.local.get({ [POS_KEY]: null }).then(v => v?.[POS_KEY] || null);
+  } catch (_) { return Promise.resolve(null); }
+}
+
+function saveBallPos() {
+  try { chrome.storage.local.set({ [POS_KEY]: ballPos }); } catch (_) { /* 记不住就只在本页生效 */ }
+}
 
 function el(tag, cls, parent) {
   const n = document.createElement(tag);
@@ -471,7 +518,43 @@ function mount() {
   el('p', 'foot', body).textContent = '编程题提交即评测：作答会实时生成提交记录与作答度，成绩由评测结果决定，与客观题判分路径不同。';
 
   // —— 事件绑定 ——
-  ball.addEventListener('click', () => togglePanel());
+  // 拖拽与点击共用球：pointer 位移超过阈值才算拖动（拖完抑制紧随的 click，防松手把面板又开合一次）
+  let drag = null;
+  let suppressClickUntil = 0;
+  ball.addEventListener('pointerdown', e => {
+    if (e.button !== 0 || !e.isPrimary) return; // 左键拖球；触屏只认单指
+    const r = ball.getBoundingClientRect();
+    drag = { id: e.pointerId, dx: e.clientX - r.left, dy: e.clientY - r.top, sx: e.clientX, sy: e.clientY, moved: false };
+    try { ball.setPointerCapture(e.pointerId); } catch (_) { /* 捕获失败退化为球内拖动 */ }
+  });
+  ball.addEventListener('pointermove', e => {
+    if (!drag || e.pointerId !== drag.id) return;
+    if (!drag.moved) {
+      if (Math.hypot(e.clientX - drag.sx, e.clientY - drag.sy) < 5) return; // 位移阈值内仍是点击
+      drag.moved = true;
+      wrap.classList.add('dragging');
+    }
+    ballPos = clampBallPos({
+      r: window.innerWidth - (e.clientX - drag.dx) - BALL_SIZE,
+      b: window.innerHeight - (e.clientY - drag.dy) - BALL_SIZE,
+    }, window.innerWidth, window.innerHeight);
+    applyBallPos();
+  });
+  const endDrag = () => { if (drag) wrap.classList.remove('dragging'); drag = null; };
+  ball.addEventListener('pointerup', e => {
+    if (!drag || e.pointerId !== drag.id) return;
+    const wasMoved = drag.moved;
+    endDrag();
+    if (!wasMoved) return; // 没拖动 → 交给下面的 click 开合面板
+    suppressClickUntil = Date.now() + 400;
+    saveBallPos();
+    if (open) placePanel(); // 拖到另一半屏幕后，面板锚点跟着换边（开着时）
+  });
+  ball.addEventListener('pointercancel', endDrag);
+  ball.addEventListener('click', () => {
+    if (Date.now() < suppressClickUntil) { suppressClickUntil = 0; return; }
+    togglePanel();
+  });
   collapse.addEventListener('click', closePanel);
   panel.addEventListener('keydown', e => { if (e.key === 'Escape') closePanel(); });
   peek.addEventListener('click', () => {
@@ -524,6 +607,12 @@ function mount() {
   document.body.appendChild(host);
   renderLogs();
   updateRunUI();
+  // 恢复上次拖拽位置（异步回填；未拖过则保持 CSS 默认右下）
+  loadBallPos().then(p => {
+    if (!p || !shadow) return;
+    ballPos = clampBallPos(p, window.innerWidth, window.innerHeight);
+    applyBallPos();
+  });
 }
 
 function unmount() {
@@ -567,10 +656,23 @@ function togglePanel() {
   open ? closePanel() : openPanel();
 }
 
+// 面板随球所在象限换边：球在右半屏 → 默认朝左展开，左半屏 → 朝右；
+// 下半屏 → 默认往上弹，上半屏 → 往下弹（CSS 的 pos-left / pos-top）
+function placePanel() {
+  if (!shadow) return;
+  const wrapEl = shadow.querySelector('.wrap');
+  if (!wrapEl) return;
+  const cx = window.innerWidth - (ballPos?.r ?? 18) - BALL_SIZE / 2;
+  const cy = window.innerHeight - (ballPos?.b ?? 18) - BALL_SIZE / 2;
+  wrapEl.classList.toggle('pos-left', cx < window.innerWidth / 2);
+  wrapEl.classList.toggle('pos-top', cy < window.innerHeight / 2);
+}
+
 function openPanel() {
   if (!shadow) return;
   const panel = shadow.getElementById('panel');
   const ball = shadow.getElementById('ball');
+  placePanel();
   panel.hidden = false;
   ball.setAttribute('aria-expanded', 'true');
   open = true;
@@ -689,6 +791,13 @@ export function init() {
   document.addEventListener('visibilitychange', () => {
     // 文档回到前台时刷新一次状态（运行可能在后台完成）
     if (!document.hidden && shadow) updateRunUI();
+  });
+  // 窗口缩放后球可能被挤出视口，重新夹取（面板开着的话锚点也跟着重算）
+  window.addEventListener('resize', () => {
+    if (!ballPos || !shadow) return;
+    ballPos = clampBallPos(ballPos, window.innerWidth, window.innerHeight);
+    applyBallPos();
+    if (open) placePanel();
   });
 }
 

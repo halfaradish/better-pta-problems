@@ -6,7 +6,7 @@ import {
   assembleImgMessage, buildPrompt, COMPILER_LABELS, compilerIdFromLabel, normalizeBaseUrl, normalizeTF,
   parseChoiceAnswer, parseCodeAnswer, parseFillAnswers, TYPE_BY_NAME,
 } from '../src/content/autoanswer.js';
-import { PRESETS, currentKey, resolveModel, withKeyFor } from '../src/content/autoanswer-panel.js';
+import { PRESETS, clampBallPos, currentKey, resolveModel, withKeyFor } from '../src/content/autoanswer-panel.js';
 
 test('parseChoiceAnswer：裸字母 / 带句点 / JSON 文本 / 代码围栏', () => {
   for (const raw of ['C', 'c', 'C. 分治', 'C、', '```json\n{"answer":"C"}\n```']) {
@@ -159,6 +159,19 @@ test('currentKey/withKeyFor：API Key 按服务各存一把，切换服务不互
   // 未知网关回 deepseek，不写脏键
   assert.deepEqual(withKeyFor({}, 'nope', 'sk-x').autoAnswerApiKeys, { deepseek: 'sk-x' });
   assert.equal(currentKey({ autoAnswerApiKeys: { deepseek: 'sk-a' } }, 'nope'), 'sk-a');
+});
+
+test('clampBallPos：拖拽位置夹回视口内（留出最小边距），非法输入回 0 边界', () => {
+  // 正常值原样保留
+  assert.deepEqual(clampBallPos({ r: 200, b: 100 }, 1920, 1080), { r: 200, b: 100 });
+  // 越界：夹到 [MARGIN, 视口-球-MARGIN]（MARGIN=18，球 46）
+  assert.deepEqual(clampBallPos({ r: -50, b: 9999 }, 800, 600), { r: 18, b: 600 - 46 - 18 });
+  assert.deepEqual(clampBallPos({ r: 9999, b: -1 }, 800, 600), { r: 800 - 46 - 18, b: 18 });
+  // 非法/缺失按 0 处理后照常夹取
+  assert.deepEqual(clampBallPos({ r: 'x', b: null }, 800, 600), { r: 18, b: 18 });
+  assert.deepEqual(clampBallPos(null, 800, 600), { r: 18, b: 18 });
+  // 极小视口（不够球+双边距）不产生负值
+  assert.deepEqual(clampBallPos({ r: 5, b: 5 }, 40, 40), { r: 18, b: 18 });
 });
 
 test('normalizeBaseUrl：去空白/尾斜杠，误粘 /chat/completions 自动剥掉', () => {
