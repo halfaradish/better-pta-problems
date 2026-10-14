@@ -88,6 +88,29 @@ function restoreOpenPill(row) {
   }
 }
 
+// 答题状态胶囊：与 PTA 原生胶囊同构（rounded-xl px-3 py-1 + pc-text text-xs），尺寸
+// 与原生完全一致、明暗主题自动跟随；三态换色 = 换整套类名（蓝=未答题 橙=未完成 绿=已完成）
+const STATUS_PILL = {
+  done: { bg: 'bg-green-500', color: 'pc-color-pass', label: '已完成' },
+  todo: { bg: 'bg-orange-500', color: 'pc-color-warning', label: '未完成' },
+  none: { bg: 'bg-blue-500', color: 'pc-color-primary', label: '未答题' },
+};
+
+function statusPillHtml(level) {
+  const t = STATUS_PILL[level];
+  return `<div class="rounded-xl ${t.bg} bg-opacity-10 px-3 py-1 inline-block whitespace-nowrap flex-none"><div class="flex items-center space-x-1"><div class="pc-text ${t.color} pc-gap-4"><div class="pc-text-raw flex-auto break-words text-xs"><span>${t.label}</span></div></div></div></div>`;
+}
+
+function buildStatusPill(level) {
+  const tpl = document.createElement('template');
+  tpl.innerHTML = statusPillHtml(level);
+  const el = tpl.content.firstElementChild;
+  el.classList.add('bps-done');
+  el.dataset.stamp = level;
+  el.dataset.level = level;
+  return el;
+}
+
 // 答题状态：徽章行尾部加「已完成/未完成/未答题」胶囊，副标题行尾加「已作答 X/Y」。
 // 胶囊顶替原生「已开放」（时间语义已由已开考/倒计时覆盖，控制一行最多两个胶囊）；
 // 考试场次已建的按提交数三态；已开放但还没进场（examId 不在考试场次表）的必然零
@@ -102,13 +125,10 @@ export function updateProgress(scopeEl, it, s) {
   const level = p ? (p.answered >= p.total ? 'done' : 'todo') : 'none';
   const row = pillRow(scopeEl);
   if (row) {
-    const el = pill || document.createElement('span');
-    if (!pill) { el.className = 'bps-done'; row.append(el); }
     hideOpenPill(row);
-    if (el.dataset.stamp !== level) {
-      el.dataset.stamp = level;
-      el.dataset.level = level;
-      el.textContent = { done: '已完成', todo: '未完成', none: '未答题' }[level];
+    if (!pill || pill.dataset.stamp !== level) {
+      const next = buildStatusPill(level);
+      if (pill) pill.replaceWith(next); else row.append(next);
     }
   }
 

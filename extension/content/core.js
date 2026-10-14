@@ -2401,6 +2401,24 @@ input:disabled, button:disabled { opacity: .5; cursor: not-allowed; }
       native.style.display = "";
     }
   }
+  var STATUS_PILL = {
+    done: { bg: "bg-green-500", color: "pc-color-pass", label: "\u5DF2\u5B8C\u6210" },
+    todo: { bg: "bg-orange-500", color: "pc-color-warning", label: "\u672A\u5B8C\u6210" },
+    none: { bg: "bg-blue-500", color: "pc-color-primary", label: "\u672A\u7B54\u9898" }
+  };
+  function statusPillHtml(level) {
+    const t = STATUS_PILL[level];
+    return `<div class="rounded-xl ${t.bg} bg-opacity-10 px-3 py-1 inline-block whitespace-nowrap flex-none"><div class="flex items-center space-x-1"><div class="pc-text ${t.color} pc-gap-4"><div class="pc-text-raw flex-auto break-words text-xs"><span>${t.label}</span></div></div></div></div>`;
+  }
+  function buildStatusPill(level) {
+    const tpl = document.createElement("template");
+    tpl.innerHTML = statusPillHtml(level);
+    const el2 = tpl.content.firstElementChild;
+    el2.classList.add("bps-done");
+    el2.dataset.stamp = level;
+    el2.dataset.level = level;
+    return el2;
+  }
   function updateProgress(scopeEl, it, s) {
     const p = s.progress && it.progress && it.progress.total > 0 ? it.progress : null;
     const openNoExam = s.progress && !it.examId && inAnswerWindow(it);
@@ -2415,16 +2433,11 @@ input:disabled, button:disabled { opacity: .5; cursor: not-allowed; }
     const level = p ? p.answered >= p.total ? "done" : "todo" : "none";
     const row = pillRow(scopeEl);
     if (row) {
-      const el2 = pill || document.createElement("span");
-      if (!pill) {
-        el2.className = "bps-done";
-        row.append(el2);
-      }
       hideOpenPill(row);
-      if (el2.dataset.stamp !== level) {
-        el2.dataset.stamp = level;
-        el2.dataset.level = level;
-        el2.textContent = { done: "\u5DF2\u5B8C\u6210", todo: "\u672A\u5B8C\u6210", none: "\u672A\u7B54\u9898" }[level];
+      if (!pill || pill.dataset.stamp !== level) {
+        const next = buildStatusPill(level);
+        if (pill) pill.replaceWith(next);
+        else row.append(next);
       }
     }
     const line = metaLine(scopeEl);

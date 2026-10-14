@@ -248,32 +248,8 @@
   font-weight: 700;
 }
 
-/* 答题进度：完成状态胶囊（尺寸对齐 PTA 原生胶囊 px-3 py-1 / text-xs / rounded-xl） */
-.bps-done {
-  flex: none;
-  display: inline-block;
-  padding: 4px 12px;
-  border-radius: 0.75rem;
-  font-size: 12px;
-  line-height: 18px;
-  white-space: nowrap;
-}
-
-.bps-done[data-level="done"] {
-  background: rgba(64, 192, 87, 0.12);
-  color: #2f9e44;
-}
-
-.bps-done[data-level="todo"] {
-  background: rgba(232, 89, 12, 0.1);
-  color: #e8590c;
-}
-
-/* 未答题：蓝（与「已开放」同色调；橙留给「未完成」，绿=已完成，随答题推进变色） */
-.bps-done[data-level="none"] {
-  background: rgba(28, 126, 214, 0.10);
-  color: #1c7ed6;
-}
+/* 答题状态胶囊（.bps-done）没有自有样式：DOM 与 PTA 原生胶囊同构
+   （rounded-xl px-3 py-1 / pc-text text-xs，见 src/content/decorate.js），尺寸与主题自动一致 */
 
 .bps-answered {
   flex: none;
