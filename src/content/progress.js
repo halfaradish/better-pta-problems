@@ -2,10 +2,16 @@
  *
  * 数据源 = PTA 考试概览页（/problem-sets/{id}/exam/overview）自己用的接口：
  *   GET /api/exams/{examId}/problem-sets/{problemSetId}/problem-status
- * 语义与 PTA 概览页口径一致（实测 7/15 对得上页面上的 47%）：已作答 = 状态为
- * PROBLEM_SUBMITTED 的题目数，总题数 = problemStatus 长度（= 各题型 total 之和）。
- * 非考试型题目集没有这个接口（problem-status 406、problem-summaries 403），PTA 自己
- * 也不给它们显示答题进度，所以这类题目集不显示进度。
+ * 语义与 PTA 概览页的口径有出入（有意为之）：已作答 = 状态为 PROBLEM_SUBMITTED
+ * 的题目数，总题数 = problemStatus 长度（= 各题型 total 之和）。注意判分后的题目
+ * 状态会变成 PROBLEM_ACCEPTED / PROBLEM_WRONG_ANSWER 等评测结论（实测编程题集
+ * 5 过 1 错概览页仍显示 100%），PTA 概览页把「有提交」都算 100%，插件只把「提交
+ * 待评测」算完——判分后的题集插件会显示「未完成」，这是有意保留的更严口径。
+ *
+ * examId 来自列表接口的 examIdByProblemSetId，实测它是「考试场次表」：场次在用户
+ * 首次进场时才创建（未进场的题目集状态 READY，/exams 响应里连 exam 对象都没有），
+ * 而提交必须挂在场次下——所以不在表里的已开放题目集必然零提交，直接标「未答题」，
+ * 不打接口（problem-summaries 对它们也 403，本身就没有计数源）。
  *
  * 只对「已开始且未关闭」的题目集取数：关闭后剩没剩题都无从补做，为历史题目集逐个
  * 打接口既没意义也白刷 PTA 的接口（用户的「所有题目集」有 59 个考试型题目集，其中
@@ -44,9 +50,14 @@ export function countAnswered(json) {
   };
 }
 
-// 需要进度的条目：考试型 + 已开始 + 未关闭（与「未开放」徽章同口径）
+// 答题窗口内：已开始且未关闭（有无考试场次都适用，未进场标「未答题」也用它）
+export function inAnswerWindow(it, now = Date.now()) {
+  return !!(it?.startAt && it.closeAt && +it.startAt <= now && +it.closeAt > now);
+}
+
+// 需要进度的条目：考试场次已建（examId 在表）+ 答题窗口内
 export function wantsProgress(it, now = Date.now()) {
-  return !!(it?.examId && it.startAt && it.closeAt && +it.startAt <= now && +it.closeAt > now);
+  return !!(it?.examId && inAnswerWindow(it, now));
 }
 
 // 纯函数：缓存记录 → 可用进度（过期、失败、无题目的都返回 null）

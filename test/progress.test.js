@@ -1,8 +1,10 @@
-// 答题进度：口径必须与 PTA 概览页一致（实测 7/15 对应页面上的 47%），
-// 取数范围只限「考试型 + 已开始 + 未关闭」——范围写错会变成给 59 个历史题目集打接口。
+// 答题进度：口径 = 只把 PROBLEM_SUBMITTED（提交待评测）计入已作答，判分结论不算完
+// （有意比 PTA 概览页更严：实测 7/15 对应页面 47%；判分后 5 过 1 错概览 100% 但插件
+// 显示未完成）。取数范围只限「考试场次已建 + 已开始 + 未关闭」——范围写错会变成给
+// 59 个历史题目集打接口；未进场（不在考试场次表）的已开放题目集直接标「未答题」。
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { countAnswered, progressUrl, readProgress, wantsProgress } from '../src/content/progress.js';
+import { countAnswered, inAnswerWindow, progressUrl, readProgress, wantsProgress } from '../src/content/progress.js';
 import { canonicalApiUrl, normalizeApiItems } from '../src/content/aggregate.js';
 
 test('countAnswered：只把 PROBLEM_SUBMITTED 计入已作答，其余状态都算未作答', () => {
@@ -10,12 +12,13 @@ test('countAnswered：只把 PROBLEM_SUBMITTED 计入已作答，其余状态都
     problemStatus: [
       { problemSubmissionStatus: 'PROBLEM_SUBMITTED' },
       { problemSubmissionStatus: 'PROBLEM_NO_ANSWER' },
-      { problemSubmissionStatus: 'PROBLEM_SUBMITTED' },
+      { problemSubmissionStatus: 'PROBLEM_ACCEPTED' },     // 判分通过：不是「提交待评测」，不算完
+      { problemSubmissionStatus: 'PROBLEM_WRONG_ANSWER' }, // 判分答错：同上
       { problemSubmissionStatus: 'PROBLEM_SUBMITTED' },
       { problemSubmissionStatus: 'PROBLEM_NO_ANSWER' },
     ],
   };
-  assert.deepEqual(countAnswered(json), { answered: 3, total: 5 });
+  assert.deepEqual(countAnswered(json), { answered: 2, total: 6 });
 });
 
 test('countAnswered：字段缺失/空响应不抛错，按 0 处理', () => {
@@ -47,19 +50,32 @@ test('progressUrl：进度请求不会被当成列表数据源（不改写用户
   assert.equal(canonicalApiUrl(url), null);
 });
 
-test('wantsProgress：只对考试型 + 已开始 + 未关闭的题目集取数', () => {
+test('wantsProgress：只对考试场次已建 + 已开始 + 未关闭的题目集取数', () => {
   const now = Date.now();
   const HOUR = 3600000;
   const DAY = 86400000;
   const it = (over = {}) => ({ id: '1', examId: '9', startAt: new Date(now - DAY), closeAt: new Date(now + DAY), ...over });
 
   assert.equal(wantsProgress(it(), now), true);
-  assert.equal(wantsProgress(it({ examId: '' }), now), false);                    // 非考试型：接口不存在
+  assert.equal(wantsProgress(it({ examId: '' }), now), false);                    // 未进场：必然零提交，不取数
   assert.equal(wantsProgress(it({ startAt: new Date(now + HOUR) }), now), false); // 未开始：还没到答题窗口
   assert.equal(wantsProgress(it({ closeAt: new Date(now - HOUR) }), now), false); // 已关闭：补做不了，不为历史题目集打接口
   assert.equal(wantsProgress(it({ startAt: null }), now), false);
   assert.equal(wantsProgress(it({ closeAt: null }), now), false);
   assert.equal(wantsProgress(undefined, now), false);
+});
+
+test('inAnswerWindow：与场次无关，已开始且未关闭即真（未进场集合据此标「未答题」）', () => {
+  const now = Date.now();
+  const HOUR = 3600000;
+  const DAY = 86400000;
+  assert.equal(inAnswerWindow({ startAt: new Date(now - DAY), closeAt: new Date(now + DAY) }, now), true);
+  assert.equal(inAnswerWindow({ examId: '', startAt: new Date(now - DAY), closeAt: new Date(now + DAY) }, now), true);
+  assert.equal(inAnswerWindow({ startAt: new Date(now + HOUR), closeAt: new Date(now + DAY) }, now), false);
+  assert.equal(inAnswerWindow({ startAt: new Date(now - DAY), closeAt: new Date(now - HOUR) }, now), false);
+  assert.equal(inAnswerWindow({ startAt: null, closeAt: new Date(now + DAY) }, now), false);
+  assert.equal(inAnswerWindow({ startAt: new Date(now - DAY), closeAt: null }, now), false);
+  assert.equal(inAnswerWindow(undefined, now), false);
 });
 
 test('readProgress：成功记录在 TTL 内可用，过期/失败/无题目都返回 null', () => {

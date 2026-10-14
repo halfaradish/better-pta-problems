@@ -58,7 +58,8 @@ function sync(force = false) {
       course: d.locked ? d.course : (renameMap.get(d.course) || d.course),
     }));
 
-    // 答题进度：考试型且未关闭的题目集才取数（aggItems 带 examId/时间），按 id 挂到卡片上
+    // 答题进度：考试场次已建（examId 在表）且未关闭的题目集才取数（aggItems 带 examId/时间），
+    // 未进场的已开放题目集由 updateProgress 直接标「未答题」，按 id 把进度挂到卡片上
     if (settings.progress) progress.ensureProgress(aggItems || []);
     const attachProgress = list => list.forEach(it => { it.progress = progress.progressOf(it.id); });
     attachProgress(renamed);

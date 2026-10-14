@@ -321,6 +321,11 @@ export function removeRoot() {
 export function teardown() {
   removeRoot();
   document.querySelectorAll('.bps-badge, .bps-countdown, .bps-done, .bps-answered').forEach(n => n.remove());
+  // 复原被答题胶囊顶替隐藏的原生「已开放」（只动自己标记过的）
+  document.querySelectorAll('[data-bps-swap-open]').forEach(n => {
+    delete n.dataset.bpsSwapOpen;
+    n.style.display = '';
+  });
   state.sig = '';
   state.items = [];
 }

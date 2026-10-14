@@ -17,7 +17,7 @@
     openInNewTab: true,
     // 点开题目集在新标签页打开（绕过 PTA 的 SPA 同页跳转）
     progress: true,
-    // 考试型题目集的答题进度（只对未关闭的拉取，见 content/progress.js）
+    // 考试型题目集的答题状态胶囊（顶替原生「已开放」，见 content/progress.js）
     reminderEnabled: true,
     // 题目关闭邮件提醒总开关（与下面两项配置配合；关闭即暂停同步）
     reminderServer: "",
@@ -2263,6 +2263,71 @@ input:disabled, button:disabled { opacity: .5; cursor: not-allowed; }
     return h;
   }
 
+  // src/content/progress.js
+  var OK_TTL = 2 * 60 * 1e3;
+  var FAIL_TTL = 10 * 60 * 1e3;
+  var CONCURRENCY = 3;
+  var cache = /* @__PURE__ */ new Map();
+  var queued = /* @__PURE__ */ new Set();
+  var queue = [];
+  var active = 0;
+  var hooks2 = {};
+  function setProgressHooks(next) {
+    hooks2 = { ...hooks2, ...next };
+  }
+  function progressUrl(examId, problemSetId) {
+    return `/api/exams/${encodeURIComponent(examId)}/problem-sets/${encodeURIComponent(problemSetId)}/problem-status?_bps=progress`;
+  }
+  function countAnswered(json) {
+    const list = json?.problemStatus || [];
+    return {
+      answered: list.filter((p) => p.problemSubmissionStatus === "PROBLEM_SUBMITTED").length,
+      total: list.length
+    };
+  }
+  function inAnswerWindow(it, now = Date.now()) {
+    return !!(it?.startAt && it.closeAt && +it.startAt <= now && +it.closeAt > now);
+  }
+  function wantsProgress(it, now = Date.now()) {
+    return !!(it?.examId && inAnswerWindow(it, now));
+  }
+  function readProgress(rec, now = Date.now()) {
+    if (!rec || !rec.ok) return null;
+    if (now - rec.at > OK_TTL) return null;
+    if (!rec.total) return null;
+    return { answered: rec.answered, total: rec.total };
+  }
+  function progressOf2(id) {
+    return readProgress(cache.get(id));
+  }
+  function ensureProgress(items, now = Date.now()) {
+    for (const it of (items || []).filter((x) => wantsProgress(x, now))) {
+      const rec = cache.get(it.id);
+      if (rec && (rec.ok ? now - rec.at <= OK_TTL : now - rec.at <= FAIL_TTL)) continue;
+      if (queued.has(it.id)) continue;
+      queued.add(it.id);
+      queue.push({ id: it.id, examId: it.examId });
+    }
+    pump();
+  }
+  function pump() {
+    while (active < CONCURRENCY && queue.length) {
+      const job = queue.shift();
+      active++;
+      fetchJson(progressUrl(job.examId, job.id)).then((json) => {
+        cache.set(job.id, { at: Date.now(), ok: true, ...countAnswered(json) });
+      }).catch((err) => {
+        cache.set(job.id, { at: Date.now(), ok: false });
+        console.warn(`[\u66F4\u597D\u7684\u9898\u76EE\u96C6] \u7B54\u9898\u8FDB\u5EA6\u83B7\u53D6\u5931\u8D25\uFF08\u9898\u76EE\u96C6 ${job.id}\uFF09: ${err?.message || err}`);
+      }).finally(() => {
+        active--;
+        queued.delete(job.id);
+        hooks2.onUpdate?.();
+        pump();
+      });
+    }
+  }
+
   // src/content/decorate.js
   function extractItems(settings3) {
     const anchors = [...document.querySelectorAll("main a[href]")].filter((a) => SET_HREF_RE.test(a.getAttribute("href") || "") && !a.closest(".bps-root"));
@@ -2318,16 +2383,36 @@ input:disabled, button:disabled { opacity: .5; cursor: not-allowed; }
     const pill = scopeEl.querySelector('div[class~="rounded-xl"][class*="bg-opacity-10"]');
     return pill ? pill.parentElement : null;
   }
+  function openPillIn(row) {
+    return [...row?.children || []].find(
+      (n) => !n.classList.contains("bps-done") && /已开放/.test(n.textContent)
+    );
+  }
+  function hideOpenPill(row) {
+    const native = openPillIn(row);
+    if (!native) return;
+    native.dataset.bpsSwapOpen = "1";
+    if (native.style.display !== "none") native.style.display = "none";
+  }
+  function restoreOpenPill(row) {
+    const native = openPillIn(row);
+    if (native?.dataset.bpsSwapOpen) {
+      delete native.dataset.bpsSwapOpen;
+      native.style.display = "";
+    }
+  }
   function updateProgress(scopeEl, it, s) {
     const p = s.progress && it.progress && it.progress.total > 0 ? it.progress : null;
+    const openNoExam = s.progress && !it.examId && inAnswerWindow(it);
     const pill = scopeEl.querySelector(".bps-done");
     const text = scopeEl.querySelector(".bps-answered");
-    if (!p) {
+    if (!p && !openNoExam) {
       pill?.remove();
       text?.remove();
+      restoreOpenPill(pillRow(scopeEl));
       return;
     }
-    const done = p.answered >= p.total;
+    const level = p ? p.answered >= p.total ? "done" : "todo" : "none";
     const row = pillRow(scopeEl);
     if (row) {
       const el2 = pill || document.createElement("span");
@@ -2335,15 +2420,16 @@ input:disabled, button:disabled { opacity: .5; cursor: not-allowed; }
         el2.className = "bps-done";
         row.append(el2);
       }
-      if (el2.dataset.stamp !== (done ? "done" : "todo")) {
-        el2.dataset.stamp = done ? "done" : "todo";
-        el2.dataset.level = done ? "done" : "todo";
-        el2.textContent = done ? "\u5DF2\u5B8C\u6210" : "\u672A\u5B8C\u6210";
+      hideOpenPill(row);
+      if (el2.dataset.stamp !== level) {
+        el2.dataset.stamp = level;
+        el2.dataset.level = level;
+        el2.textContent = { done: "\u5DF2\u5B8C\u6210", todo: "\u672A\u5B8C\u6210", none: "\u672A\u7B54\u9898" }[level];
       }
     }
     const line = metaLine(scopeEl);
     const target = line && (line.querySelector(".flex .flex") || line.querySelector(".flex"));
-    if (target) {
+    if (target && p) {
       const el2 = text || document.createElement("span");
       if (!text) {
         el2.className = "bps-answered";
@@ -2351,6 +2437,8 @@ input:disabled, button:disabled { opacity: .5; cursor: not-allowed; }
       }
       const label = `\u5DF2\u4F5C\u7B54 ${p.answered}/${p.total}`;
       if (el2.textContent !== label) el2.textContent = label;
+    } else if (text) {
+      text.remove();
     }
   }
   function decorate(it, s) {
@@ -2373,68 +2461,6 @@ input:disabled, button:disabled { opacity: .5; cursor: not-allowed; }
     }
     updateCountdown(el2, it, s);
     updateProgress(el2, it, s);
-  }
-
-  // src/content/progress.js
-  var OK_TTL = 2 * 60 * 1e3;
-  var FAIL_TTL = 10 * 60 * 1e3;
-  var CONCURRENCY = 3;
-  var cache = /* @__PURE__ */ new Map();
-  var queued = /* @__PURE__ */ new Set();
-  var queue = [];
-  var active = 0;
-  var hooks2 = {};
-  function setProgressHooks(next) {
-    hooks2 = { ...hooks2, ...next };
-  }
-  function progressUrl(examId, problemSetId) {
-    return `/api/exams/${encodeURIComponent(examId)}/problem-sets/${encodeURIComponent(problemSetId)}/problem-status?_bps=progress`;
-  }
-  function countAnswered(json) {
-    const list = json?.problemStatus || [];
-    return {
-      answered: list.filter((p) => p.problemSubmissionStatus === "PROBLEM_SUBMITTED").length,
-      total: list.length
-    };
-  }
-  function wantsProgress(it, now = Date.now()) {
-    return !!(it?.examId && it.startAt && it.closeAt && +it.startAt <= now && +it.closeAt > now);
-  }
-  function readProgress(rec, now = Date.now()) {
-    if (!rec || !rec.ok) return null;
-    if (now - rec.at > OK_TTL) return null;
-    if (!rec.total) return null;
-    return { answered: rec.answered, total: rec.total };
-  }
-  function progressOf2(id) {
-    return readProgress(cache.get(id));
-  }
-  function ensureProgress(items, now = Date.now()) {
-    for (const it of (items || []).filter((x) => wantsProgress(x, now))) {
-      const rec = cache.get(it.id);
-      if (rec && (rec.ok ? now - rec.at <= OK_TTL : now - rec.at <= FAIL_TTL)) continue;
-      if (queued.has(it.id)) continue;
-      queued.add(it.id);
-      queue.push({ id: it.id, examId: it.examId });
-    }
-    pump();
-  }
-  function pump() {
-    while (active < CONCURRENCY && queue.length) {
-      const job = queue.shift();
-      active++;
-      fetchJson(progressUrl(job.examId, job.id)).then((json) => {
-        cache.set(job.id, { at: Date.now(), ok: true, ...countAnswered(json) });
-      }).catch((err) => {
-        cache.set(job.id, { at: Date.now(), ok: false });
-        console.warn(`[\u66F4\u597D\u7684\u9898\u76EE\u96C6] \u7B54\u9898\u8FDB\u5EA6\u83B7\u53D6\u5931\u8D25\uFF08\u9898\u76EE\u96C6 ${job.id}\uFF09: ${err?.message || err}`);
-      }).finally(() => {
-        active--;
-        queued.delete(job.id);
-        hooks2.onUpdate?.();
-        pump();
-      });
-    }
   }
 
   // src/content/reminders.js
@@ -2766,6 +2792,10 @@ input:disabled, button:disabled { opacity: .5; cursor: not-allowed; }
   function teardown() {
     removeRoot();
     document.querySelectorAll(".bps-badge, .bps-countdown, .bps-done, .bps-answered").forEach((n) => n.remove());
+    document.querySelectorAll("[data-bps-swap-open]").forEach((n) => {
+      delete n.dataset.bpsSwapOpen;
+      n.style.display = "";
+    });
     state.sig = "";
     state.items = [];
   }

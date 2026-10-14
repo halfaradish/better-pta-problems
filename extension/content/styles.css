@@ -269,6 +269,12 @@
   color: #e8590c;
 }
 
+/* 未答题：蓝（与「已开放」同色调；橙留给「未完成」，绿=已完成，随答题推进变色） */
+.bps-done[data-level="none"] {
+  background: rgba(28, 126, 214, 0.10);
+  color: #1c7ed6;
+}
+
 .bps-answered {
   flex: none;
   font-size: 11px;

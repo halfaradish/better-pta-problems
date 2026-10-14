@@ -229,14 +229,17 @@
   ];
   const MOCK_EXAM_IDS = {};
   for (const p of MOCK_PROBLEM_SETS) {
-    if (/课堂练习|作业07|数据结构-(实验|作业八)|数据结构复习题/.test(p.name)) MOCK_EXAM_IDS[p.id] = '9' + p.id.slice(1);
+    if (/课堂练习|作业07|算法分析作业1-1|数据结构-(实验|作业八)|数据结构复习题/.test(p.name)) MOCK_EXAM_IDS[p.id] = '9' + p.id.slice(1);
   }
-  /* 答题进度 mock：响应形状同真实的 problem-status（PROBLEM_SUBMITTED = 已作答）。
-     刻意覆盖三种状态：已完成、部分作答、一题没做。 */
+  /* 答题进度 mock：响应形状同真实的 problem-status，PROBLEM_SUBMITTED = 已作答
+     （插件口径：判分结论 PROBLEM_ACCEPTED/WRONG_ANSWER 不算完）。
+     刻意覆盖：判分后五过一错（插件按严口径显示 0/6 未完成，PTA 概览算 100%）、
+     部分作答、一题没做。 */
   const MOCK_PROGRESS = {
     '2100000000000000137': { answered: 12, total: 12 },
     '2100000000000000138': { answered: 7, total: 15 },
     '2100000000000000139': { answered: 0, total: 20 },
+    '2100000000000000140': { answered: 0, total: 6, judged: true },
     '2200000000000000022': { answered: 5, total: 12 },
     '2100000000000000147': { answered: 1, total: 1 },
   };
@@ -246,12 +249,14 @@
   window.__BPS_FETCH_JSON__ = async url => {
     if (String(url).includes('/problem-status')) {
       const id = /problem-sets\/(\d+)\/problem-status/.exec(String(url))?.[1];
-      const { answered, total } = MOCK_PROGRESS[id] || DEFAULT_PROGRESS;
+      const { answered, total, judged } = MOCK_PROGRESS[id] || DEFAULT_PROGRESS;
       return {
         problemStatus: Array.from({ length: total }, (_, i) => ({
           id: `mock-problem-${i}`,
           problemType: 'MULTIPLE_CHOICE',
-          problemSubmissionStatus: i < answered ? 'PROBLEM_SUBMITTED' : 'PROBLEM_NO_ANSWER',
+          problemSubmissionStatus: judged
+            ? (i < total - 1 ? 'PROBLEM_ACCEPTED' : 'PROBLEM_WRONG_ANSWER')
+            : (i < answered ? 'PROBLEM_SUBMITTED' : 'PROBLEM_NO_ANSWER'),
         })),
       };
     }

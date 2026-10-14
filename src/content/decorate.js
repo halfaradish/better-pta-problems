@@ -5,6 +5,7 @@ import { SET_HREF_RE } from '../shared/paths.js';
 import { fmtCloseLocal, fmtCountdown, parseCloseTime } from '../shared/time.js';
 import { hashHue } from '../shared/util.js';
 import { classifyDetailed } from './classify.js';
+import { inAnswerWindow } from './progress.js';
 
 // 排除本插件生成的克隆节点，避免把分组视图里的克隆卡片当成新条目
 export function extractItems(settings) {
@@ -63,33 +64,63 @@ function pillRow(scopeEl) {
   return pill ? pill.parentElement : null;
 }
 
-// 答题进度：徽章行尾部加「已完成/未完成」胶囊，副标题行尾加「已作答 X/Y」。
-// 只在拿到进度（考试型 + 已开始 + 未关闭，见 progress.js）时出现，其余题目集与之前一样。
+// 找出原生「已开放」胶囊（蓝色；克隆重挂与恢复都要用文本特征，别认位置）
+function openPillIn(row) {
+  return [...(row?.children || [])].find(
+    n => !n.classList.contains('bps-done') && /已开放/.test(n.textContent),
+  );
+}
+
+// 显示我们的答案胶囊时隐藏原生「已开放」（dataset 标记，复原只动自己藏过的）；
+// React 重渲染会换新节点（无标记无隐藏），下次 decorate 重新隐藏
+function hideOpenPill(row) {
+  const native = openPillIn(row);
+  if (!native) return;
+  native.dataset.bpsSwapOpen = '1';
+  if (native.style.display !== 'none') native.style.display = 'none';
+}
+
+function restoreOpenPill(row) {
+  const native = openPillIn(row);
+  if (native?.dataset.bpsSwapOpen) {
+    delete native.dataset.bpsSwapOpen;
+    native.style.display = '';
+  }
+}
+
+// 答题状态：徽章行尾部加「已完成/未完成/未答题」胶囊，副标题行尾加「已作答 X/Y」。
+// 胶囊顶替原生「已开放」（时间语义已由已开考/倒计时覆盖，控制一行最多两个胶囊）；
+// 考试场次已建的按提交数三态；已开放但还没进场（examId 不在考试场次表）的必然零
+// 提交，直接标「未答题」。两者都依赖聚合数据的 startAt，纯 DOM 降级时维持原样。
 export function updateProgress(scopeEl, it, s) {
   const p = s.progress && it.progress && it.progress.total > 0 ? it.progress : null;
+  const openNoExam = s.progress && !it.examId && inAnswerWindow(it);
   const pill = scopeEl.querySelector('.bps-done');
   const text = scopeEl.querySelector('.bps-answered');
-  if (!p) { pill?.remove(); text?.remove(); return; }
+  if (!p && !openNoExam) { pill?.remove(); text?.remove(); restoreOpenPill(pillRow(scopeEl)); return; }
 
-  const done = p.answered >= p.total;
+  const level = p ? (p.answered >= p.total ? 'done' : 'todo') : 'none';
   const row = pillRow(scopeEl);
   if (row) {
     const el = pill || document.createElement('span');
     if (!pill) { el.className = 'bps-done'; row.append(el); }
-    if (el.dataset.stamp !== (done ? 'done' : 'todo')) {
-      el.dataset.stamp = done ? 'done' : 'todo';
-      el.dataset.level = done ? 'done' : 'todo';
-      el.textContent = done ? '已完成' : '未完成';
+    hideOpenPill(row);
+    if (el.dataset.stamp !== level) {
+      el.dataset.stamp = level;
+      el.dataset.level = level;
+      el.textContent = { done: '已完成', todo: '未完成', none: '未答题' }[level];
     }
   }
 
   const line = metaLine(scopeEl);
   const target = line && (line.querySelector('.flex .flex') || line.querySelector('.flex'));
-  if (target) {
+  if (target && p) {
     const el = text || document.createElement('span');
     if (!text) { el.className = 'bps-answered'; target.append(el); }
     const label = `已作答 ${p.answered}/${p.total}`;
     if (el.textContent !== label) el.textContent = label;
+  } else if (text) {
+    text.remove(); // 未进场标「未答题」时没有计数可写
   }
 }
 

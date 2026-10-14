@@ -17,7 +17,7 @@
     openInNewTab: true,
     // 点开题目集在新标签页打开（绕过 PTA 的 SPA 同页跳转）
     progress: true,
-    // 考试型题目集的答题进度（只对未关闭的拉取，见 content/progress.js）
+    // 考试型题目集的答题状态胶囊（顶替原生「已开放」，见 content/progress.js）
     reminderEnabled: true,
     // 题目关闭邮件提醒总开关（与下面两项配置配合；关闭即暂停同步）
     reminderServer: "",
