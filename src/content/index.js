@@ -164,6 +164,8 @@ window.BPS = {
     programming: () => autoanswer.collectProgramming(),
   },
   resumeRelay: () => autoanswer.resumeRelay(settings),
+  // 手动触发提醒订阅同步（真机上配置变更走 storage.onChanged 自动触发；预览页/回归用这个）
+  syncReminders: () => reminders.syncRemindersDirect(settings),
   setSettings: async patch => {
     settings = { ...settings, ...patch };
     await saveSettings(settings);

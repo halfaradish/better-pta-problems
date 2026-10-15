@@ -156,8 +156,8 @@
 <div class="preview-note">设计预览：全部=PTA 原生列表（分页可用，默认）/分组聚合（整组分页），点课程 chip=该课程平铺；筛选条上已全部关闭的课程灰显、未关闭的计数蓝色高亮；跨页聚合 33 条</div>
 
 <script>
-  /* chrome.storage 仿真（预览页无扩展环境） */
-  window.__BPS_SETTINGS__ = { enabled: true, grouped: true, badge: true, countdown: true, progress: true, separators: '--,｜,|', rules: '', reminderEnabled: true, reminderServer: '', reminderEmail: '' };
+  /* chrome.storage 仿真（预览页无扩展环境）；提醒配置填假值让直连同步路径可跑通（fetch 已被 mock 拦截） */
+  window.__BPS_SETTINGS__ = { enabled: true, grouped: true, badge: true, countdown: true, progress: true, separators: '--,｜,|', rules: '', reminderEnabled: true, reminderServer: 'demo.server:8787', reminderEmail: 'me@example.com' };
 
   /* 当前页（PTA 渲染的 16 张卡片，id 与 mock 接口数据一一对应） */
   const DATA = [
@@ -265,6 +265,18 @@
 
   // 预览页不是真实 PTA 路由，放开路径限制以便本地验证
   window.__BPS_FORCE_LIST__ = true;
+
+  /* BPS_SYNC 仿真：记录扩展运行时的订阅上报（预览页本无 chrome，补一个最小 stub），
+     回归「已完成的不再提醒」用——payload 里的 sets 应当剔除了进度假数据判「已完成」的条目 */
+  window.__BPS_SYNC_LOG__ = [];
+  window.chrome = {
+    runtime: {
+      sendMessage: async msg => {
+        if (msg?.type === 'BPS_SYNC') window.__BPS_SYNC_LOG__.push({ at: Date.now(), server: msg.server, email: msg.email, sets: msg.sets });
+        return { ok: true };
+      },
+    },
+  };
 </script>
 <script src="extension/content/core.js"></script>
 </body>

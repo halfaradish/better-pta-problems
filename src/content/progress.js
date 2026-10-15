@@ -2,11 +2,16 @@
  *
  * 数据源 = PTA 考试概览页（/problem-sets/{id}/exam/overview）自己用的接口：
  *   GET /api/exams/{examId}/problem-sets/{problemSetId}/problem-status
- * 语义与 PTA 概览页的口径有出入（有意为之）：已作答 = 状态为 PROBLEM_SUBMITTED
- * 的题目数，总题数 = problemStatus 长度（= 各题型 total 之和）。注意判分后的题目
- * 状态会变成 PROBLEM_ACCEPTED / PROBLEM_WRONG_ANSWER 等评测结论（实测编程题集
- * 5 过 1 错概览页仍显示 100%），PTA 概览页把「有提交」都算 100%，插件只把「提交
- * 待评测」算完——判分后的题集插件会显示「未完成」，这是有意保留的更严口径。
+ * 两套口径，同一份数据（有意为之）：
+ *   - 展示（严）：已作答 = 状态为 PROBLEM_SUBMITTED 的题目数，总题数 = problemStatus
+ *     长度（= 各题型 total 之和）。注意判分后的题目状态会变成 PROBLEM_ACCEPTED /
+ *     PROBLEM_WRONG_ANSWER 等评测结论（实测编程题集 5 过 1 错概览页仍显示 100%），
+ *     PTA 概览页把「有提交」都算 100%，插件只把「提交待评测」算完——判分后的题集
+ *     插件会显示「未完成」，这是有意保留的更严口径。
+ *   - 提醒（宽）：每道题都有提交/判分记录（attempted）即算「已完成」，邮件提醒据此
+ *     不再订阅该题目集（content/reminders.js）——判分后 PROBLEM_SUBMITTED 归零，
+ *     沿用严口径会让判分完的题集永远收到提醒，恰好违背提醒的初衷。
+ *     未知状态不计入（宁可多提醒，不漏提醒）。
  *
  * examId 来自列表接口的 examIdByProblemSetId，实测它是「考试场次表」：场次在用户
  * 首次进场时才创建（未进场的题目集状态 READY，/exams 响应里连 exam 对象都没有），
@@ -26,9 +31,14 @@ const OK_TTL = 2 * 60 * 1000;      // 成功结果 2 分钟（与聚合同频，
 const FAIL_TTL = 10 * 60 * 1000;   // 失败/无权限 10 分钟，避免反复打同一个坏接口
 const CONCURRENCY = 3;             // 并发上限：一次翻页可能带出十几个题目集
 
-const cache = new Map();   // problemSetId -> { at, ok, answered, total }
+// 有提交记录的状态全集（提醒口径）：提交待判 + 已观测到的评测结论。
+// 实测词表见 docs/核心结论.md §2.1；未知状态不计入——宁可多提醒，不漏提醒
+const ATTEMPTED_STATUSES = ['PROBLEM_SUBMITTED', 'PROBLEM_ACCEPTED', 'PROBLEM_WRONG_ANSWER'];
+
+const cache = new Map();   // problemSetId -> { at, ok, answered, attempted, total }
 const queued = new Set();  // 已排队/在途的 problemSetId（去重）
 const queue = [];          // 待取 [{ id, examId }]，未关闭的排在前面
+const waiters = [];        // ensureProgressAsync 的等待者 [{ pending: Set<id>, resolve }]
 let active = 0;
 let hooks = {};
 
@@ -46,6 +56,8 @@ export function countAnswered(json) {
   const list = json?.problemStatus || [];
   return {
     answered: list.filter(p => p.problemSubmissionStatus === 'PROBLEM_SUBMITTED').length,
+    // 提醒口径（宽松）：提交待判 + 评测结论都算「有提交记录」；未知状态不计入
+    attempted: list.filter(p => ATTEMPTED_STATUSES.includes(p.problemSubmissionStatus)).length,
     total: list.length,
   };
 }
@@ -65,23 +77,59 @@ export function readProgress(rec, now = Date.now()) {
   if (!rec || !rec.ok) return null;
   if (now - rec.at > OK_TTL) return null;
   if (!rec.total) return null;
-  return { answered: rec.answered, total: rec.total };
+  return { answered: rec.answered, attempted: rec.attempted || 0, total: rec.total };
 }
 
 export function progressOf(id) {
   return readProgress(cache.get(id));
 }
 
-// 当前页条目里缺进度的排入队列（幂等：缓存新鲜 / 已在途 / 已排队都不重复入队）
-export function ensureProgress(items, now = Date.now()) {
+// 纯函数：缓存记录 → 提醒口径的「已完成」（宽松）：每道题都有提交/判分记录即算完。
+// 与展示胶囊的严口径分开：判分后 PROBLEM_SUBMITTED 归零，沿用严口径会让判分完的
+// 题集永远被提醒。记录缺失/过期/失败/无题目一律 false——宁可多提醒，不漏提醒
+export function reminderDone(rec, now = Date.now()) {
+  const p = readProgress(rec, now);
+  return !!p && p.attempted >= p.total;
+}
+
+export function isReminderDone(id, now = Date.now()) {
+  return reminderDone(cache.get(id), now);
+}
+
+// 当前页条目里缺进度的排入队列（幂等：缓存新鲜 / 已在途 / 已排队都不重复入队），
+// 返回所有新入队/已在途请求落定后才 resolve 的 Promise（无论成败——落定即有记账）。
+// 提醒推送前等着它，「已完成」判定才有数据；fetch 卡死由调用方用超时兜底
+export function ensureProgressAsync(items, now = Date.now()) {
+  const pending = new Set();
   for (const it of (items || []).filter(x => wantsProgress(x, now))) {
     const rec = cache.get(it.id);
     if (rec && (rec.ok ? now - rec.at <= OK_TTL : now - rec.at <= FAIL_TTL)) continue;
-    if (queued.has(it.id)) continue;
-    queued.add(it.id);
-    queue.push({ id: it.id, examId: it.examId });
+    pending.add(it.id);
+    if (!queued.has(it.id)) {
+      queued.add(it.id);
+      queue.push({ id: it.id, examId: it.examId });
+    }
   }
   pump();
+  if (!pending.size) return Promise.resolve();
+  return new Promise(resolve => waiters.push({ pending, resolve }));
+}
+
+// ensureProgress 的旧入口：不需要等待的调用方（列表视图）用这个
+export function ensureProgress(items, now = Date.now()) {
+  void ensureProgressAsync(items, now);
+}
+
+// 落定记账：把该 id 从各等待者的待定集中划掉，集齐即放行
+function settleWaiter(id) {
+  for (let i = waiters.length - 1; i >= 0; i--) {
+    const w = waiters[i];
+    w.pending.delete(id);
+    if (!w.pending.size) {
+      waiters.splice(i, 1);
+      w.resolve();
+    }
+  }
 }
 
 function pump() {
@@ -99,6 +147,7 @@ function pump() {
       .finally(() => {
         active--;
         queued.delete(job.id);
+        settleWaiter(job.id);
         hooks.onUpdate?.(); // 落定即重建视图；由入口做防抖
         pump();
       });

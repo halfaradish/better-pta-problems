@@ -18,6 +18,7 @@ async function load() {
   $('separators').value = stored.separators;
   $('rules').value = stored.rules || '';
   $('reminderEnabled').checked = stored.reminderEnabled !== false;
+  $('reminderSkipDone').checked = stored.reminderSkipDone !== false;
   $('reminderServer').value = stored.reminderServer || '';
   $('reminderEmail').value = stored.reminderEmail || '';
   applyReminderEnabled();
@@ -38,6 +39,7 @@ function collect() {
     separators: $('separators').value.trim() || DEFAULTS.separators,
     rules: $('rules').value.trim(),
     reminderEnabled: $('reminderEnabled').checked,
+    reminderSkipDone: $('reminderSkipDone').checked,
     reminderServer: $('reminderServer').value.trim(),
     reminderEmail: $('reminderEmail').value.trim(),
     autoAnswer: $('autoAnswer').checked,
@@ -58,6 +60,7 @@ let testBusy = false;
 
 function applyReminderEnabled() {
   const on = $('reminderEnabled').checked;
+  $('reminderSkipDone').disabled = !on;
   $('reminderServer').disabled = !on;
   $('reminderEmail').disabled = !on;
   $('testReminder').disabled = !on || Date.now() < testCooldownUntil;
@@ -104,6 +107,7 @@ $('rules').addEventListener('input', save);
 $('reminderServer').addEventListener('input', save);
 $('reminderEmail').addEventListener('input', save);
 $('reminderEnabled').addEventListener('change', () => { save(); applyReminderEnabled(); });
+$('reminderSkipDone').addEventListener('change', save);
 
 $('testReminder').addEventListener('click', async () => {
   if (testBusy || $('testReminder').disabled) return;

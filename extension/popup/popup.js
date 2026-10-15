@@ -20,6 +20,8 @@
     // 考试型题目集的答题状态胶囊（顶替原生「已开放」，见 content/progress.js）
     reminderEnabled: true,
     // 题目关闭邮件提醒总开关（与下面两项配置配合；关闭即暂停同步）
+    reminderSkipDone: true,
+    // 已完成的题目集不再提醒：推送订阅时剔除已全部提交/判分的条目（口径见 content/reminders.js）
     reminderServer: "",
     // 邮件提醒后端地址（ip:port，可加 /令牌 后缀）；空 = 关闭
     reminderEmail: "",
@@ -126,6 +128,7 @@
     $("separators").value = stored.separators;
     $("rules").value = stored.rules || "";
     $("reminderEnabled").checked = stored.reminderEnabled !== false;
+    $("reminderSkipDone").checked = stored.reminderSkipDone !== false;
     $("reminderServer").value = stored.reminderServer || "";
     $("reminderEmail").value = stored.reminderEmail || "";
     applyReminderEnabled();
@@ -143,6 +146,7 @@
       separators: $("separators").value.trim() || DEFAULTS.separators,
       rules: $("rules").value.trim(),
       reminderEnabled: $("reminderEnabled").checked,
+      reminderSkipDone: $("reminderSkipDone").checked,
       reminderServer: $("reminderServer").value.trim(),
       reminderEmail: $("reminderEmail").value.trim(),
       autoAnswer: $("autoAnswer").checked
@@ -159,6 +163,7 @@
   var testBusy = false;
   function applyReminderEnabled() {
     const on = $("reminderEnabled").checked;
+    $("reminderSkipDone").disabled = !on;
     $("reminderServer").disabled = !on;
     $("reminderEmail").disabled = !on;
     $("testReminder").disabled = !on || Date.now() < testCooldownUntil;
@@ -202,6 +207,7 @@
     save();
     applyReminderEnabled();
   });
+  $("reminderSkipDone").addEventListener("change", save);
   $("testReminder").addEventListener("click", async () => {
     if (testBusy || $("testReminder").disabled) return;
     testBusy = true;

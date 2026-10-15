@@ -44,7 +44,7 @@
     }
     * { box-sizing: border-box; }
     body {
-      width: 360px; margin: 0; padding: 6px 16px 2px;
+      width: 360px; margin: 0; padding: 4px 16px 0;
       background: var(--bg); color: var(--text);
       font: 13px/1.5 system-ui, "Microsoft YaHei", "PingFang SC", sans-serif;
       -webkit-font-smoothing: antialiased;
@@ -53,14 +53,14 @@
     input:focus-visible, textarea:focus-visible { outline: none; }
 
     /* ---------- 头部 ---------- */
-    .head { display: flex; align-items: center; gap: 10px; padding-bottom: 2px; }
+    .head { display: flex; align-items: center; gap: 10px; padding-bottom: 0; }
     .head img { width: 30px; height: 30px; border-radius: 8px; }
     .head-title { display: flex; align-items: center; gap: 7px; font-size: 15px; font-weight: 650; letter-spacing: .01em; }
     .ver { font-size: 11px; font-weight: 500; line-height: 17px; padding: 0 7px; border: 1px solid var(--input-border); border-radius: 9999px; background: var(--input-bg); color: var(--text-2); }
     .head-sub { margin-top: 0; font-size: 12px; color: var(--text-3); }
 
     main > * + * { border-top: 1px solid var(--hairline); }
-    section, details { padding: 3px 0 4px; }
+    section, details { padding: 2px 0 3px; }
 
     /* ---------- 开关（原生 checkbox 样式化，保留键盘与读屏语义） ---------- */
     .switch {
@@ -85,7 +85,7 @@
     /* ---------- 主开关行：面板的锚点控件，开启时整行淡蓝 ---------- */
     .master {
       display: flex; align-items: center; justify-content: space-between; gap: 12px;
-      margin: 0 -16px; padding: 3px 16px;
+      margin: 0 -16px; padding: 2px 16px;
       transition: background .18s ease;
     }
     .master:has(#enabled:checked) { background: var(--accent-soft); }
@@ -110,7 +110,7 @@
     details[open] .caret { transform: rotate(225deg); }
 
     /* ---------- 字段 ---------- */
-    .field { margin-top: 5px; }
+    .field { margin-top: 3px; }
     .field-label { display: block; margin-bottom: 3px; font-size: 12px; color: var(--text-2); }
     input[type="text"], textarea {
       width: 100%; padding: 5px 9px;
@@ -124,11 +124,11 @@
     }
     input::placeholder, textarea::placeholder { color: var(--text-3); }
     textarea { resize: vertical; min-height: 64px; }
-    .hint { margin: 3px 0 0; font-size: 12px; color: var(--text-3); }
+    .hint { margin: 2px 0 0; font-size: 12px; color: var(--text-3); }
 
     /* ---------- 提醒区 ---------- */
     .sec-head { font-weight: 600; margin-bottom: 2px; }
-    .test-row { display: flex; align-items: center; gap: 10px; margin-top: 4px; }
+    .test-row { display: flex; align-items: center; gap: 10px; margin-top: 2px; }
     .status { min-width: 0; font-size: 12px; color: var(--text-2); }
     .status.ok { color: var(--ok); font-weight: 500; }
     .status.err { color: var(--err); }
@@ -149,7 +149,7 @@
     footer {
       display: flex; align-items: center; justify-content: space-between; gap: 10px;
       flex-wrap: wrap; row-gap: 0;
-      margin-top: 0; padding-top: 4px; border-top: 1px solid var(--hairline);
+      margin-top: 0; padding-top: 2px; border-top: 1px solid var(--hairline);
     }
     .foot-backup {
       flex-basis: 100%; display: flex; align-items: center; gap: 10px;
@@ -173,7 +173,7 @@
   <header class="head">
     <img src="../icons/icon48.png" alt="" width="30" height="30">
     <div class="head-text">
-      <div class="head-title">更好的题目集 <span class="ver" id="version">v0.9.1</span></div>
+      <div class="head-title">更好的题目集 <span class="ver" id="version">v0.9.4</span></div>
       <div class="head-sub">PTA 题目集列表增强</div>
     </div>
   </header>
@@ -217,6 +217,7 @@
     <section>
       <div class="sec-head">题目关闭倒计时提醒</div>
       <label class="row"><span class="row-text">启用邮件提醒</span><input type="checkbox" class="switch" id="reminderEnabled" checked></label>
+      <label class="row"><span class="row-text">已完成的不再提醒<span class="q">考试型 · 有提交即算</span></span><input type="checkbox" class="switch" id="reminderSkipDone" checked></label>
       <div class="field">
         <label class="field-label" for="reminderServer">提醒服务器</label>
         <input type="text" id="reminderServer" placeholder="例如 123.45.67.89:8787" autocomplete="off" spellcheck="false">

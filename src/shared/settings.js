@@ -13,6 +13,7 @@ export const DEFAULTS = {
   openInNewTab: true,     // 点开题目集在新标签页打开（绕过 PTA 的 SPA 同页跳转）
   progress: true,         // 考试型题目集的答题状态胶囊（顶替原生「已开放」，见 content/progress.js）
   reminderEnabled: true,  // 题目关闭邮件提醒总开关（与下面两项配置配合；关闭即暂停同步）
+  reminderSkipDone: true, // 已完成的题目集不再提醒：推送订阅时剔除已全部提交/判分的条目（口径见 content/reminders.js）
   reminderServer: '',     // 邮件提醒后端地址（ip:port，可加 /令牌 后缀）；空 = 关闭
   reminderEmail: '',      // 提醒邮件接收邮箱
   // 自动答题（实验）：入口为题目页的悬浮球面板（弹窗只留总开关），见 docs/自动答题初探.md §9

@@ -131,3 +131,5 @@ docker run -d --name better-pta-reminder \
 | `POST` | `/api/test` | 给 `{email}` 立即发一封测试邮件；每邮箱 60 秒（`TEST_COOLDOWN_SECONDS`）一次，超频返回 429 |
 
 所有响应带 `Access-Control-Allow-Origin: *`（扩展 background 跨源调用所需）；配置了 `TOKEN` 时 `/api/*` 要求 `X-Token` 请求头。
+
+> 插件 v0.9.4 起，「已完成的不再提醒」开关（默认开）会让订阅 payload 自动剔除已完成的考试型题目集——这是插件侧行为，依赖浏览器里的答题进度数据（做完全部题后至少再打开一次 PTA 才会同步生效），服务端协议与配置不变。
