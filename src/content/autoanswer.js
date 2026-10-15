@@ -27,6 +27,33 @@ const LETTERS = 'ABCDEFGHIJ';
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
+/* ---------- 带时限的 fetch ----------
+ * 服务瘫痪的最坏型态是连接挂起不回包：fetch 无内置超时，请求能吊死几分钟，期间引擎
+ * 的 worker 全停在 await、事件流一行不出——面板看似死机，发生了什么只能靠猜。
+ * 第三方/慢源请求统一套时限，AbortError 转成人话错误，由调用方的前缀拼成完整日志。 */
+const CHAT_TIMEOUT_MS = 120000;  // 单次 LLM 请求 120s：慢模型的长输出别误杀，但绝不无限等
+const IMAGE_TIMEOUT_MS = 30000;  // 题图转取 30s：图源挂起不拖垮整题
+
+async function fetchBounded(url, opts = {}, ms, stopSignal) {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), ms);
+  const stopNow = () => ctl.abort();
+  if (stopSignal) {
+    if (stopSignal.aborted) { clearTimeout(timer); throw new Error('已中止'); }
+    stopSignal.addEventListener('abort', stopNow, { once: true });
+  }
+  try {
+    return await fetch(url, { ...opts, signal: ctl.signal });
+  } catch (err) {
+    if (stopSignal?.aborted) throw new Error('已中止');
+    if (err?.name === 'AbortError') throw new Error(`请求 ${Math.round(ms / 1000)}s 无响应，已按超时中断`);
+    throw err;
+  } finally {
+    clearTimeout(timer);
+    stopSignal?.removeEventListener('abort', stopNow);
+  }
+}
+
 // OpenCode Zen Go 网关要求：每个会话带稳定的 x-opencode-session（利于路由/缓存，
 // 不带可能被拒 400）；自建 UA（官方要求勿用 SDK/HTTP 库默认名）
 let sessionId = null;
@@ -601,11 +628,11 @@ async function chatOnce(cfg, messages) {
     headers['x-opencode-session'] = sessionHeader();
     headers['User-Agent'] = 'better-pta-problems/0.9'; // 网关要求自建 UA（浏览器会忽略，仅为直连场景保留）
   }
-  const res = await fetch(base + '/chat/completions', {
+  const res = await fetchBounded(base + '/chat/completions', {
     method: 'POST',
     headers,
     body: JSON.stringify({ model: cfg.model, temperature: 0, messages }),
-  });
+  }, CHAT_TIMEOUT_MS, runAbort?.signal ?? null);
   if (!res.ok) {
     const t = await res.text().catch(() => '');
     throw new Error('LLM HTTP ' + res.status + (t ? '：' + t.slice(0, 140) : ''));
@@ -621,7 +648,7 @@ async function chatOnce(cfg, messages) {
 // 经 chrome.runtime 让 background fetch（该域已在 host_permissions，含图转取见 background/index.js）。
 // 页面世界无 chrome.runtime（真机扩展才可用时 background 可用），两层都失败则该题报失败不拖累其他题。
 function toDataUrlPage(src) {
-  return fetch(src, { credentials: 'include' }).then(res => {
+  return fetchBounded(src, { credentials: 'include' }, IMAGE_TIMEOUT_MS, runAbort?.signal ?? null).then(res => {
     if (!res.ok) throw new Error('HTTP ' + res.status);
     return res.blob();
   }).then(blob => new Promise((resolve, reject) => {
@@ -708,6 +735,7 @@ async function answerOne(q, cfg) {
         : await chatOnce(cfg, messages);
       break;
     } catch (err) {
+      if (runAbort?.signal.aborted) return { ok: false, reason: '已中止' };
       if (attempt === 2) return { ok: false, reason: 'LLM 调用失败：' + (err?.message || err) };
       await sleep(900);
     }
@@ -789,6 +817,12 @@ export async function resumeRelay(settings) {
     fire({ kind: 'log', level: 'warn', text: '编程题续跑取消：总开关未开启' });
     return;
   }
+  if (r.aborted) { // 上一页已按用户要求中止（中止写入续跑单后才翻页的残单）：就地作废
+    clearRelay();
+    fire({ kind: 'log', level: 'warn', text: '编程题续跑已中止（按你的要求停止）' });
+    fire({ kind: 'state', running: false, error: '已中止' });
+    return;
+  }
   const prob = r.problems[r.pi];
   if (!prob) {
     clearRelay();
@@ -802,8 +836,15 @@ export async function resumeRelay(settings) {
     return;
   }
   running = true;
+  runAbort = new AbortController(); // 续跑页也挂终止信号，面板的中止按钮每页都有效
   suppressLeaveConfirm();
   fire({ kind: 'state', running: true });
+  // 每页的进页日志：跨页续跑每题一页，日志会清空——进页先立坐标，此前失败当场回放，
+  // 免得只见球在转、不知道滚到第几题、前几题死因如何
+  fire({ kind: 'log', level: 'info', text: `编程题续跑（第 ${r.pi + 1}/${r.problems.length} 题，${r.phase === 'verify' ? '水合校验/提交' : '收集作答'}阶段）` });
+  if (r.summary.failed.length) {
+    fire({ kind: 'log', level: 'warn', text: `此前已失败 ${r.summary.failed.length} 题：\n${failDetails(r.summary.failed)}` });
+  }
   try {
     stripDraftHttpCache(prob.id); // PAT 旧响应会伪造「已答」/旧代码，挂载读值前先剥
     if (r.phase === 'verify') {
@@ -817,9 +858,24 @@ export async function resumeRelay(settings) {
   }
 }
 
-function relaySummaryLine(r) {
+// 失败明细的纯函数（failDetails，单测覆盖）：label 缺省回退服务端题 id 后四位
+export function failDetails(failed) {
+  return (failed || []).map(f => `${f.label || (f.id || '').slice(-4)}：${f.reason}`).join('\n');
+}
+
+export function relaySummaryLine(r) {
   const s = r.summary;
-  return `作答 ${s.applied} · 跳过已答 ${s.skippedAnswered} · 跳过含图 ${s.skippedImage} · 失败 ${s.failed.length}${r.cfg.drySave ? '（dry，未提交）' : ''}`;
+  const line = `作答 ${s.applied} · 跳过已答 ${s.skippedAnswered} · 跳过含图 ${s.skippedImage} · 失败 ${s.failed.length}${r.cfg.drySave ? '（dry，未提交）' : ''}`;
+  if (!s.failed.length) return line;
+  return `${line}\n失败明细：\n${failDetails(s.failed)}`;
+}
+
+// 单题失败记账 + 当场报错：续跑每题失败就翻页（本页日志清空，失败原因以前只进汇总，
+// 要等全部结束后才现形，期间发生了什么无从查起）——失败必须立刻在日志里留痕，
+// 下一页 boot 时还会回放已失败清单（见 resumeRelay）。label 缺省用题 id 后四位兜底。
+function relayRecordFail(r, prob, label, reason) {
+  r.summary.failed.push({ id: prob.id, ...(label ? { label } : {}), reason });
+  fire({ kind: 'log', level: 'err', text: `${label || prob.id.slice(-4)}：${reason}` });
 }
 
 function abortRelay(r, reason) {
@@ -828,7 +884,19 @@ function abortRelay(r, reason) {
   fire({ kind: 'log', level: 'info', text: relaySummaryLine(r) });
   fire({ kind: 'state', running: false, error: reason });
   running = false;
+  runAbort = null;
   restoreLeaveConfirm();
+}
+
+// 用户中止（跨页续跑）：不再翻页，就地收摊；已落位题目保持各自状态（草稿/提交不动）
+function stopRelayByUser(r) {
+  clearRelay();
+  running = false;
+  runAbort = null;
+  restoreLeaveConfirm();
+  fire({ kind: 'log', level: 'warn', text: '已中止：编程题续跑按你的要求停止' });
+  fire({ kind: 'log', level: 'info', text: relaySummaryLine(r) });
+  fire({ kind: 'state', running: false, error: '已中止' });
 }
 
 // 推进到下一题（record: 'ok'|'skip'|'fail'——fail 的失败条目由调用方写好）；最后一题收尾
@@ -841,12 +909,17 @@ async function relayNext(r, record, text) {
     r.summary.skippedAnswered += 1;
     if (text) fire({ kind: 'log', level: 'info', text });
   }
+  // 进度随球：此刻 r.pi 指刚完成的那题，pi+1 = 已完成数（收尾分支 pi 也停在最后一题位）
+  fire({ kind: 'progress', done: r.pi + 1, total: r.problems.length });
+  // 用户已请求中止：不再翻页，就地收摊（记账已先行，刚完成的题计入汇总）
+  if (userStopped(r)) { stopRelayByUser(r); return; }
   const nextIdx = r.pi + 1;
   if (nextIdx >= r.problems.length) {
     const line = relaySummaryLine(r);
     try { sessionStorage.setItem('__BPS_AA_SUMMARY_DONE__', JSON.stringify({ ok: !r.summary.failed.length, line, failed: r.summary.failed })); } catch (_) {}
     clearRelay();
     running = false;
+    runAbort = null;
     restoreLeaveConfirm();
     const lvl = r.summary.failed.length ? 'warn' : 'ok';
     fire({ kind: 'log', level: lvl, text: '编程题跨页续跑结束：' + line });
@@ -867,7 +940,7 @@ async function relayNext(r, record, text) {
 // collect 文档：收题 → 守护 → LLM → 写草稿 → 转 verify（整页 reload）
 async function relayCollect(r, prob) {
   const q = collectProgramming();
-  if (!q) { r.summary.failed.push({ id: prob.id, reason: '编程题页面收不到题目' }); return relayNext(r, 'fail'); }
+  if (!q) { relayRecordFail(r, prob, null, '编程题页面收不到题目'); return relayNext(r, 'fail'); }
   const label = q.label || prob.id.slice(-4);
   if (q.answered && !r.cfg.overwrite) return relayNext(r, 'skip', `${label}：跳过，已作答`);
   if (q.hasImg && !r.cfg.images) {
@@ -881,13 +954,14 @@ async function relayCollect(r, prob) {
     ? r.cfg.language
     : (compilerIdFromLabel(q.langLabel) || (detail?.programmingSubmissionDetail?.compiler || null));
   if (!compilerId) {
-    r.summary.failed.push({ id: prob.id, reason: `读不到当前语言「${q.langLabel || '（空）'}」，无法确定编译器` });
+    relayRecordFail(r, prob, label, `读不到当前语言「${q.langLabel || '（空）'}」，无法确定编译器`);
     return relayNext(r, 'fail');
   }
   const wantLangLabel = COMPILER_LABELS[compilerId] || q.langLabel || '';
 
   const messages = buildPrompt({ ...q, langLabel: wantLangLabel });
   let raw = null;
+  fire({ kind: 'log', level: 'info', text: `${label}：请求模型中…` }); // await 期间的事件流在场日志
   for (let attempt = 1; attempt <= 2; attempt++) {
     try {
       raw = globalThis.__BPS_LLM_MOCK__
@@ -895,8 +969,9 @@ async function relayCollect(r, prob) {
         : await chatOnce(r.cfg, messages);
       break;
     } catch (err) {
+      if (userStopped(r)) { stopRelayByUser(r); return; } // 中止来的失败不算题目的失败，别记假账
       if (attempt === 2) {
-        r.summary.failed.push({ id: prob.id, reason: 'LLM 调用失败：' + (err?.message || err) });
+        relayRecordFail(r, prob, label, 'LLM 调用失败：' + (err?.message || err));
         return relayNext(r, 'fail');
       }
       await sleep(900);
@@ -904,17 +979,17 @@ async function relayCollect(r, prob) {
   }
   const code = parseCodeAnswer(raw);
   if (!code) {
-    r.summary.failed.push({ id: prob.id, reason: 'LLM 输出解析不出代码：' + String(raw).slice(0, 60) });
+    relayRecordFail(r, prob, label, 'LLM 输出解析不出代码：' + String(raw).slice(0, 60));
     return relayNext(r, 'fail');
   }
   if (code.length > 16384) {
-    r.summary.failed.push({ id: prob.id, reason: `代码超长（${code.length} 字符，平台限 16KB）` });
+    relayRecordFail(r, prob, label, `代码超长（${code.length} 字符，平台限 16KB）`);
     return relayNext(r, 'fail');
   }
 
   const written = await saveDraft(prob.id, detail, compilerId, code);
   if (!written.ok) {
-    r.summary.failed.push({ id: prob.id, reason: `草稿写入失败（HTTP ${written.status ?? '未知'}${written.err ? '：' + written.err : ''}）` });
+    relayRecordFail(r, prob, label, `草稿写入失败（HTTP ${written.status ?? '未知'}${written.err ? '：' + written.err : ''}）`);
     return relayNext(r, 'fail');
   }
   stripDraftHttpCache(prob.id);
@@ -942,7 +1017,7 @@ async function relayVerify(r, prob) {
     const rollback = await saveDraft(prob.id, detail, compilerId, '');
     stripDraftHttpCache(prob.id);
     clearCodingProblemCache(prob.id);
-    r.summary.failed.push({ id: prob.id, reason: '水合校验失败（编辑器未回带代码）' + (rollback.ok ? '，草稿已撤销' : '，草稿残留需人工核对') });
+    relayRecordFail(r, prob, label, '水合校验失败（编辑器未回带代码）' + (rollback.ok ? '，草稿已撤销' : '，草稿残留需人工核对'));
     if (!rollback.ok) return abortRelay(r, '草稿撤销失败（残留代码），需人工核对后再试');
     return relayNext(r, 'fail');
   }
@@ -954,7 +1029,7 @@ async function relayVerify(r, prob) {
     const rollback = await saveDraft(prob.id, detail, compilerId, '');
     stripDraftHttpCache(prob.id);
     clearCodingProblemCache(prob.id);
-    r.summary.failed.push({ id: prob.id, reason: `语言不一致（草稿 ${wantLangLabel}，实挂「${mountedLabel || '未知'}」），已弃答防错配` + (rollback.ok ? '，草稿已撤销' : '，草稿残留需人工核对') });
+    relayRecordFail(r, prob, label, `语言不一致（草稿 ${wantLangLabel}，实挂「${mountedLabel || '未知'}」），已弃答防错配` + (rollback.ok ? '，草稿已撤销' : '，草稿残留需人工核对'));
     if (!rollback.ok) return abortRelay(r, '草稿撤销失败（残留代码），需人工核对后再试');
     return relayNext(r, 'fail');
   }
@@ -967,12 +1042,14 @@ async function relayVerify(r, prob) {
     return relayNext(r, 'ok', `${label} → ${head}…（dry：草稿水合校验通过后已撤销，未提交）`);
   }
 
+  // 中止检查必须卡在真实评测提交之前：提交即写提交记录，不能替用户「再补一枪」
+  if (userStopped(r)) { stopRelayByUser(r); return; }
   const saved = await submitProgramming();
   if (!saved.saved) {
     const rollback = await saveDraft(prob.id, detail, compilerId, '');
     stripDraftHttpCache(prob.id);
     clearCodingProblemCache(prob.id);
-    r.summary.failed.push({ id: prob.id, reason: '提交失败：' + saved.reason + (rollback.ok ? '，草稿已撤销' : '，草稿残留含本次代码，需人工核对') });
+    relayRecordFail(r, prob, label, '提交失败：' + saved.reason + (rollback.ok ? '，草稿已撤销' : '，草稿残留含本次代码，需人工核对'));
     if (!rollback.ok) return abortRelay(r, '草稿撤销失败（残留代码），需人工核对后再试');
     return relayNext(r, 'fail');
   }
@@ -998,9 +1075,29 @@ function restoreLeaveConfirm() {
 }
 
 let running = false;
+let runAbort = null; // 当前运行的终止信号：面板中止按钮触发；null = 本页没有在跑的运行
 
 export function isRunning() {
   return running;
+}
+
+// 请求中止：本页在跑就拉响终止信号（在途 fetch 立断、worker 停拉新题，已填答案所在页
+// 照常保存）；编程题跨页续跑滚动中时（哪怕本页还没接上）把中止写进续跑单，
+// 由本页 relayNext 就地收摊、或下一页 boot 直接作废残单。返回是否受理。
+export function abortRun() {
+  const r = readRelay();
+  if (running && runAbort) {
+    if (!runAbort.signal.aborted) runAbort.abort();
+    if (r && !r.aborted) { r.aborted = true; writeRelay(r); }
+    return true;
+  }
+  if (r && !r.aborted) { r.aborted = true; writeRelay(r); return true; }
+  return false;
+}
+
+// 是否已请求中止：本页看终止信号；跨页续跑还要看单子上的标记（可能在别的页面/时点写入）
+function userStopped(r) {
+  return !!(runAbort?.signal?.aborted || r?.aborted);
 }
 
 /* ---------- 事件流（悬浮面板消费） ---------- */
@@ -1031,11 +1128,13 @@ const progressOf = stats => ({
 
 export async function handleRun(config = {}) {
   if (running) { fire({ kind: 'log', level: 'warn', text: '已有一次答题在运行中' }); return { ok: false, error: '已有一次答题在运行中' }; }
-  if (readRelay()) {
-    // 编程题跨文档续跑滚动中（每页由 boot 的 resumeRelay 恢复阶段）；该页不在题目页时续跑已弃单
+  const preRelay = readRelay();
+  if (preRelay && !preRelay.aborted) {
+    // 编程题跨页续跑滚动中（每页由 boot 的 resumeRelay 恢复阶段）；该页不在题目页时续跑已弃单
     fire({ kind: 'log', level: 'warn', text: '编程题跨页续跑正在进行（看各页悬浮球状态）；本页若已不在题目上则续跑会自行取消' });
     return { ok: false, error: '编程题跨页续跑正在进行' };
   }
+  if (preRelay) clearRelay(); // 已中止的续跑残单：作废，不拦新运行
   const m = location.pathname.match(EXAM_PROBLEMS_RE);
   if (!m || !m[3]) { fire({ kind: 'log', level: 'err', text: '请先进入题型页（判断/单选/填空标签）再开始' }); return { ok: false, error: '请先进入题目列表的某个题型页（判断/单选/填空标签）再开始' }; }
   const psId = m[1];
@@ -1060,6 +1159,7 @@ export async function handleRun(config = {}) {
   }
 
   running = true;
+  runAbort = new AbortController(); // 中止按钮的终止信号：请求与各循环按它收摊
   suppressLeaveConfirm();
   const summary = { types: [], applied: 0, skippedAnswered: 0, skippedImage: 0, failed: [], savedTypes: 0, saveFails: [] };
   const progTypes = []; // 编程题：转跨文档续跑（整页装载才有真草稿水合），统一在客观题之后触发
@@ -1083,6 +1183,7 @@ export async function handleRun(config = {}) {
       if (!EXAM_PROBLEMS_RE.test(location.pathname) || !location.pathname.includes(psId)) {
         throw new Error('已离开原题目页，中止');
       }
+      if (runAbort.signal.aborted) throw new Error('已中止');
       const type = TYPE_BY_NAME[t.typeName];
       const isProg = type === 'PROGRAMMING';
       if (!location.pathname.endsWith(`/type/${t.typeId}`)) {
@@ -1094,6 +1195,7 @@ export async function handleRun(config = {}) {
         // （路由先切内容后到，旧题型页的容器不能拿来充数）
         let ready = false;
         for (let i = 0; i < 60 && !ready; i++) {
+          if (runAbort.signal.aborted) throw new Error('已中止');
           await sleep(100);
           ready = location.pathname.endsWith(`/type/${t.typeId}`)
             && (isProg
@@ -1122,11 +1224,13 @@ export async function handleRun(config = {}) {
         fire({ kind: 'progress', done: processedOverall, total: totalOverall, typeName: t.typeName });
       };
       const worker = async () => {
-        while (cursor < queue.length) {
+        while (cursor < queue.length && !runAbort.signal.aborted) {
           const { q } = queue[cursor++];
           done += 1;
           if (q.answered && !cfg.overwrite) { stats.skippedAnswered += 1; fire({ kind: 'log', level: 'info', text: `${q.label || q.id.slice(-4)}：跳过，已作答` }); tick(); continue; }
           if (q.hasImg && !cfg.images) { stats.skippedImage += 1; fire({ kind: 'log', level: 'warn', text: `${q.label || q.id.slice(-4)}：跳过，含图片（未开「作答含图题」）` }); tick(); continue; }
+          // 请求在途的在场日志：服务挂起时 worker 停在 await，没有这行日志就与死机无法区分
+          fire({ kind: 'log', level: 'info', text: `${q.label || q.id.slice(-4)}：请求模型中…` });
           const r = await answerOne(q, cfg);
           if (r.ok) { stats.ok.push(q.id); fire({ kind: 'log', level: 'ok', text: `${q.label || q.id.slice(-4)} → ${r.text}` }); }
           else { stats.failed.push({ id: q.id, reason: r.reason }); fire({ kind: 'log', level: 'err', text: `${q.label || q.id.slice(-4)}：${r.reason}` }); }
@@ -1154,6 +1258,7 @@ export async function handleRun(config = {}) {
       summary.failed.push(...stats.failed);
       summary.types.push({ type: t.typeName, total: questions.length, applied: pg.applied, skippedAnswered: pg.skippedAnswered, skippedImage: pg.skippedImage, failed: stats.failed.length, saved: saved?.saved === true });
     }
+    if (runAbort.signal.aborted) throw new Error('已中止'); // 最后一页答完才按中止也要如实报
     ret = { ok: true, summary };
     if (progTypes.length) {
       // 编程题统一推迟到所有客观题之后；启动续跑后 ret 语义是「客观题已完成、编程题滚动中」
@@ -1170,6 +1275,7 @@ export async function handleRun(config = {}) {
     // 否则 UI 会永远停在“答题中”。confirm 的恢复同理（面板可能立刻重新打开面板导航）。
     // 编程题续跑启动后 confirm 不能恢复（续跑的下一页还要压未保存弹窗）。
     running = false;
+    runAbort = null;
     if (!relayStarted) restoreLeaveConfirm();
 
     if (ret.ok) {
@@ -1177,7 +1283,8 @@ export async function handleRun(config = {}) {
       fire({ kind: 'log', level: failN ? 'warn' : 'ok', text: `${ret.relay ? '客观题完成（编程题已转逐页续跑，日志随各页出现）' : `完成：作答 ${ret.summary.applied} · 跳过已答 ${ret.summary.skippedAnswered} · 跳过含图 ${ret.summary.skippedImage} · 失败 ${failN}${cfg.drySave ? '（未保存）' : ''}`}` });
       fire({ kind: 'state', running: false });
     } else {
-      fire({ kind: 'log', level: 'err', text: '已中止：' + ret.error });
+      // 用户中止不带「原因前缀」重复（错误路径才需要「已中止：<原因>」）
+      fire({ kind: 'log', level: 'err', text: ret.error === '已中止' ? '已中止' : '已中止：' + ret.error });
       fire({ kind: 'state', running: false, error: ret.error });
     }
   }

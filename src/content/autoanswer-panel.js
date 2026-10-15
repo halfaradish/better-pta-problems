@@ -1,8 +1,8 @@
 /* 自动答题悬浮球与面板（实验）。
  *
  * 弹窗只保留总开关（settings.autoAnswer）；题目列表页（/exam/problems…）挂出悬浮球，
- * 点开为答题面板：模型适配选择（DeepSeek / OpenCode Go）、API Key、覆盖已作答、开始答题、
- * 运行日志（可清空）。面板用 Shadow DOM 隔离——不吸 PTA 页面的样式，也不把自己的
+ * 点开为答题面板：模型适配选择（DeepSeek / OpenCode Go）、API Key、覆盖已作答、
+ * 开始/中止答题（运行中按钮变身「中止答题」）、运行日志（可清空）。面板用 Shadow DOM 隔离——不吸 PTA 页面的样式，也不把自己的
  * 类名泄进页面；设计令牌与设置弹窗同源（品牌蓝 #0a4991、明暗双主题）。
  *
  * 运行本体在 autoanswer.js：面板只是入口与事件流的展示层（setEventSink），
@@ -10,7 +10,7 @@
  */
 import { loadSettings, saveSettings } from '../shared/settings.js';
 import {
-  COMPILER_LABELS, EXAM_PROBLEMS_RE, fetchAllowedCompilers,
+  abortRun, COMPILER_LABELS, EXAM_PROBLEMS_RE, fetchAllowedCompilers,
   handleRun, isRunning, normalizeBaseUrl, setEventSink,
 } from './autoanswer.js';
 
@@ -190,6 +190,8 @@ input:disabled, button:disabled { opacity: .5; cursor: not-allowed; }
   transition: filter .15s ease; }
 .start:hover:not(:disabled) { filter: brightness(.95); }
 .start:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* 运行中同一按钮变身「中止答题」：红调（err 令牌）与品牌蓝的开始态一眼可分 */
+.start.stop { background: var(--err-soft); color: var(--err); }
 
 .logs-head { display: flex; align-items: center; justify-content: space-between; }
 .logs-head b { font-size: 12px; font-weight: 600; color: var(--text-2); }
@@ -381,10 +383,11 @@ function updateRunUI() {
     pill.className = 'pill' + (running ? ' run' : (finished ? (finishedWithError ? ' err' : ' ok') : ''));
     pill.textContent = running ? `答题中 ${prog ? `${prog.done}/${prog.total}` : '…'}` : (finished ? (finishedWithError ? '已中止' : '已完成') : '待机');
   }
-  // 开始按钮
+  // 开始按钮：运行中变身「中止答题」（进度数字在状态胶囊上），随时可叫停，不能只能等它跑完
   if (start) {
-    start.disabled = running;
-    start.textContent = running ? `答题中…${prog ? `（${prog.done}/${prog.total}）` : ''}` : '开始答题';
+    start.disabled = false;
+    start.classList.toggle('stop', running);
+    start.textContent = running ? '中止答题' : '开始答题';
   }
 }
 
@@ -665,7 +668,14 @@ function mount() {
     logLines.length = 0;
     renderLogs();
   });
-  start.addEventListener('click', startRun);
+  // 同一按钮双职责：待机点 = 开始答题；运行中点 = 中止（引擎断在途请求、停拉新题）
+  start.addEventListener('click', () => {
+    if (isRunning()) {
+      appendLog('warn', abortRun() ? '已请求中止，正在停止…' : '当前没有正在运行的答题');
+      return;
+    }
+    startRun();
+  });
 
   document.body.appendChild(host);
   renderLogs();

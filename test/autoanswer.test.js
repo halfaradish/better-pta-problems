@@ -3,8 +3,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
-  assembleImgMessage, buildPrompt, COMPILER_LABELS, compilerIdFromLabel, normalizeBaseUrl, normalizeTF,
-  parseChoiceAnswer, parseCodeAnswer, parseFillAnswers, TYPE_BY_NAME,
+  assembleImgMessage, buildPrompt, COMPILER_LABELS, compilerIdFromLabel, failDetails, normalizeBaseUrl, normalizeTF,
+  parseChoiceAnswer, parseCodeAnswer, parseFillAnswers, relaySummaryLine, TYPE_BY_NAME,
 } from '../src/content/autoanswer.js';
 import { PRESETS, clampBallPos, currentKey, resolveModel, withKeyFor } from '../src/content/autoanswer-panel.js';
 
@@ -208,4 +208,35 @@ test('PRESETS：OpenCode Go 网关适配的关键约定（协议头分支与默�
   assert.equal(PRESETS.opencode.editableModel, true);
   assert.equal(PRESETS.deepseek.gateway, 'deepseek');
   assert.equal(!!PRESETS.deepseek.editableModel, false); // DeepSeek 固定 deepseek-flash
+});
+
+test('failDetails：失败明细逐条换行，label 缺省回退题 id 后四位', () => {
+  assert.equal(failDetails([{ id: '2110', label: '7-1', reason: 'LLM 调用失败' }]), '7-1：LLM 调用失败');
+  const two = failDetails([
+    { id: '2110', label: '7-1', reason: 'LLM 调用失败' },
+    { id: '999888777', reason: '水合校验失败' },
+  ]);
+  assert.match(two, /7-1：LLM 调用失败\n8777：水合校验失败/);
+  assert.equal(failDetails([]), '');
+  assert.equal(failDetails(null), '');
+});
+
+test('relaySummaryLine：无失败只有汇总行；有失败追加明细（跨页续跑的失败不再无从查起）', () => {
+  const clean = relaySummaryLine({
+    summary: { applied: 1, skippedAnswered: 2, skippedImage: 0, failed: [] },
+    cfg: {},
+  });
+  assert.match(clean, /作答 1 · 跳过已答 2 · 跳过含图 0 · 失败 0$/);
+  assert.doesNotMatch(clean, /明细/);
+  const messy = relaySummaryLine({
+    summary: { applied: 0, skippedAnswered: 0, skippedImage: 1, failed: [{ id: '2110', label: '7-1', reason: 'LLM 调用失败：请求 120s 无响应，已按超时中断' }] },
+    cfg: {},
+  });
+  assert.match(messy, /失败 1/);
+  assert.match(messy, /失败明细：\n7-1：LLM 调用失败：请求 120s 无响应，已按超时中断/);
+  const dry = relaySummaryLine({
+    summary: { applied: 1, skippedAnswered: 0, skippedImage: 0, failed: [] },
+    cfg: { drySave: true },
+  });
+  assert.match(dry, /（dry，未提交）$/);
 });
