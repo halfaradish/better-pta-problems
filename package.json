@@ -6,9 +6,11 @@
   "scripts": {
     "build": "node tools/build.mjs",
     "dev": "node tools/build.mjs --watch",
+    "package": "node tools/build.mjs && node tools/package.mjs",
     "test": "node --test"
   },
   "devDependencies": {
-    "esbuild": "^0.28.2"
+    "esbuild": "^0.28.2",
+    "markdown-it": "^15.0.2"
   }
 }

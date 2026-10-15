@@ -21,7 +21,7 @@ better-pta-problems/
 │   ├── content/              # 内容脚本：课程识别与归并、跨页聚合、答题进度、视图渲染、原生卡片装饰、提醒上报
 │   ├── background/           # 邮件提醒的消息转发（→ 用户自建后端）
 │   └── popup/                # 工具栏弹窗（开关 + 分隔符 + 自定义规则 + 邮件提醒配置）
-├── extension/                # 构建产物 + 静态资源（发版 Zip 的来源，可直接加载）
+├── extension/                # 构建产物 + 静态资源（发版 zip 里的 extension/ 子文件夹来源，可直接加载）
 │   ├── manifest.json         # MV3 清单
 │   ├── background.js         # ← 由 src/background/ 构建
 │   ├── content/
@@ -34,6 +34,7 @@ better-pta-problems/
 ├── package.json              # 构建（esbuild）与测试脚本
 ├── server/                   # 题目关闭邮件提醒后端（Node + node:sqlite + Nodemailer，部署见其 README）
 ├── docs/                     # 设计文档与使用指南（索引见文末《文档》）
+│   ├── 安装教程.md
 │   ├── 核心结论.md
 │   ├── 课程识别策略.md
 │   ├── 布局设计.md
@@ -42,14 +43,16 @@ better-pta-problems/
 │   ├── 邮件提醒.md
 │   ├── 路线图.md
 │   └── 发版流程.md
-└── tools/                    # 构建脚本、图标生成、本地预览服务器
+└── tools/                    # 构建脚本、发行包打包（zip.mjs / package.mjs）、图标生成、本地预览服务器
 ```
 
 ## 安装与更新
 
-1. `chrome://extensions`（Edge 为 `edge://extensions`）→ 开发者模式 →「加载已解压的扩展程序」→ 选 `extension/` 目录（构建产物已随仓库提交，克隆后无需先构建）。
-2. **已装过旧版本**：在扩展卡片上点「刷新」（↻）后，重新打开题目集列表页。
-3. 本地预览：浏览器直接打开 `preview.html`（mock 了数据与接口，实际运行 `core.js`，可验证聚合/筛选/折叠/模式切换）。
+**普通用户**：到 [Releases](https://github.com/halfaradish/better-pta-problems/releases) 下载最新的 `better-pta-problems-v*.zip`，解压到一个固定位置，双击里面的 `安装教程.html` 跟着做即可。压缩包解压后是一个目录，里面是扩展本体 `extension/` 与《安装教程》——在 `chrome://extensions`（Edge 为 `edge://extensions`）打开开发者模式，点「加载已解压的扩展程序」，**选解压目录里的 `extension` 子文件夹**。升级时把新包里的 `extension` 覆盖到同一位置、回扩展页在卡片上点「刷新」（↻），设置不会丢。完整说明见[《安装教程》](./docs/安装教程.md)（同一份正文打包时渲染成压缩包里的 `安装教程.html`）。
+
+**从仓库源码**（开发者）：`chrome://extensions` → 开发者模式 →「加载已解压的扩展程序」→ 选仓库里的 `extension/` 目录（构建产物已随仓库提交，克隆后无需先构建）。
+
+本地预览：浏览器直接打开 `preview.html`（mock 了数据与接口，实际运行 `core.js`，可验证聚合/筛选/折叠/模式切换）。
 
 ## 开发
 
@@ -59,11 +62,13 @@ better-pta-problems/
 npm install
 npm run build     # 一次性构建（改完 src/ 必须跑一次）
 npm run dev       # 监听源码变化自动重建
-npm test          # node:test 单测：识别/归并/整组分页/时间文案/设置迁移/数据源记账/答题进度口径
+npm run package   # 组装发行 zip（extension/ + 安装教程）到 dist/
+npm test          # node:test 单测：识别/归并/整组分页/时间文案/设置迁移/数据源记账/答题进度口径/发行包
 ```
 
 - 改代码改 `src/` 下的文件；`extension/` 里的 `content/core.js`、`background.js`、`popup/popup.js` 是产物（首行有「构建产物」标记），不要直接编辑。
-- CI（[check.yml](./.github/workflows/check.yml)）在每次推送/PR 跑单测并校验产物与源码一致，漂移会直接失败。
+- 发行包由 [tools/package.mjs](./tools/package.mjs) 组装：`extension/` + 由 `docs/安装教程.md` 渲染出的 `安装教程.html`（教程正文只维护 Markdown 一份，打包时渲染；zip 由 [tools/zip.mjs](./tools/zip.mjs) 写，显式带 UTF-8 文件名标志位）。
+- CI（[check.yml](./.github/workflows/check.yml)）在每次推送/PR 跑单测、校验产物与源码一致、并给发行包做一次打包冒烟，出问题会直接失败。
 - 发版（维护者）见[《发版流程》](./docs/发版流程.md)。
 
 ## 已知限制
@@ -81,6 +86,7 @@ npm test          # node:test 单测：识别/归并/整组分页/时间文案/�
 
 | 文档 | 内容 |
 |---|---|
+| [安装教程](./docs/安装教程.md) | 面向普通用户：解压后怎么装进浏览器、怎么升级、常见问题（打包时渲染成压缩包里的 `安装教程.html`） |
 | [核心结论](./docs/核心结论.md) | 可行性依据、数据来源与接口细节、徽章推导、SPA 稳定性设计、备选方案对比、风险缓解、验证记录 |
 | [课程识别策略](./docs/课程识别策略.md) | 六层识别管线、归并算法与阈值、真实数据验证 |
 | [布局设计](./docs/布局设计.md) | 视图状态机（全部=分组/平铺、课程筛选=平铺）、卡片元素、吸顶筛选条、本地预览 |
@@ -88,4 +94,4 @@ npm test          # node:test 单测：识别/归并/整组分页/时间文案/�
 | [自动答题初探](./docs/自动答题初探.md) | exam-submissions 保存协议、题型页 DOM 表单形状、LLM 自动答题的实现与限制 |
 | [邮件提醒](./docs/邮件提醒.md) | 后端部署与插件配置步骤、提醒范围与「已完成的不再提醒」 |
 | [路线图](./docs/路线图.md) | 已完成版本（逐版本登记）、计划中的 v1.0 |
-| [发版流程](./docs/发版流程.md) | 维护者：tag 自动发版、打包前校验、tag 重发 |
+| [发版流程](./docs/发版流程.md) | 维护者：tag 自动发版、发行包结构、本地打包与校验、tag 重发 |

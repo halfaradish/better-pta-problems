@@ -1,4 +1,4 @@
-# 每次推送 / PR：跑单元测试，并校验 extension/ 的构建产物与 src/ 源码一致。
+# 每次推送 / PR：跑单元测试，校验 extension/ 的构建产物与 src/ 源码一致，并给发行包打包做一次冒烟。
 name: Check
 
 on: [push, pull_request]
@@ -28,3 +28,6 @@ jobs:
             echo "::error::extension/ 下的构建产物与 src/ 源码不一致；请在本地执行 npm run build 后把产物一并提交"
             exit 1
           fi
+
+      - name: 发行包冒烟（组装 extension/ + 安装教程并打包，回读自检，不发布）
+        run: npm run package
