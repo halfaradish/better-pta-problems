@@ -604,6 +604,20 @@
     } catch (_) {
     }
   }
+  function seedCodingProblemCache(id, program, detail) {
+    try {
+      const raw = JSON.parse(localStorage.getItem("user-cache") || "{}");
+      raw["codingProblem_" + id] = {
+        program,
+        testData: detail?.customTestData?.content ?? "",
+        saveAt: (/* @__PURE__ */ new Date()).toISOString()
+      };
+      localStorage.setItem("user-cache", JSON.stringify(raw));
+      return { seeded: true };
+    } catch (err) {
+      return { seeded: false, err: err ? String(err.message || err) : null };
+    }
+  }
   async function waitHydrate(expectEnabled) {
     for (let i = 0; i < 200; i++) {
       await sleep(100);
@@ -1132,7 +1146,11 @@ ${failDetails(s.failed)}`;
       return relayNext(r, "fail");
     }
     stripDraftHttpCache(prob.id);
-    clearCodingProblemCache(prob.id);
+    const seeded = seedCodingProblemCache(prob.id, code, detail);
+    if (!seeded.seeded) {
+      relayRecordFail(r, prob, label, "\u6C34\u5408\u952E\u5199\u5165\u5931\u8D25" + (seeded.err ? "\uFF1A" + seeded.err : ""));
+      return relayNext(r, "fail");
+    }
     r.phase = "verify";
     r.hint = { label, compilerId, wantLangLabel, head: (code.split("\n")[0] || "").trim().slice(0, 24), detail };
     if (!writeRelay(r)) {
@@ -2380,7 +2398,7 @@ input:disabled, button:disabled { opacity: .5; cursor: not-allowed; }
   var OK_TTL = 2 * 60 * 1e3;
   var FAIL_TTL = 10 * 60 * 1e3;
   var CONCURRENCY = 3;
-  var ATTEMPTED_STATUSES = ["PROBLEM_SUBMITTED", "PROBLEM_ACCEPTED", "PROBLEM_WRONG_ANSWER"];
+  var NO_ANSWER_STATUS = "PROBLEM_NO_ANSWER";
   var cache = /* @__PURE__ */ new Map();
   var queued = /* @__PURE__ */ new Set();
   var queue = [];
@@ -2393,14 +2411,13 @@ input:disabled, button:disabled { opacity: .5; cursor: not-allowed; }
   function progressUrl(examId, problemSetId) {
     return `/api/exams/${encodeURIComponent(examId)}/problem-sets/${encodeURIComponent(problemSetId)}/problem-status?_bps=progress`;
   }
+  function hasSubmission(p) {
+    const st = p?.problemSubmissionStatus;
+    return typeof st === "string" && st !== "" && st !== NO_ANSWER_STATUS;
+  }
   function countAnswered(json) {
     const list = json?.problemStatus || [];
-    return {
-      answered: list.filter((p) => p.problemSubmissionStatus === "PROBLEM_SUBMITTED").length,
-      // 提醒口径（宽松）：提交待判 + 评测结论都算「有提交记录」；未知状态不计入
-      attempted: list.filter((p) => ATTEMPTED_STATUSES.includes(p.problemSubmissionStatus)).length,
-      total: list.length
-    };
+    return { answered: list.filter(hasSubmission).length, total: list.length };
   }
   function inAnswerWindow(it, now = Date.now()) {
     return !!(it?.startAt && it.closeAt && +it.startAt <= now && +it.closeAt > now);
@@ -2412,14 +2429,14 @@ input:disabled, button:disabled { opacity: .5; cursor: not-allowed; }
     if (!rec || !rec.ok) return null;
     if (now - rec.at > OK_TTL) return null;
     if (!rec.total) return null;
-    return { answered: rec.answered, attempted: rec.attempted || 0, total: rec.total };
+    return { answered: rec.answered, total: rec.total };
   }
   function progressOf2(id) {
     return readProgress(cache.get(id));
   }
   function reminderDone(rec, now = Date.now()) {
     const p = readProgress(rec, now);
-    return !!p && p.attempted >= p.total;
+    return !!p && p.answered >= p.total;
   }
   function isReminderDone(id, now = Date.now()) {
     return reminderDone(cache.get(id), now);

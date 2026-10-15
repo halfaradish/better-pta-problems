@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   assembleImgMessage, buildPrompt, COMPILER_LABELS, compilerIdFromLabel, failDetails, normalizeBaseUrl, normalizeTF,
-  parseChoiceAnswer, parseCodeAnswer, parseFillAnswers, relaySummaryLine, TYPE_BY_NAME,
+  parseChoiceAnswer, parseCodeAnswer, parseFillAnswers, relaySummaryLine, seedCodingProblemCache, TYPE_BY_NAME,
 } from '../src/content/autoanswer.js';
 import { PRESETS, clampBallPos, currentKey, resolveModel, withKeyFor } from '../src/content/autoanswer-panel.js';
 
@@ -239,4 +239,33 @@ test('relaySummaryLine：无失败只有汇总行；有失败追加明细（跨�
     cfg: { drySave: true },
   });
   assert.match(dry, /（dry，未提交）$/);
+});
+
+test('seedCodingProblemCache：种入 boot 水合键，形状与 PTA 自写键一致且不动其余 user-cache', () => {
+  // localStorage 在 Node 里不存在，用最小垫片（seed 只用 getItem/setItem）
+  const store = new Map();
+  globalThis.localStorage = {
+    getItem: k => (store.has(k) ? store.get(k) : null),
+    setItem: (k, v) => store.set(k, String(v)),
+  };
+  store.set('user-cache', JSON.stringify({ userId: 'u1', PAT_HTTP_CACHE: '{}' }));
+  const code = '//# BPS seed\nint main(void){ return 0; }\n';
+  const r1 = seedCodingProblemCache('2110001', code, { customTestData: { content: 'I\n#\n' } });
+  assert.equal(r1.seeded, true);
+  const seeded = JSON.parse(store.get('user-cache'));
+  const entry = seeded['codingProblem_2110001'];
+  assert.equal(entry.program, code);
+  assert.equal(entry.testData, 'I\n#\n');            // testData 与草稿 customTestData.content 同源
+  assert.doesNotThrow(() => new Date(entry.saveAt).toISOString()); // saveAt 是可解析的 ISO 时刻
+  assert.equal(seeded.userId, 'u1');                 // 其余 user-cache 键原样保留
+  assert.equal(seeded.PAT_HTTP_CACHE, '{}');
+  // 覆盖旧条目；detail 缺省时 testData 为空串
+  assert.equal(seedCodingProblemCache('2110001', 'x', null).seeded, true);
+  const reseeded = JSON.parse(store.get('user-cache'));
+  assert.equal(reseeded['codingProblem_2110001'].program, 'x');
+  assert.equal(reseeded['codingProblem_2110001'].testData, '');
+  // 无 user-cache 键时从零种入
+  store.delete('user-cache');
+  assert.equal(seedCodingProblemCache('2110002', 'y', {}).seeded, true);
+  assert.equal(JSON.parse(store.get('user-cache'))['codingProblem_2110002'].program, 'y');
 });

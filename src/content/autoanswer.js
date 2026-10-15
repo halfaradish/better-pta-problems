@@ -403,8 +403,9 @@ export async function prepNextProblemCache(nextId) {
   }
 }
 
-// 无条件删某题的 codingProblem 缓存键（仅限引擎刚改写过该题草稿的时机：collect 写完代码、
-// verify 撤销后——此时题内态由服务端草稿说了算，旧缓存只会让水合拿到 boot 时的旧快照）。
+// 无条件删某题的 codingProblem 缓存键（仅限 verify 撤销/提交失败回滚的时机——此时代码已从
+// 服务端草稿撤下，本地键不能留着，否则 collect 会把空编辑器误判成已答/下次 boot 回带旧代码）。
+// 注意 collect 写完代码后不再删键（见 seedCodingProblemCache）。
 function clearCodingProblemCache(id) {
   try {
     const raw = JSON.parse(localStorage.getItem('user-cache') || '{}');
@@ -412,6 +413,26 @@ function clearCodingProblemCache(id) {
     delete raw['codingProblem_' + id];
     localStorage.setItem('user-cache', JSON.stringify(raw));
   } catch (_) { /* 结构异常静默 */ }
+}
+
+// 种入水合键：现行 PTA 的编程题 boot 只从 codingProblem_<id> 本地键回带编辑器内容，
+// 服务端 exam-draft 已不参与水合（2026-10-15 实测：服务端草稿有码的全新文档照样水合成
+// 空编辑器，且 boot 连 exam-draft 的 GET 都不发生；种键→真加载→编辑器回带+按钮解锁实证）。
+// 形状照抄 PTA 自己写的键（program/testData/saveAt，saveAt 为 ISO 字符串）。collect 写完
+// 服务端草稿后立即种键再 reload，verify 文档的 boot 才有码可回带。
+export function seedCodingProblemCache(id, program, detail) {
+  try {
+    const raw = JSON.parse(localStorage.getItem('user-cache') || '{}');
+    raw['codingProblem_' + id] = {
+      program,
+      testData: detail?.customTestData?.content ?? '',
+      saveAt: new Date().toISOString(),
+    };
+    localStorage.setItem('user-cache', JSON.stringify(raw));
+    return { seeded: true };
+  } catch (err) {
+    return { seeded: false, err: err ? String(err.message || err) : null };
+  }
 }
 
 // 水合探测：新文档挂载后按钮禁用态应在预期位（空草稿=禁用、有码=解锁），两次读数一致才采信。
@@ -993,7 +1014,13 @@ async function relayCollect(r, prob) {
     return relayNext(r, 'fail');
   }
   stripDraftHttpCache(prob.id);
-  clearCodingProblemCache(prob.id); // 收尾必做：不删缓存，verify 文档的 boot 会拿 boot 期旧快照水合（dry11 实锤）
+  // 服务端草稿已不参与 boot 水合（2026-10-15 实测），清键改为种键：verify 文档 boot 从该键
+  // 回带本题代码。种入失败则 verify 必挂水合校验，这里直接记失败不翻页白耗一轮。
+  const seeded = seedCodingProblemCache(prob.id, code, detail);
+  if (!seeded.seeded) {
+    relayRecordFail(r, prob, label, '水合键写入失败' + (seeded.err ? '：' + seeded.err : ''));
+    return relayNext(r, 'fail');
+  }
   r.phase = 'verify';
   r.hint = { label, compilerId, wantLangLabel, head: (code.split('\n')[0] || '').trim().slice(0, 24), detail };
   if (!writeRelay(r)) { abortRelay(r, 'sessionStorage 写入失败'); return; }

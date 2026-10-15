@@ -2,16 +2,12 @@
  *
  * 数据源 = PTA 考试概览页（/problem-sets/{id}/exam/overview）自己用的接口：
  *   GET /api/exams/{examId}/problem-sets/{problemSetId}/problem-status
- * 两套口径，同一份数据（有意为之）：
- *   - 展示（严）：已作答 = 状态为 PROBLEM_SUBMITTED 的题目数，总题数 = problemStatus
- *     长度（= 各题型 total 之和）。注意判分后的题目状态会变成 PROBLEM_ACCEPTED /
- *     PROBLEM_WRONG_ANSWER 等评测结论（实测编程题集 5 过 1 错概览页仍显示 100%），
- *     PTA 概览页把「有提交」都算 100%，插件只把「提交待评测」算完——判分后的题集
- *     插件会显示「未完成」，这是有意保留的更严口径。
- *   - 提醒（宽）：每道题都有提交/判分记录（attempted）即算「已完成」，邮件提醒据此
- *     不再订阅该题目集（content/reminders.js）——判分后 PROBLEM_SUBMITTED 归零，
- *     沿用严口径会让判分完的题集永远收到提醒，恰好违背提醒的初衷。
- *     未知状态不计入（宁可多提醒，不漏提醒）。
+ * 口径 = 「有提交就算」：已作答 = 有提交/判分记录的题目数，总题数 = problemStatus
+ * 长度（= 各题型 total 之和）。判分后的题目状态不再是 PROBLEM_SUBMITTED，而是
+ * PROBLEM_ACCEPTED / PROBLEM_WRONG_ANSWER 等评测结论，它们同样是「答过」——所以
+ * 展示胶囊与邮件提醒的「已完成」判定共用这一个计数（content/reminders.js）。
+ * v0.8～v0.9.5 只数 PROBLEM_SUBMITTED，判分完的题集一律显示「未完成 0/N」；用户
+ * 2026-10-15 报障（实验1 全部答完仍标未完成）后统一到 PTA 概览页的口径。
  *
  * examId 来自列表接口的 examIdByProblemSetId，实测它是「考试场次表」：场次在用户
  * 首次进场时才创建（未进场的题目集状态 READY，/exams 响应里连 exam 对象都没有），
@@ -31,11 +27,13 @@ const OK_TTL = 2 * 60 * 1000;      // 成功结果 2 分钟（与聚合同频，
 const FAIL_TTL = 10 * 60 * 1000;   // 失败/无权限 10 分钟，避免反复打同一个坏接口
 const CONCURRENCY = 3;             // 并发上限：一次翻页可能带出十几个题目集
 
-// 有提交记录的状态全集（提醒口径）：提交待判 + 已观测到的评测结论。
-// 实测词表见 docs/核心结论.md §2.1；未知状态不计入——宁可多提醒，不漏提醒
-const ATTEMPTED_STATUSES = ['PROBLEM_SUBMITTED', 'PROBLEM_ACCEPTED', 'PROBLEM_WRONG_ANSWER'];
+// 实测词表见 docs/核心结论.md §2.1：没交过只有 PROBLEM_NO_ANSWER 一种，交过就必然
+// 换成别的状态（提交待判 PROBLEM_SUBMITTED、判分结论 PROBLEM_ACCEPTED /
+// PROBLEM_WRONG_ANSWER…）。判定因此按「排除没交」写——枚举「算已答」的正向词表在
+// PTA 多出评测中/编译错误之类的状态时会重演「答完却显示未完成」，排除法不会再踩。
+const NO_ANSWER_STATUS = 'PROBLEM_NO_ANSWER';
 
-const cache = new Map();   // problemSetId -> { at, ok, answered, attempted, total }
+const cache = new Map();   // problemSetId -> { at, ok, answered, total }
 const queued = new Set();  // 已排队/在途的 problemSetId（去重）
 const queue = [];          // 待取 [{ id, examId }]，未关闭的排在前面
 const waiters = [];        // ensureProgressAsync 的等待者 [{ pending: Set<id>, resolve }]
@@ -51,15 +49,16 @@ export function progressUrl(examId, problemSetId) {
   return `/api/exams/${encodeURIComponent(examId)}/problem-sets/${encodeURIComponent(problemSetId)}/problem-status?_bps=progress`;
 }
 
+// 纯函数：单题是否已作答（有提交记录，含判分结论）；字段缺失/none 值一律不算
+export function hasSubmission(p) {
+  const st = p?.problemSubmissionStatus;
+  return typeof st === 'string' && st !== '' && st !== NO_ANSWER_STATUS;
+}
+
 // 纯函数：接口响应 → { answered, total }；字段缺失一律按 0 处理，不抛错
 export function countAnswered(json) {
   const list = json?.problemStatus || [];
-  return {
-    answered: list.filter(p => p.problemSubmissionStatus === 'PROBLEM_SUBMITTED').length,
-    // 提醒口径（宽松）：提交待判 + 评测结论都算「有提交记录」；未知状态不计入
-    attempted: list.filter(p => ATTEMPTED_STATUSES.includes(p.problemSubmissionStatus)).length,
-    total: list.length,
-  };
+  return { answered: list.filter(hasSubmission).length, total: list.length };
 }
 
 // 答题窗口内：已开始且未关闭（有无考试场次都适用，未进场标「未答题」也用它）
@@ -77,19 +76,19 @@ export function readProgress(rec, now = Date.now()) {
   if (!rec || !rec.ok) return null;
   if (now - rec.at > OK_TTL) return null;
   if (!rec.total) return null;
-  return { answered: rec.answered, attempted: rec.attempted || 0, total: rec.total };
+  return { answered: rec.answered, total: rec.total };
 }
 
 export function progressOf(id) {
   return readProgress(cache.get(id));
 }
 
-// 纯函数：缓存记录 → 提醒口径的「已完成」（宽松）：每道题都有提交/判分记录即算完。
-// 与展示胶囊的严口径分开：判分后 PROBLEM_SUBMITTED 归零，沿用严口径会让判分完的
-// 题集永远被提醒。记录缺失/过期/失败/无题目一律 false——宁可多提醒，不漏提醒
+// 纯函数：缓存记录 → 「已完成」：每道题都有提交/判分记录才算完。展示胶囊与提醒
+// 共用这个判定（判分后也满足）；记录缺失/过期/失败/无题目一律 false——提醒侧
+// 「宁可多提醒，不漏提醒」，展示侧此时不落胶囊
 export function reminderDone(rec, now = Date.now()) {
   const p = readProgress(rec, now);
-  return !!p && p.attempted >= p.total;
+  return !!p && p.answered >= p.total;
 }
 
 export function isReminderDone(id, now = Date.now()) {

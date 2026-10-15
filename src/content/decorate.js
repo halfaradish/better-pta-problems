@@ -112,9 +112,10 @@ function buildStatusPill(level) {
 }
 
 // 答题状态：徽章行尾部加「已完成/未完成/未答题」胶囊，副标题行尾加「已作答 X/Y」。
-// 胶囊顶替原生「已开放」（时间语义已由已开考/倒计时覆盖，控制一行最多两个胶囊）；
-// 考试场次已建的按提交数三态；已开放但还没进场（examId 不在考试场次表）的必然零
-// 提交，直接标「未答题」。两者都依赖聚合数据的 startAt，纯 DOM 降级时维持原样。
+// 已完成 = 每题都有提交/判分记录（判分结论也算答过，口径见 progress.js）；未完成 =
+// 还有题没交；胶囊顶替原生「已开放」（时间语义已由已开考/倒计时覆盖，控制一行最多
+// 两个胶囊）；已开放但还没进场（examId 不在考试场次表）的必然零提交，直接标
+// 「未答题」。两者都依赖聚合数据的 startAt，纯 DOM 降级时维持原样。
 export function updateProgress(scopeEl, it, s) {
   const p = s.progress && it.progress && it.progress.total > 0 ? it.progress : null;
   const openNoExam = s.progress && !it.examId && inAnswerWindow(it);
