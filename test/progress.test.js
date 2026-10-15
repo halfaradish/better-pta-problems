@@ -43,6 +43,22 @@ test('hasSubmission：只有没交（含字段缺失/空值）算未作答，未
   }
 });
 
+test('口径等价：实测状态闭集上「有提交就算」与 v0.9.4 的提醒白名单逐项一致（提醒过滤结果不变）', () => {
+  // PTA 生产 bundle 实证（2026-10-15，chunk 71629）：problemSubmissionStatus 枚举是闭集 4 值；
+  // 概览页自己统计每题型已作答用的正是排除法（chunk 17539）= Number(status !== 'PROBLEM_NO_ANSWER')。
+  // 于是新口径在 PTA 能产出的数据上与 v0.9.4 提醒侧的 attempted 白名单完全重合——
+  // 「已完成的不再提醒」的过滤结果没有任何变化，只有 PTA 未来新增状态时两端一起当「有提交」。
+  const PTA_STATUS_ENUM = ['PROBLEM_NO_ANSWER', 'PROBLEM_SUBMITTED', 'PROBLEM_ACCEPTED', 'PROBLEM_WRONG_ANSWER'];
+  const V094_REMINDER_WHITELIST = ['PROBLEM_SUBMITTED', 'PROBLEM_ACCEPTED', 'PROBLEM_WRONG_ANSWER'];
+  for (const st of PTA_STATUS_ENUM) {
+    assert.equal(hasSubmission({ problemSubmissionStatus: st }), V094_REMINDER_WHITELIST.includes(st), st);
+  }
+  // 提醒判定本身照旧：四题里有一题没交 → 未完成，仍会提醒
+  const json = { problemStatus: PTA_STATUS_ENUM.map(problemSubmissionStatus => ({ problemSubmissionStatus })) };
+  assert.deepEqual(countAnswered(json), { answered: 3, total: 4 });
+  assert.equal(reminderDone({ at: Date.now(), ok: true, ...countAnswered(json) }), false);
+});
+
 test('countAnswered：回归——实验1（编程 4 题全部判分）应为 4/4 已完成，不再是 0/4', () => {
   const json = {
     problemStatus: ['PROBLEM_ACCEPTED', 'PROBLEM_ACCEPTED', 'PROBLEM_WRONG_ANSWER', 'PROBLEM_ACCEPTED']

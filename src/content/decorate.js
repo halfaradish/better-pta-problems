@@ -23,7 +23,6 @@ export function extractItems(settings) {
     items.push({
       id, el, title,
       ...classifyDetailed(title, settings),
-      nativeCountdown: /距离关闭/.test(fullText), // PTA 自带精确倒计时的卡片不再叠加我们的
       closeText: (/关闭时间[:：]\s*[\d: -]+/.exec(fullText)?.[0] || '').trim(),
       closeAt: parseCloseTime(fullText),
     });
@@ -37,12 +36,16 @@ export function metaLine(scopeEl) {
     .find(n => /关闭时间/.test(n.textContent) && n.querySelector('.flex'));
 }
 
+// 卡片自带 PTA 精确倒计时（「距离关闭还有…」）时不再叠加我们的「剩 X 天」：现读卡片
+// DOM 判断（PTA 的倒计时可能晚于我们注入才出现，下一轮刷新靠这里自愈；统一化后的
+// 条目也不再携带提取期的标记）
 export function updateCountdown(scopeEl, it, s) {
   const line = metaLine(scopeEl);
   if (!line) return;
   const target = line.querySelector('.flex .flex') || line.querySelector('.flex');
   let c = scopeEl.querySelector('.bps-countdown');
-  const cd = s.countdown && it.closeAt && !it.nativeCountdown ? fmtCountdown(it.closeAt) : null;
+  const native = /距离关闭/.test(scopeEl.textContent || '');
+  const cd = s.countdown && it.closeAt && !native ? fmtCountdown(it.closeAt) : null;
   if (!cd) { c?.remove(); return; }
   if (!c) {
     c = document.createElement('span');

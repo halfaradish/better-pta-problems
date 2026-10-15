@@ -43,6 +43,7 @@
   .item:hover .title { color: #0a4991; }
   .flex { display: flex; align-items: center; gap: 8px; }
   .sub .flex .flex { gap: 4px; }
+  .native-cd { color: #e03131; font-weight: 500; }
   .creator { flex: none; color: #868e96; }
 
   /* 分页条复刻（真实 PTA 结构为 paginationWrapper_* 的白底卡片） */
@@ -159,10 +160,11 @@
   /* chrome.storage 仿真（预览页无扩展环境）；提醒配置填假值让直连同步路径可跑通（fetch 已被 mock 拦截） */
   window.__BPS_SETTINGS__ = { enabled: true, grouped: true, badge: true, countdown: true, progress: true, separators: '--,｜,|', rules: '', reminderEnabled: true, reminderServer: 'demo.server:8787', reminderEmail: 'me@example.com' };
 
-  /* 当前页（PTA 渲染的 16 张卡片，id 与 mock 接口数据一一对应） */
+  /* 当前页（PTA 渲染的 16 张卡片，id 与 mock 接口数据一一对应）。
+     0137 带 cd = PTA 卡片自带的原生倒计时（「距离关闭还有…」）：插件不得再叠加自己的「剩 X 天」 */
   const DATA = [
     { id: '2100000000000000136', title: '算法设计与分析--课堂练习1-3', close: '2026-10-10 12:22', badges: [['已开考','green'],['已关闭','grey']], creator: '教师A' },
-    { id: '2100000000000000137', title: '算法设计与分析--课堂练习1-4', close: '2026-10-17 23:59', badges: [['已开考','green'],['已开放','blue']], creator: '教师A' },
+    { id: '2100000000000000137', title: '算法设计与分析--课堂练习1-4', close: '2026-10-17 23:59', cd: '2天4时25分', badges: [['已开考','green'],['已开放','blue']], creator: '教师A' },
     { id: '2100000000000000138', title: '算法设计与分析--课堂练习2-1', close: '2026-10-18 23:59', badges: [['未开放','orange']], creator: '教师A' },
     { id: '2100000000000000139', title: '算法设计与分析--课堂练习1-5', close: '2026-10-18 23:59', badges: [['未开放','orange']], creator: '教师A' },
     { id: '2100000000000000140', title: '算法设计与分析--算法分析作业1-1', close: '2026-10-31 12:41', badges: [['已开放','blue']], creator: '教师A' },
@@ -191,7 +193,7 @@
       <div class="flex items-center grow">
         <div class="t-wrap grow">
           <div title="${o.title}" class="title">${o.title}</div>
-          <div class="text-xs sub"><div class="flex"><div class="flex">关闭时间:<span>${o.close}</span></div></div></div>
+          <div class="text-xs sub"><div class="flex"><div class="flex">关闭时间:<span>${o.close}</span>${o.cd ? `<span class="native-cd">距离关闭还有 ${o.cd}</span>` : ''}</div></div></div>
         </div>
       </div>
       <div class="flex-none flex-col items-end space-y-1 flex"><div><div class="flex space-x-2 items-center">${o.badges.map(pill).join('')}</div></div></div>

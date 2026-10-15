@@ -2505,8 +2505,6 @@ input:disabled, button:disabled { opacity: .5; cursor: not-allowed; }
         el: el2,
         title,
         ...classifyDetailed(title, settings3),
-        nativeCountdown: /距离关闭/.test(fullText),
-        // PTA 自带精确倒计时的卡片不再叠加我们的
         closeText: (/关闭时间[:：]\s*[\d: -]+/.exec(fullText)?.[0] || "").trim(),
         closeAt: parseCloseTime(fullText)
       });
@@ -2521,7 +2519,8 @@ input:disabled, button:disabled { opacity: .5; cursor: not-allowed; }
     if (!line) return;
     const target = line.querySelector(".flex .flex") || line.querySelector(".flex");
     let c = scopeEl.querySelector(".bps-countdown");
-    const cd = s.countdown && it.closeAt && !it.nativeCountdown ? fmtCountdown(it.closeAt) : null;
+    const native = /距离关闭/.test(scopeEl.textContent || "");
+    const cd = s.countdown && it.closeAt && !native ? fmtCountdown(it.closeAt) : null;
     if (!cd) {
       c?.remove();
       return;
