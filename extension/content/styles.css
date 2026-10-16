@@ -1,4 +1,49 @@
-/* 更好的题目集 · 注入样式（浅色，对齐 PTA 默认主题） */
+/* 更好的题目集 · 注入样式
+ *
+ * 设计令牌 2026-10-16 实测自 pintia.cn（:root / .dark 变量与 .pc-button、胶囊、输入框等组件 CSS）。
+ * 三点约定：
+ *  1) 变量一律带 --bps- 前缀，避免与 PTA 自己的变量撞名；
+ *  2) 暗色跟随 **PTA 自己的 .dark 类**（PTA 用类切换主题，这比 prefers-color-scheme 准——
+ *     用户在 PTA 里选了浅色但系统是暗色时，注入 UI 不该自作主张变暗）。实测那个类挂在
+ *     **<body> 上而不是 <html>**，所以选择器一律写 `.dark xxx`，别写 `html.dark xxx`；
+ *  3) 主色是 PTA 的交互蓝 hsl(212,89%,53%)（= #1C80F2）。#0a4991 是 PTA 的品牌深蓝，
+ *     只出现在它的输入框聚焦环 rgba(10,73,145,.25) 里，不要拿它当交互色。
+ */
+
+:root {
+  --bps-bg-base: hsl(0, 0%, 100%);
+  --bps-bg-light: hsl(211, 20%, 97%);
+  --bps-bg-normal: hsl(211, 20%, 93%);
+  --bps-border: hsla(0, 0%, 0%, .06);
+  --bps-primary: hsl(212, 89%, 53%);
+  --bps-primary-soft: rgba(28, 128, 242, .1);
+  --bps-pass: hsl(100, 60%, 47%);
+  --bps-warning: hsl(35, 90%, 50%);
+  --bps-danger: hsl(3, 68%, 53%);
+  --bps-text-normal: hsl(0, 0%, 25%);
+  --bps-text-light: hsl(0, 0%, 45%);
+  --bps-text-lightest: hsl(0, 0%, 60%);
+  --bps-white: hsl(0, 0%, 100%);
+  --bps-input-border: #ced4da;
+  --bps-shadow-sm: 0 1px 2px rgba(0, 0, 0, .05);
+  --bps-shadow-md: 0 4px 6px -1px rgba(0, 0, 0, .1), 0 2px 4px -2px rgba(0, 0, 0, .1);
+  --bps-trs: .15s cubic-bezier(.4, 0, .2, 1);
+}
+
+.dark {
+  --bps-bg-base: hsl(0, 0%, 25%);
+  --bps-bg-light: hsl(0, 0%, 28%);
+  --bps-bg-normal: hsl(0, 0%, 31%);
+  --bps-border: hsla(0, 0%, 100%, .06);
+  --bps-primary: hsl(212, 100%, 60%);
+  --bps-primary-soft: rgba(51, 140, 255, .12);
+  --bps-text-normal: hsl(0, 0%, 75%);
+  --bps-text-light: hsl(0, 0%, 60%);
+  --bps-text-lightest: hsl(0, 0%, 50%);
+  --bps-input-border: hsl(0, 0%, 50%);
+  --bps-shadow-sm: 0 1px 2px rgba(0, 0, 0, .18);
+  --bps-shadow-md: 0 4px 6px -1px rgba(0, 0, 0, .3), 0 2px 4px -2px rgba(0, 0, 0, .3);
+}
 
 .bps-root {
   display: flex;
@@ -15,10 +60,11 @@
   flex-wrap: wrap;
   align-items: center;
   gap: 6px;
-  padding: 8px;
-  border-radius: 0.625rem;
-  background: #fff;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08), 0 0 0 1px rgba(0, 0, 0, 0.03);
+  padding: 10px 12px;
+  border: 1px solid var(--bps-border);
+  border-radius: 8px;
+  background: var(--bps-bg-base);
+  box-shadow: var(--bps-shadow-sm);
 }
 
 .bps-root a {
@@ -26,33 +72,37 @@
   color: inherit;
 }
 
+/* 课程胶囊：形制取 PTA 的胶囊（12px 圆角 / 13px 字），选中态取 PTA 的实心按钮（主色底白字） */
 .bps-chip {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 6px;
   max-width: 16em;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  padding: 3px 10px;
-  border-radius: 9999px;
-  border: 1px solid #dee2e6;
-  background: #fff;
-  color: #495057;
-  font-size: 12px;
-  line-height: 18px;
+  height: 26px;
+  padding: 0 12px;
+  border: 1px solid var(--bps-input-border);
+  border-radius: 12px;
+  background: var(--bps-bg-base);
+  color: var(--bps-text-normal);
+  font: inherit;
+  font-size: 13px;
+  line-height: 16px;
   cursor: pointer;
+  transition: color var(--bps-trs), background-color var(--bps-trs), border-color var(--bps-trs);
 }
 
 .bps-chip:hover {
-  border-color: #0a4991;
-  color: #0a4991;
+  border-color: var(--bps-primary);
+  color: var(--bps-primary);
 }
 
 .bps-chip.bps-on {
-  background: #0a4991;
-  border-color: #0a4991;
-  color: #fff;
+  background: var(--bps-primary);
+  border-color: var(--bps-primary);
+  color: var(--bps-white);
 }
 
 .bps-mode {
@@ -70,31 +120,31 @@
 }
 
 .bps-num-open {
-  color: #1c7ed6;
+  color: var(--bps-primary);
   font-weight: 600;
 }
 
 .bps-chip.bps-on .bps-num-open {
-  color: #fff;
+  color: var(--bps-white);
 }
 
 .bps-chip.bps-off {
-  background: #f8f9fa;
-  border-color: #e9ecef;
-  color: #adb5bd;
+  background: var(--bps-bg-light);
+  border-color: var(--bps-border);
+  color: var(--bps-text-lightest);
 }
 
 .bps-chip.bps-off:hover {
-  border-color: #ced4da;
-  color: #868e96;
+  border-color: var(--bps-input-border);
+  color: var(--bps-text-light);
 }
 
-/* 选中已关闭的课程：压暗的选中态（深灰底白字）——.bps-off 与 .bps-on 同优先级，
+/* 选中已关闭的课程：压暗的选中态（灰底白字）——.bps-off 与 .bps-on 同优先级，
    必须写在两者之后才能盖过灰显，否则选中的关闭课程看不出选中了哪门 */
 .bps-chip.bps-on.bps-off {
-  background: #495057;
-  border-color: #495057;
-  color: #fff;
+  background: var(--bps-text-light);
+  border-color: var(--bps-text-light);
+  color: var(--bps-white);
 }
 
 /* 分组 */
@@ -103,22 +153,28 @@
   align-items: center;
   gap: 8px;
   width: 100%;
-  padding: 4px 6px;
+  padding: 6px;
   border: 0;
+  border-radius: 8px;
   background: transparent;
   cursor: pointer;
   text-align: left;
+  transition: background-color var(--bps-trs);
+}
+
+.bps-head:hover {
+  background: var(--bps-bg-light);
 }
 
 .bps-caret {
   flex: none;
   width: 0;
   height: 0;
-  border-left: 5px solid #868e96;
+  border-left: 5px solid var(--bps-text-light);
   border-top: 4px solid transparent;
   border-bottom: 4px solid transparent;
   transform: rotate(90deg);
-  transition: transform 0.15s;
+  transition: transform var(--bps-trs);
 }
 
 .bps-caret.bps-folded {
@@ -138,15 +194,15 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 14px;
+  font-size: 15px;
   font-weight: 700;
-  color: #343a40;
+  color: var(--bps-text-normal);
 }
 
 .bps-count,
 .bps-deadline {
-  font-size: 12px;
-  color: #868e96;
+  font-size: 13px;
+  color: var(--bps-text-lightest);
 }
 
 .bps-space {
@@ -170,50 +226,54 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  background: #fff;
-  border-radius: 0.625rem;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
-  padding: 12px 16px;
+  padding: 10px 12px;
+  border: 1px solid var(--bps-border);
+  border-radius: 8px;
+  background: var(--bps-bg-base);
+  box-shadow: var(--bps-shadow-sm);
 }
 
 .bps-pager-summary {
-  font-size: 12px;
-  color: #868e96;
+  font-size: 13px;
+  color: var(--bps-text-lightest);
 }
 
 .bps-pager-nav {
   display: flex;
-  gap: 6px;
+  gap: 4px;
 }
 
 .bps-pager-btn {
   min-width: 28px;
   height: 28px;
   border: 0;
-  border-radius: 6px;
+  border-radius: 4px;
   background: transparent;
-  color: #495057;
+  color: var(--bps-text-normal);
   cursor: pointer;
+  font: inherit;
   font-size: 13px;
   line-height: 28px;
-  padding: 0 6px;
+  padding: 0 8px;
+  transition: color var(--bps-trs), background-color var(--bps-trs);
 }
 
 .bps-pager-btn:hover:not(:disabled) {
-  background: rgba(0, 0, 0, 0.05);
+  background: var(--bps-bg-light);
+  color: var(--bps-primary);
 }
 
 .bps-pager-btn.bps-on {
-  background: #0a4991;
-  color: #fff;
+  background: var(--bps-primary);
+  color: var(--bps-white);
 }
 
 .bps-pager-btn:disabled {
-  opacity: 0.4;
-  cursor: default;
+  opacity: .6;
+  cursor: not-allowed;
 }
 
-/* 卡片内徽章 */
+/* 卡片内课程徽章（按课程名哈希着色，与分组圆点同一套色相） */
 .bps-badge {
   flex: none;
   display: inline-block;
@@ -222,30 +282,36 @@
   text-overflow: ellipsis;
   white-space: nowrap;
   vertical-align: middle;
-  padding: 0 6px;
-  border-radius: 9999px;
-  font-size: 11px;
-  line-height: 17px;
-  font-weight: 500;
-  background: hsl(var(--h, 210), 65%, 91%);
-  color: hsl(var(--h, 210), 55%, 33%);
+  padding: 0 8px;
+  border-radius: 12px;
+  font-size: 13px;
+  line-height: 20px;
+  background: hsl(var(--h, 210), 65%, 92%);
+  color: hsl(var(--h, 210), 60%, 32%);
 }
 
+/* 暗色下不能再用 92% 亮度的粉彩底（会在 #404040 卡片上发亮）：
+   改成同色相的低透明度底 + 提亮文字，与 PTA 胶囊在暗色下的观感一致 */
+.dark .bps-badge {
+  background: hsla(var(--h, 210), 60%, 55%, .18);
+  color: hsl(var(--h, 210), 70%, 74%);
+}
+
+/* 倒计时三档：PTA 原生倒计时不分档（恒为 danger 13px），分级是本插件的自有信息 */
 .bps-countdown {
   flex: none;
-  font-size: 11px;
-  line-height: 17px;
-  font-weight: 500;
-  color: #868e96;
+  font-size: 13px;
+  line-height: 16px;
+  color: var(--bps-text-lightest);
 }
 
 .bps-countdown[data-level="2"] {
-  color: #e8590c;
+  color: var(--bps-warning);
 }
 
 .bps-countdown[data-level="3"] {
-  color: #e03131;
-  font-weight: 700;
+  color: var(--bps-danger);
+  font-weight: 600;
 }
 
 /* 答题状态胶囊（.bps-done）没有自有样式：DOM 与 PTA 原生胶囊同构
@@ -253,7 +319,19 @@
 
 .bps-answered {
   flex: none;
-  font-size: 11px;
-  line-height: 17px;
-  color: #868e96;
+  font-size: 13px;
+  line-height: 16px;
+  color: var(--bps-text-lightest);
+}
+
+/* 键盘焦点：PTA 自己的写法是 2px 实线 + 1px 偏移，注入 UI 沿用 */
+.bps-chip:focus-visible,
+.bps-head:focus-visible,
+.bps-pager-btn:focus-visible {
+  outline: 2px solid var(--bps-primary);
+  outline-offset: 1px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bps-chip, .bps-head, .bps-caret, .bps-pager-btn { transition: none; }
 }

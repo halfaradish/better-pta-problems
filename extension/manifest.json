@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "更好的题目集（PTA 增强）",
-  "version": "0.11.0",
+  "version": "0.12.0",
   "description": "在 PTA 题目集列表页按课程分组与筛选，显示课程徽章与截止倒计时，支持截止提醒（浏览器通知 / 可选自建后端邮件）。",
   "icons": {
     "16": "icons/icon16.png",

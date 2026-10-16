@@ -11,9 +11,9 @@
          font-family: Harmony, ui-sans-serif, system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", "Noto Sans", sans-serif; }
   .app { display: flex; height: 100vh; }
   .sidebar { width: 220px; flex: none; background: #fff; border-right: 1px solid #e9ecef; padding: 16px 10px; }
-  .sidebar .logo { font-weight: 700; font-size: 15px; padding: 6px 12px 18px; color: #0a4991; }
+  .sidebar .logo { font-weight: 700; font-size: 15px; padding: 6px 12px 18px; color: #0a4991; } /* PTA 品牌深蓝（--color-pta），有意不用交互主色 */
   .sidebar a { display: block; padding: 8px 12px; border-radius: 8px; color: #495057; text-decoration: none; font-size: 14px; }
-  .sidebar a.on { background: rgba(10, 73, 145, 0.08); color: #0a4991; font-weight: 600; }
+  .sidebar a.on { background: rgba(28, 128, 242, 0.08); color: hsl(212, 89%, 53%); font-weight: 600; }
   main { flex: 1; min-width: 0; }
   .scroll { height: 100vh; overflow-y: auto; }
   .page { max-width: 860px; margin: 0 auto; padding: 16px; }
@@ -21,7 +21,7 @@
   /* ---- PTA 原有元素复刻 ---- */
   .tabs { display: flex; align-items: center; gap: 16px; padding-bottom: 10px; }
   .tab { font-size: 15px; color: #868e96; cursor: pointer; padding-bottom: 6px; }
-  .tab.on { color: #0a4991; font-weight: 700; border-bottom: 2px solid #0a4991; }
+  .tab.on { color: hsl(212, 89%, 53%); font-weight: 700; border-bottom: 2px solid hsl(212, 89%, 53%); }
   .sorts { margin-left: auto; font-size: 12px; color: #868e96; }
   .filters { display: flex; align-items: flex-end; gap: 8px; flex-wrap: wrap; margin-bottom: 16px; }
   .f-label { font-size: 12px; color: #868e96; margin-bottom: 4px; }
@@ -33,34 +33,55 @@
   .text-xs { font-size: 12px; line-height: 18px; color: #868e96; }
   .pc-list { display: flex; flex-direction: column; gap: 16px; }
   .item { display: flex; align-items: center; gap: 10px; padding: 12px 16px; background: #fff;
-          border-radius: 10px; box-shadow: 0 1px 2px rgba(0,0,0,0.06); text-decoration: none; color: inherit;
+          border-radius: 8px; box-shadow: 0 1px 2px rgba(0,0,0,0.05); text-decoration: none; color: inherit;
           transition: box-shadow .15s; }
-  .item:hover { box-shadow: 0 3px 10px rgba(0,0,0,0.1); }
+  .item:hover { box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1), 0 2px 4px -2px rgba(0,0,0,0.1); }
   .ic { width: 38px; height: 38px; flex: none; color: #adb5bd; }
   .grow { flex: 1; min-width: 0; }
   .t-wrap { display: flex; flex-direction: column; gap: 4px; }
   .title { font-size: 14px; font-weight: 700; color: #404040; }
-  .item:hover .title { color: #0a4991; }
+  .item:hover .title { color: hsl(212, 89%, 53%); }
   .flex { display: flex; align-items: center; gap: 8px; }
   .sub .flex .flex { gap: 4px; }
-  .native-cd { color: #e03131; font-weight: 500; }
+  .native-cd { color: hsl(3, 68%, 53%); font-weight: 500; } /* PTA 原生倒计时：text-danger 13px，不分档 */
   .creator { flex: none; color: #868e96; }
 
   /* 分页条复刻（真实 PTA 结构为 paginationWrapper_* 的白底卡片） */
-  .pager-card { background: #fff; border-radius: 10px; box-shadow: 0 1px 2px rgba(0,0,0,0.06);
+  .pager-card { background: #fff; border-radius: 8px; box-shadow: 0 1px 2px rgba(0,0,0,0.05);
                 padding: 16px; display: flex; align-items: center; justify-content: space-between; margin-top: 16px; }
   .pager { display: flex; gap: 6px; }
-  .pg { min-width: 28px; height: 28px; border: 0; border-radius: 6px; background: transparent; color: #495057; cursor: pointer; }
-  .pg.on { background: #0a4991; color: #fff; }
+  .pg { min-width: 28px; height: 28px; border: 0; border-radius: 4px; background: transparent; color: hsl(0, 0%, 25%); cursor: pointer; }
+  .pg.on { background: hsl(212, 89%, 53%); color: #fff; }
 
   /* ---- 预览工具条（非扩展运行时） ---- */
   .preview-bar { position: fixed; right: 16px; bottom: 16px; z-index: 99; display: flex; gap: 8px;
                  padding: 8px 10px; border-radius: 10px; background: #212529; color: #fff; font-size: 12px;
                  box-shadow: 0 4px 14px rgba(0,0,0,.25); }
   .preview-bar button { border: 0; border-radius: 6px; padding: 5px 12px; cursor: pointer; font-size: 12px; }
-  .preview-bar .b-on { background: #0a4991; color: #fff; }
+  .preview-bar .b-on { background: hsl(212, 89%, 53%); color: #fff; }
   .preview-bar .b-plain { background: #495057; color: #fff; }
   .preview-note { position: fixed; left: 16px; bottom: 16px; z-index: 99; font-size: 12px; color: #868e96; }
+
+  /* ---- 暗色：与真实 PTA 同一机制（dark 类挂在 <body> 上，实测如此），
+     取值同样来自 PTA .dark 的实测值；只为离线看注入 UI 的暗色观感 ---- */
+  body.dark { background: hsl(0, 0%, 20%); color: hsl(0, 0%, 75%); }
+  body.dark .sidebar { background: hsl(0, 0%, 25%); border-right-color: hsla(0, 0%, 100%, .06); }
+  body.dark .sidebar .logo { color: hsl(212, 100%, 60%); } /* PTA 暗色下 --color-pta 就是亮主色 */
+  body.dark .sidebar a { color: hsl(0, 0%, 75%); }
+  body.dark .sidebar a.on { background: hsl(0, 0%, 28%); color: hsl(212, 100%, 60%); }
+  body.dark .tab:not(.on), body.dark .sorts, body.dark .f-label, body.dark .creator,
+  body.dark .text-xs, body.dark .preview-note { color: hsl(0, 0%, 60%); }
+  body.dark .tab.on { color: hsl(212, 100%, 60%); border-bottom-color: hsl(212, 100%, 60%); }
+  body.dark .f-search input, body.dark .f-select select { background: hsl(0, 0%, 25%); border-color: hsl(0, 0%, 50%); color: hsl(0, 0%, 75%); }
+  body.dark .item, body.dark .pager-card { background: hsl(0, 0%, 25%); box-shadow: 0 1px 2px rgba(0, 0, 0, .18); }
+  body.dark .item:hover { box-shadow: 0 4px 6px -1px rgba(0, 0, 0, .3), 0 2px 4px -2px rgba(0, 0, 0, .3); }
+  body.dark .title { color: hsl(0, 0%, 75%); }
+  body.dark .item:hover .title { color: hsl(212, 100%, 60%); }
+  body.dark .ic { color: hsl(0, 0%, 50%); }
+  body.dark .pg { color: hsl(0, 0%, 75%); }
+  body.dark .pg.on { background: hsl(212, 100%, 60%); color: #fff; }
+  body.dark .bg-bg-light { background-color: hsla(0, 0%, 100%, .08); }
+  body.dark .pc-color-primary { color: hsl(212, 100%, 60%); }
 
   /* ---- PTA 工具类兼容（预览页无 PTA 样式表；真实页面上这些类由 PTA 提供） ---- */
   .items-center { align-items: center; }
@@ -87,15 +108,17 @@
   .ellipsis { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .whitespace-nowrap { white-space: nowrap; }
   .inline-block { display: inline-block; }
-  .rounded-xl { border-radius: 9999px; }
-  .bg-green-500 { background-color: rgba(64, 192, 87, 0.12); }
-  .bg-blue-500 { background-color: rgba(28, 126, 214, 0.10); }
-  .bg-orange-500 { background-color: rgba(232, 89, 12, 0.10); }
-  .bg-bg-light { background-color: rgba(0, 0, 0, 0.06); }
-  .pc-color-pass { color: #2f9e44; }
-  .pc-color-primary { color: #1c7ed6; }
-  .pc-color-warning { color: #e8590c; }
-  .pc-color-light { color: #868e96; }
+  /* PTA 胶囊的真实配方（2026-10-16 实测）：rounded-xl 是 12px 不是全圆、
+     底色 = 500 级色 10% 透明度、文字取语义色 */
+  .rounded-xl { border-radius: 12px; }
+  .bg-green-500 { background-color: rgba(16, 185, 129, 0.1); }
+  .bg-blue-500 { background-color: rgba(59, 130, 246, 0.1); }
+  .bg-orange-500 { background-color: rgba(249, 115, 22, 0.1); }
+  .bg-bg-light { background-color: hsl(211, 20%, 93%); }
+  .pc-color-pass { color: hsl(100, 60%, 47%); }
+  .pc-color-primary { color: hsl(212, 89%, 53%); }
+  .pc-color-warning { color: hsl(35, 90%, 50%); }
+  .pc-color-light { color: hsl(0, 0%, 45%); }
   @media (min-width: 768px) { .md\:flex { display: flex; } .hidden.md\:flex { display: flex; } }
   .hidden { display: none; }
 </style>
@@ -153,8 +176,10 @@
   <button class="b-on" onclick="BPS.setView({grouped:true})">分组视图</button>
   <button class="b-plain" onclick="BPS.setView({grouped:false})">平铺列表</button>
   <button class="b-plain" onclick="BPS.setSettings({enabled:false})">关闭插件</button>
+  <button class="b-plain" id="theme-toggle"
+          onclick="document.body.classList.toggle('dark'); this.textContent = document.body.classList.contains('dark') ? '亮色' : '暗色';">暗色</button>
 </div>
-<div class="preview-note">设计预览：全部=PTA 原生列表（分页可用，默认）/分组聚合（整组分页），点课程 chip=该课程平铺；筛选条上已全部关闭的课程灰显、未关闭的计数蓝色高亮；跨页聚合 33 条</div>
+<div class="preview-note">设计预览：全部=PTA 原生列表（分页可用，默认）/分组聚合（整组分页），点课程 chip=该课程平铺；筛选条上已全部关闭的课程灰显、未关闭的计数蓝色高亮；跨页聚合 33 条；右下「暗色」按钮用 PTA 的真实机制（`dark` 类挂在 body 上）切主题，可离线对照注入 UI 的暗色观感</div>
 
 <script>
   /* chrome.storage 仿真（预览页无扩展环境）；提醒配置填假值让直连同步路径可跑通（fetch 已被 mock 拦截） */
