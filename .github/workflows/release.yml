@@ -1,6 +1,6 @@
 # 推送 v* tag 自动发版：把 extension/ 与《安装教程》打成 zip 发布到 GitHub Releases。
 # zip 解压后是一个目录：extension/（浏览器加载这个子文件夹）+ 安装教程.html。
-# Release 标题/正文取自附注 tag（git tag -a -m "…"）的信息，结尾自动追加一段安装提示。
+# Release 标题 = tag（版本号），正文取自附注 tag（git tag -a -m "…"）的信息，结尾自动追加一段安装提示。
 name: Release
 
 on:
@@ -72,7 +72,6 @@ jobs:
               echo "$SUBJECT"
               if [ -n "$BODY" ]; then echo; echo "$BODY"; fi
             } > release_notes.md
-            echo "RELEASE_TITLE=$SUBJECT" >> "$GITHUB_ENV"
           else
             echo "轻量 tag「$TAG」没有 tag 信息，本次更新见该 tag 的提交记录。" > release_notes.md
           fi
@@ -88,4 +87,4 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release create "$TAG" "dist/better-pta-problems-${TAG}.zip" \
-            --title "${RELEASE_TITLE:-$TAG}" --notes-file release_notes.md
+            --title "$TAG" --notes-file release_notes.md
