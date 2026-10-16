@@ -2,12 +2,13 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
-  DEFAULTS, SETTINGS_VERSION, loadSettings, migrate, needsMigration, sanitizeSettings, saveSettings, unwrapExport,
+  DEFAULTS, SETTINGS_VERSION, loadSettings, migrate, needsMigration, reminderChannels,
+  sanitizeSettings, saveSettings, unwrapExport,
 } from '../src/shared/settings.js';
 
-test('migrate：旧版设置升级到 v6，删掉不再持久化的 grouped，自动答题字段补默认值', () => {
+test('migrate：旧版设置升级到 v7，删掉不再持久化的 grouped，自动答题字段补默认值', () => {
   const next = migrate({ grouped: true, enabled: false });
-  assert.equal(next.settingsVersion, 6);
+  assert.equal(next.settingsVersion, 7);
   assert.equal('grouped' in next, false);
   assert.equal(next.enabled, false);
   assert.equal(next.separators, DEFAULTS.separators); // 缺失字段补默认值
@@ -23,7 +24,7 @@ test('migrate：旧版设置升级到 v6，删掉不再持久化的 grouped，�
 
 test('migrate v5→v6：旧的单把 API Key 归入当时选中的服务名下', () => {
   const next = migrate({ settingsVersion: 5, autoAnswerApiKey: 'sk-legacy', autoAnswerGateway: 'opencode' });
-  assert.equal(next.settingsVersion, 6);
+  assert.equal(next.settingsVersion, SETTINGS_VERSION);
   assert.deepEqual(next.autoAnswerApiKeys, { opencode: 'sk-legacy' });
   assert.equal('autoAnswerApiKey' in next, false); // 旧字段清掉，防止继续被读成全局 Key
 
@@ -32,8 +33,38 @@ test('migrate v5→v6：旧的单把 API Key 归入当时选中的服务名下',
   assert.deepEqual(deepseek.autoAnswerApiKeys, { deepseek: 'sk-a' });
 });
 
-test('migrate：已是 v6 的设置不再改动', () => {
-  const kept = migrate({ settingsVersion: 6, separators: '·', grouped: true });
+test('migrate v6→v7：旧的「启用邮件提醒」更名到邮件通道，浏览器通知通道补默认开', () => {
+  const off = migrate({ settingsVersion: 6, reminderEnabled: false, reminderServer: 'x:1', reminderEmail: 'a@b.c' });
+  assert.equal(off.settingsVersion, 7);
+  assert.equal(off.reminderEmailEnabled, false);        // 旧开关的状态跟着走（关着就继续关）
+  assert.equal(off.reminderBrowser, true);              // 新通道默认开（零配置、纯本地、不外发）
+  assert.equal('reminderEnabled' in off, false);        // 旧字段清掉，防止继续被读成总开关
+  assert.equal(off.reminderServer, 'x:1');              // 邮件配置原样保留
+
+  assert.equal(migrate({ settingsVersion: 6, reminderEnabled: true }).reminderEmailEnabled, true);
+  assert.equal(migrate({ settingsVersion: 6 }).reminderEmailEnabled, true); // 没存过该字段（旧默认开）
+});
+
+test('reminderChannels：双通道判定（邮件需开关开 + 服务器与邮箱齐备，半配置按未开启）', () => {
+  assert.deepEqual(reminderChannels({}), { browser: true, email: false, skipDone: true, server: '', emailTo: '' });
+
+  const full = reminderChannels({ reminderServer: ' 1.2.3.4:8787 ', reminderEmail: ' a@b.c ' });
+  assert.equal(full.email, true);
+  assert.equal(full.server, '1.2.3.4:8787'); // 首尾空白去掉（上报与判空用同一份）
+  assert.equal(full.emailTo, 'a@b.c');
+
+  // 开关关：配置留着也不发；半配置（只有地址没邮箱）同样按未开启
+  assert.equal(reminderChannels({ reminderEmailEnabled: false, reminderServer: '1.2.3.4:8787', reminderEmail: 'a@b.c' }).email, false);
+  assert.equal(reminderChannels({ reminderServer: '1.2.3.4:8787' }).email, false);
+  assert.equal(reminderChannels({ reminderEmail: 'a@b.c' }).email, false);
+
+  const quiet = reminderChannels({ reminderBrowser: false, reminderSkipDone: false });
+  assert.equal(quiet.browser, false);
+  assert.equal(quiet.skipDone, false);
+});
+
+test('migrate：已是 v7 的设置不再改动', () => {
+  const kept = migrate({ settingsVersion: 7, separators: '·', grouped: true });
   assert.equal(kept.separators, '·');
   assert.equal(kept.grouped, true); // 迁移只负责旧版清理
 });
@@ -42,14 +73,15 @@ test('needsMigration', () => {
   assert.equal(needsMigration({}), true);
   assert.equal(needsMigration({ settingsVersion: 4 }), true);
   assert.equal(needsMigration({ settingsVersion: 5 }), true);
-  assert.equal(needsMigration({ settingsVersion: 6 }), false);
+  assert.equal(needsMigration({ settingsVersion: 6 }), true);
+  assert.equal(needsMigration({ settingsVersion: 7 }), false);
 });
 
 test('无扩展环境（预览页 / 独立打开弹窗）退化为内存存储', async () => {
   globalThis.__BPS_SETTINGS__ = undefined;
   const initial = await loadSettings();
   assert.equal(initial.badge, DEFAULTS.badge);
-  assert.equal(initial.settingsVersion, 6);
+  assert.equal(initial.settingsVersion, SETTINGS_VERSION);
   await saveSettings({ ...DEFAULTS, badge: false });
   assert.equal(globalThis.__BPS_SETTINGS__.badge, false);
   assert.equal((await loadSettings()).badge, false);
@@ -59,12 +91,12 @@ test('无扩展环境（预览页 / 独立打开弹窗）退化为内存存储',
 test('loadSettings：persistMigration 才把迁移结果写回', async () => {
   globalThis.__BPS_SETTINGS__ = { grouped: true, enabled: true };
   const inMemory = await loadSettings();
-  assert.equal(inMemory.settingsVersion, 6);
+  assert.equal(inMemory.settingsVersion, SETTINGS_VERSION);
   assert.equal(globalThis.__BPS_SETTINGS__.settingsVersion, undefined); // 未写回
 
   globalThis.__BPS_SETTINGS__ = { grouped: true, enabled: true };
   await loadSettings({ persistMigration: true });
-  assert.equal(globalThis.__BPS_SETTINGS__.settingsVersion, 6);
+  assert.equal(globalThis.__BPS_SETTINGS__.settingsVersion, SETTINGS_VERSION);
   assert.equal('grouped' in globalThis.__BPS_SETTINGS__, false);
   globalThis.__BPS_SETTINGS__ = undefined;
 });

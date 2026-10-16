@@ -5,7 +5,8 @@
  * 口径 = 「有提交就算」：已作答 = 有提交/判分记录的题目数，总题数 = problemStatus
  * 长度（= 各题型 total 之和）。判分后的题目状态不再是 PROBLEM_SUBMITTED，而是
  * PROBLEM_ACCEPTED / PROBLEM_WRONG_ANSWER 等评测结论，它们同样是「答过」——所以
- * 展示胶囊与邮件提醒的「已完成」判定共用这一个计数（content/reminders.js）。
+ * 展示胶囊与提醒（浏览器通知 / 邮件两条通道）的「已完成」判定共用这一个计数
+ * （content/reminders.js）。
  * v0.8～v0.9.5 只数 PROBLEM_SUBMITTED，判分完的题集一律显示「未完成 0/N」；用户
  * 2026-10-15 报障（实验1 全部答完仍标未完成）后统一到 PTA 概览页的口径。
  *

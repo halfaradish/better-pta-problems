@@ -158,7 +158,7 @@
 
 <script>
   /* chrome.storage 仿真（预览页无扩展环境）；提醒配置填假值让直连同步路径可跑通（fetch 已被 mock 拦截） */
-  window.__BPS_SETTINGS__ = { enabled: true, grouped: true, badge: true, countdown: true, progress: true, separators: '--,｜,|', rules: '', reminderEnabled: true, reminderServer: 'demo.server:8787', reminderEmail: 'me@example.com' };
+  window.__BPS_SETTINGS__ = { enabled: true, grouped: true, badge: true, countdown: true, progress: true, separators: '--,｜,|', rules: '', reminderBrowser: true, reminderEmailEnabled: true, reminderServer: 'demo.server:8787', reminderEmail: 'me@example.com' };
 
   /* 当前页（PTA 渲染的 16 张卡片，id 与 mock 接口数据一一对应）。
      0137 带 cd = PTA 卡片自带的原生倒计时（「距离关闭还有…」）：插件不得再叠加自己的「剩 X 天」 */
@@ -271,13 +271,14 @@
   // 预览页不是真实 PTA 路由，放开路径限制以便本地验证
   window.__BPS_FORCE_LIST__ = true;
 
-  /* BPS_SYNC 仿真：记录扩展运行时的订阅上报（预览页本无 chrome，补一个最小 stub），
-     回归「已完成的不再提醒」用——payload 里的 sets 应当剔除了进度假数据判「已完成」的条目 */
+  /* BPS_SYNC 仿真：记录扩展运行时的提醒上报（预览页本无 chrome，补一个最小 stub），
+     回归「已完成的不再提醒」用——payload 里的 sets 应当剔除了进度假数据判「已完成」的条目；
+     browser/email 标记反映双通道闸门（邮件通道关闭时 server/email 应为空串） */
   window.__BPS_SYNC_LOG__ = [];
   window.chrome = {
     runtime: {
       sendMessage: async msg => {
-        if (msg?.type === 'BPS_SYNC') window.__BPS_SYNC_LOG__.push({ at: Date.now(), server: msg.server, email: msg.email, sets: msg.sets });
+        if (msg?.type === 'BPS_SYNC') window.__BPS_SYNC_LOG__.push({ at: Date.now(), browser: msg.browser, server: msg.server, email: msg.email, sets: msg.sets });
         return { ok: true };
       },
     },

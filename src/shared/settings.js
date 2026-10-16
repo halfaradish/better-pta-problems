@@ -12,9 +12,12 @@ export const DEFAULTS = {
   mergeSimilar: true,     // 同一教师下相似课程名自动归并为同一门课
   openInNewTab: true,     // 点开题目集在新标签页打开（绕过 PTA 的 SPA 同页跳转）
   progress: true,         // 考试型题目集的答题状态胶囊（顶替原生「已开放」，见 content/progress.js）
-  reminderEnabled: true,  // 题目关闭邮件提醒总开关（与下面两项配置配合；关闭即暂停同步）
-  reminderSkipDone: true, // 已完成的题目集不再提醒：推送订阅时剔除已全部提交/判分的条目（口径见 content/reminders.js）
-  reminderServer: '',     // 邮件提醒后端地址（ip:port，可加 /令牌 后缀）；空 = 关闭
+  // 题目关闭提醒的两个通道（v7 起拆开）：浏览器通知零配置，邮件需自建后端。
+  // 注意：v6 及以前的「启用邮件提醒」总开关（reminderEnabled）由迁移更名为 reminderEmailEnabled
+  reminderBrowser: true,  // 浏览器通知通道（纯本地；关闭即不再落盘与弹通知）
+  reminderEmailEnabled: true, // 邮件提醒通道开关；需服务器地址与邮箱齐备才真正生效
+  reminderSkipDone: true, // 已完成的题目集不再提醒：推送时剔除已全部提交/判分的条目（口径见 content/reminders.js）
+  reminderServer: '',     // 邮件提醒后端地址（ip:port，可加 /令牌 后缀）；空 = 邮件通道未配置
   reminderEmail: '',      // 提醒邮件接收邮箱
   // 自动答题（实验）：入口为题目页的悬浮球面板（弹窗只留总开关），见 docs/自动答题初探.md §9
   autoAnswer: false,          // 题目列表页显示悬浮答题球（实验功能，默认关）
@@ -28,7 +31,7 @@ export const DEFAULTS = {
   settingsVersion: 0,     // 0 = 旧版设置；v4 起「列表/分组」不再持久化（改为按路由的会话内状态）
 };
 
-export const SETTINGS_VERSION = 6;
+export const SETTINGS_VERSION = 7;
 
 // 扩展环境用 chrome.storage.sync（跨设备同步）；预览页 / 独立打开的弹窗退化为内存
 export const HAS_CHROME_STORAGE = typeof chrome !== 'undefined' && !!chrome.storage?.sync;
@@ -47,6 +50,11 @@ export function migrate(raw) {
       s.autoAnswerApiKeys = { ...(s.autoAnswerApiKeys || {}), [s.autoAnswerGateway || 'deepseek']: s.autoAnswerApiKey };
     }
     delete s.autoAnswerApiKey;
+    // v7：提醒拆双通道 —— 旧的「启用邮件提醒」开关（reminderEnabled，没有则视为默认开）
+    // 更名为邮件通道开关；浏览器通知通道是新增的，一律按默认开（零配置、纯本地、不外发）。
+    // 注意读的是 raw：DEFAULTS 里已没有 reminderEnabled，且下面的 delete 会把它从 s 里抹掉
+    s.reminderEmailEnabled = typeof raw?.reminderEnabled === 'boolean' ? raw.reminderEnabled : s.reminderEmailEnabled !== false;
+    delete s.reminderEnabled;
     s.settingsVersion = SETTINGS_VERSION;
   }
   return s;
@@ -91,6 +99,23 @@ export function onSettingsChanged(cb) {
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area === 'sync' && changes.settings) cb({ ...DEFAULTS, ...changes.settings.newValue });
   });
+}
+
+/* ---------- 提醒通道判定（内容脚本与 background 共用同一份，避免两侧漂移） ---------- */
+
+// 浏览器通知：开关开即生效（零配置、纯本地）。
+// 邮件：开关开**且**服务器地址与邮箱都填了才算开启 —— 半配置当未开启处理
+// （不推送、不报错），这样关掉邮件通道时不残留「地址还在、忘了清邮箱」这类状态。
+export function reminderChannels(s = {}) {
+  const server = String(s.reminderServer || '').trim();
+  const emailTo = String(s.reminderEmail || '').trim();
+  return {
+    browser: s.reminderBrowser !== false,
+    email: s.reminderEmailEnabled !== false && !!server && !!emailTo,
+    skipDone: s.reminderSkipDone !== false,
+    server,
+    emailTo,
+  };
 }
 
 /* ---------- 配置备份（弹窗的导入/导出共用） ---------- */

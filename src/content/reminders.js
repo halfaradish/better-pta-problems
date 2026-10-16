@@ -1,6 +1,6 @@
-/* 题目关闭邮件提醒：把未关闭题目集同步到用户自建后端。
+/* 题目关闭提醒：把未关闭题目集同步给两条通道（浏览器通知 / 自建后端邮件）。
  *
- * 两条推送路径，payload 同构（后端按邮箱全量替换订阅）：
+ * 两条推送路径，payload 同构（background 按通道标记分发）：
  * 1) syncRemindersDirect：打开 PTA 任意页面（含 dashboard/详情页）后直连拉取一次
  *    「进行中」全集——防止只有打开「进行中」列表页才同步造成漏提醒。查询参数取自
  *    docs/核心结论.md §2 的实测结论（endAtAfter 过滤 + END_AT 升序 + limit=100）；
@@ -9,12 +9,19 @@
  * 2) pushAggregatedReminders：「进行中」页聚合成功后的新鲜度钩子，捕获会话中途改期等
  *    endAt 变化；仅限该路由——其余路由的聚合是筛选子集，按全量替换语义推子集会丢数据。
  *
+ * 通道闸门（v0.10 拆双通道）：浏览器通知（reminderBrowser，零配置、纯本地）与邮件
+ * （reminderEmailEnabled + 服务器与邮箱齐备）任一开启即推送；两个都关才完全不外发。
+ * 邮件通道关闭时以空串上报服务器/邮箱，background 只落本地快照不发网络请求。
+ * 闸门与「开关变更即强制推送」都走 settings.reminderChannels（与 background 同一份判定）。
+ *
  * 「已完成的不再提醒」（reminderSkipDone，默认开）：两条路径推送前都先把答题窗口内
  * 条目的进度拉齐（与列表胶囊共用 progress.js 的缓存），把「每道题都有提交/判分记录」
- * 的条目从 payload 里剔除——订阅是全量替换语义，剔除即后端不再提醒；之后做完了，
- * 下一次同步再进 payload（已发过的档位由后端 sent_log 去重，不会重发）。进度缺失
- * （未取到/失败/过期）一律按未完成保留——宁可多提醒，不漏提醒。
+ * 的条目从 payload 里剔除——对邮件是订阅全量替换语义，对本地是快照全量替换语义，
+ * 剔除即两边的提醒都停；之后做完了，下一次同步再进 payload（已发过的档位由各自
+ * 的去重表兜住，不会重发）。进度缺失（未取到/失败/过期）一律按未完成保留——
+ * 宁可多提醒，不漏提醒。
  */
+import { reminderChannels } from '../shared/settings.js';
 import { ACTIVE_PATH_RE } from '../shared/paths.js';
 import { aggregateAll, aggregateItems } from './aggregate.js';
 import { ensureProgressAsync, isReminderDone } from './progress.js';
@@ -24,23 +31,25 @@ const DIRECT_MIN_INTERVAL = 5 * 60 * 1000; // 直连路径：同文档内配置�
 const PROGRESS_WAIT_MS = 15 * 1000;        // 推送前等进度拉齐的上限：进度接口卡死也不拖住同步
 
 let lastPush = { sig: null, at: 0 };
-let lastRemindCfg = { enabled: null, skipDone: null, server: null, email: null };
+let lastRemindCfg = { browser: null, email: null, skipDone: null, server: null, emailTo: null };
 let lastDirectAt = 0;
 
 function reminderCfg(settings) {
-  return {
-    enabled: settings.reminderEnabled !== false,
-    skipDone: settings.reminderSkipDone !== false,
-    server: settings.reminderServer || '',
-    email: settings.reminderEmail || '',
-  };
+  const ch = reminderChannels(settings);
+  return { browser: ch.browser, email: ch.email, skipDone: ch.skipDone, server: ch.server, emailTo: ch.emailTo };
 }
 
-// 与上次快照比对并更新；配置变更方获得一次 force 推送资格（如换了邮箱，签名虽同也要推）
+function anyChannel(cfg) {
+  return cfg.browser || cfg.email;
+}
+
+// 与上次快照比对并更新；配置变更方获得一次 force 推送资格（如开了浏览器通知、换了邮箱，
+// 签名虽同也要推）
 function consumeRemindCfgChange(settings) {
   const cfg = reminderCfg(settings);
-  const changed = cfg.enabled !== lastRemindCfg.enabled || cfg.skipDone !== lastRemindCfg.skipDone
-    || cfg.server !== lastRemindCfg.server || cfg.email !== lastRemindCfg.email;
+  const changed = cfg.browser !== lastRemindCfg.browser || cfg.email !== lastRemindCfg.email
+    || cfg.skipDone !== lastRemindCfg.skipDone
+    || cfg.server !== lastRemindCfg.server || cfg.emailTo !== lastRemindCfg.emailTo;
   lastRemindCfg = cfg;
   return changed;
 }
@@ -56,19 +65,39 @@ export function buildSyncSets(items, { skipDone = false, isDone = isReminderDone
     .sort((a, b) => a.endAt.localeCompare(b.endAt));
 }
 
+// 同步结果日志：两个通道分别报，邮件单独失败时不淹没本地成功
+function logSyncResult(res, count) {
+  if (!res?.ok) {
+    console.warn('[更好的题目集] 提醒同步失败:', res?.error || '未知错误');
+  } else {
+    const parts = [];
+    if (res.browser) parts.push(`浏览器通知 ${res.browser.stored} 个${res.browser.skipped ? '（跳过：' + res.browser.skipped + '）' : ''}`);
+    if (res.email?.ok) parts.push(`邮件 ${res.email.total} 个`);
+    console.info(`[更好的题目集] 提醒同步完成（${parts.join('、') || count + ' 个'}）`);
+  }
+  if (res?.email && res.email.ok === false) {
+    console.warn('[更好的题目集] 邮件提醒同步失败:', res.email.error);
+  }
+}
+
 function pushReminders(cfg, items, force = false) {
   if (typeof chrome === 'undefined' || !chrome.runtime?.sendMessage) return; // 预览页无扩展运行时
+  if (!anyChannel(cfg)) return;                                             // 两个通道都关：完全不上报
   const now = Date.now();
   const sets = buildSyncSets(items, cfg);
-  const sig = JSON.stringify(sets);
+  const sig = JSON.stringify([cfg.browser, cfg.email, sets]);
   if (!force && sig === lastPush.sig && now - lastPush.at < PUSH_MIN_INTERVAL) return;
   lastPush = { sig, at: now }; // 记在发送前：失败也等下一轮节流窗口，避免高频重试
-  chrome.runtime.sendMessage({ type: 'BPS_SYNC', server: cfg.server, email: cfg.email, sets })
-    .then(res => {
-      if (res?.ok) console.info(`[更好的题目集] 邮件提醒订阅已同步（${sets.length} 个题目集）`);
-      else console.warn('[更好的题目集] 邮件提醒同步失败:', res?.error || '未知错误');
-    })
-    .catch(err => console.warn('[更好的题目集] 邮件提醒同步失败:', err?.message || err));
+  chrome.runtime.sendMessage({
+    type: 'BPS_SYNC',
+    browser: cfg.browser,
+    // 邮件通道关闭时不上报服务器/邮箱（内容脚本是外发数据的唯一出口，这里做减法）
+    server: cfg.email ? cfg.server : '',
+    email: cfg.email ? cfg.emailTo : '',
+    sets,
+  })
+    .then(res => logSyncResult(res, sets.length))
+    .catch(err => console.warn('[更好的题目集] 提醒同步失败:', err?.message || err));
 }
 
 // 推送前先把答题窗口内条目的进度拉齐，「已完成」判定才有数据；fetch 卡死按上限放行
@@ -92,7 +121,7 @@ export function armDirectCooldown() {
 export function syncRemindersDirect(settings) {
   const changed = consumeRemindCfgChange(settings);
   const cfg = reminderCfg(settings);
-  if (!cfg.enabled || !cfg.server || !cfg.email) return;
+  if (!anyChannel(cfg)) return;
   const now = Date.now();
   if (!changed && now - lastDirectAt < DIRECT_MIN_INTERVAL) return;
   lastDirectAt = now;
@@ -105,7 +134,7 @@ export function syncRemindersDirect(settings) {
   u.searchParams.set('_bps', 'reminder'); // 标记插件自身的同步请求，路由记账据此跳过
   aggregateAll(String(u))
     .then(items => pushWithProgress(cfg, items, changed))
-    .catch(err => console.warn(`[更好的题目集] 邮件提醒同步失败（拉取进行中题目集）: ${err?.message || err}`));
+    .catch(err => console.warn(`[更好的题目集] 提醒同步失败（拉取进行中题目集）: ${err?.message || err}`));
 }
 
 export function pushAggregatedReminders(settings) {
@@ -113,7 +142,7 @@ export function pushAggregatedReminders(settings) {
   // 路由闸门必须先于 cfg 快照消费：本钩子在所有列表路由的聚合成功时都会被调，
   // 但只有「进行中」页的聚合是全量；先消费会把 force 资格白白吃掉（顺带修了
   // 既有问题——在其余列表页改提醒配置后，2s 直连会因变更已被消费而延迟 5 分钟）
-  if (!cfg.enabled || !cfg.server || !cfg.email || !ACTIVE_PATH_RE.test(location.pathname)) return;
+  if (!anyChannel(cfg) || !ACTIVE_PATH_RE.test(location.pathname)) return;
   const changed = consumeRemindCfgChange(settings);
   void pushWithProgress(cfg, aggregateItems(), changed);
 }

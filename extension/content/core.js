@@ -18,12 +18,16 @@
     // 点开题目集在新标签页打开（绕过 PTA 的 SPA 同页跳转）
     progress: true,
     // 考试型题目集的答题状态胶囊（顶替原生「已开放」，见 content/progress.js）
-    reminderEnabled: true,
-    // 题目关闭邮件提醒总开关（与下面两项配置配合；关闭即暂停同步）
+    // 题目关闭提醒的两个通道（v7 起拆开）：浏览器通知零配置，邮件需自建后端。
+    // 注意：v6 及以前的「启用邮件提醒」总开关（reminderEnabled）由迁移更名为 reminderEmailEnabled
+    reminderBrowser: true,
+    // 浏览器通知通道（纯本地；关闭即不再落盘与弹通知）
+    reminderEmailEnabled: true,
+    // 邮件提醒通道开关；需服务器地址与邮箱齐备才真正生效
     reminderSkipDone: true,
-    // 已完成的题目集不再提醒：推送订阅时剔除已全部提交/判分的条目（口径见 content/reminders.js）
+    // 已完成的题目集不再提醒：推送时剔除已全部提交/判分的条目（口径见 content/reminders.js）
     reminderServer: "",
-    // 邮件提醒后端地址（ip:port，可加 /令牌 后缀）；空 = 关闭
+    // 邮件提醒后端地址（ip:port，可加 /令牌 后缀）；空 = 邮件通道未配置
     reminderEmail: "",
     // 提醒邮件接收邮箱
     // 自动答题（实验）：入口为题目页的悬浮球面板（弹窗只留总开关），见 docs/自动答题初探.md §9
@@ -46,7 +50,7 @@
     settingsVersion: 0
     // 0 = 旧版设置；v4 起「列表/分组」不再持久化（改为按路由的会话内状态）
   };
-  var SETTINGS_VERSION = 6;
+  var SETTINGS_VERSION = 7;
   var HAS_CHROME_STORAGE = typeof chrome !== "undefined" && !!chrome.storage?.sync;
   function needsMigration(raw) {
     return (raw?.settingsVersion || 0) < SETTINGS_VERSION;
@@ -59,6 +63,8 @@
         s.autoAnswerApiKeys = { ...s.autoAnswerApiKeys || {}, [s.autoAnswerGateway || "deepseek"]: s.autoAnswerApiKey };
       }
       delete s.autoAnswerApiKey;
+      s.reminderEmailEnabled = typeof raw?.reminderEnabled === "boolean" ? raw.reminderEnabled : s.reminderEmailEnabled !== false;
+      delete s.reminderEnabled;
       s.settingsVersion = SETTINGS_VERSION;
     }
     return s;
@@ -99,6 +105,17 @@
     chrome.storage.onChanged.addListener((changes, area) => {
       if (area === "sync" && changes.settings) cb({ ...DEFAULTS, ...changes.settings.newValue });
     });
+  }
+  function reminderChannels(s = {}) {
+    const server = String(s.reminderServer || "").trim();
+    const emailTo = String(s.reminderEmail || "").trim();
+    return {
+      browser: s.reminderBrowser !== false,
+      email: s.reminderEmailEnabled !== false && !!server && !!emailTo,
+      skipDone: s.reminderSkipDone !== false,
+      server,
+      emailTo
+    };
   }
 
   // src/shared/paths.js
@@ -2640,19 +2657,18 @@ input:disabled, button:disabled { opacity: .5; cursor: not-allowed; }
   var DIRECT_MIN_INTERVAL = 5 * 60 * 1e3;
   var PROGRESS_WAIT_MS = 15 * 1e3;
   var lastPush = { sig: null, at: 0 };
-  var lastRemindCfg = { enabled: null, skipDone: null, server: null, email: null };
+  var lastRemindCfg = { browser: null, email: null, skipDone: null, server: null, emailTo: null };
   var lastDirectAt = 0;
   function reminderCfg(settings3) {
-    return {
-      enabled: settings3.reminderEnabled !== false,
-      skipDone: settings3.reminderSkipDone !== false,
-      server: settings3.reminderServer || "",
-      email: settings3.reminderEmail || ""
-    };
+    const ch = reminderChannels(settings3);
+    return { browser: ch.browser, email: ch.email, skipDone: ch.skipDone, server: ch.server, emailTo: ch.emailTo };
+  }
+  function anyChannel(cfg) {
+    return cfg.browser || cfg.email;
   }
   function consumeRemindCfgChange(settings3) {
     const cfg = reminderCfg(settings3);
-    const changed = cfg.enabled !== lastRemindCfg.enabled || cfg.skipDone !== lastRemindCfg.skipDone || cfg.server !== lastRemindCfg.server || cfg.email !== lastRemindCfg.email;
+    const changed = cfg.browser !== lastRemindCfg.browser || cfg.email !== lastRemindCfg.email || cfg.skipDone !== lastRemindCfg.skipDone || cfg.server !== lastRemindCfg.server || cfg.emailTo !== lastRemindCfg.emailTo;
     lastRemindCfg = cfg;
     return changed;
   }
@@ -2660,17 +2676,35 @@ input:disabled, button:disabled { opacity: .5; cursor: not-allowed; }
     const now = Date.now();
     return (items || []).filter((i) => i.closeAt && +i.closeAt > now).filter((i) => !skipDone || !isDone(i.id)).map((i) => ({ id: i.id, title: i.title, endAt: i.closeAt.toISOString(), owner: i.creator, org: i.org })).sort((a, b) => a.endAt.localeCompare(b.endAt));
   }
+  function logSyncResult(res, count) {
+    if (!res?.ok) {
+      console.warn("[\u66F4\u597D\u7684\u9898\u76EE\u96C6] \u63D0\u9192\u540C\u6B65\u5931\u8D25:", res?.error || "\u672A\u77E5\u9519\u8BEF");
+    } else {
+      const parts = [];
+      if (res.browser) parts.push(`\u6D4F\u89C8\u5668\u901A\u77E5 ${res.browser.stored} \u4E2A${res.browser.skipped ? "\uFF08\u8DF3\u8FC7\uFF1A" + res.browser.skipped + "\uFF09" : ""}`);
+      if (res.email?.ok) parts.push(`\u90AE\u4EF6 ${res.email.total} \u4E2A`);
+      console.info(`[\u66F4\u597D\u7684\u9898\u76EE\u96C6] \u63D0\u9192\u540C\u6B65\u5B8C\u6210\uFF08${parts.join("\u3001") || count + " \u4E2A"}\uFF09`);
+    }
+    if (res?.email && res.email.ok === false) {
+      console.warn("[\u66F4\u597D\u7684\u9898\u76EE\u96C6] \u90AE\u4EF6\u63D0\u9192\u540C\u6B65\u5931\u8D25:", res.email.error);
+    }
+  }
   function pushReminders(cfg, items, force = false) {
     if (typeof chrome === "undefined" || !chrome.runtime?.sendMessage) return;
+    if (!anyChannel(cfg)) return;
     const now = Date.now();
     const sets = buildSyncSets(items, cfg);
-    const sig = JSON.stringify(sets);
+    const sig = JSON.stringify([cfg.browser, cfg.email, sets]);
     if (!force && sig === lastPush.sig && now - lastPush.at < PUSH_MIN_INTERVAL) return;
     lastPush = { sig, at: now };
-    chrome.runtime.sendMessage({ type: "BPS_SYNC", server: cfg.server, email: cfg.email, sets }).then((res) => {
-      if (res?.ok) console.info(`[\u66F4\u597D\u7684\u9898\u76EE\u96C6] \u90AE\u4EF6\u63D0\u9192\u8BA2\u9605\u5DF2\u540C\u6B65\uFF08${sets.length} \u4E2A\u9898\u76EE\u96C6\uFF09`);
-      else console.warn("[\u66F4\u597D\u7684\u9898\u76EE\u96C6] \u90AE\u4EF6\u63D0\u9192\u540C\u6B65\u5931\u8D25:", res?.error || "\u672A\u77E5\u9519\u8BEF");
-    }).catch((err) => console.warn("[\u66F4\u597D\u7684\u9898\u76EE\u96C6] \u90AE\u4EF6\u63D0\u9192\u540C\u6B65\u5931\u8D25:", err?.message || err));
+    chrome.runtime.sendMessage({
+      type: "BPS_SYNC",
+      browser: cfg.browser,
+      // 邮件通道关闭时不上报服务器/邮箱（内容脚本是外发数据的唯一出口，这里做减法）
+      server: cfg.email ? cfg.server : "",
+      email: cfg.email ? cfg.emailTo : "",
+      sets
+    }).then((res) => logSyncResult(res, sets.length)).catch((err) => console.warn("[\u66F4\u597D\u7684\u9898\u76EE\u96C6] \u63D0\u9192\u540C\u6B65\u5931\u8D25:", err?.message || err));
   }
   async function pushWithProgress(cfg, items, force) {
     if (cfg.skipDone) {
@@ -2687,7 +2721,7 @@ input:disabled, button:disabled { opacity: .5; cursor: not-allowed; }
   function syncRemindersDirect(settings3) {
     const changed = consumeRemindCfgChange(settings3);
     const cfg = reminderCfg(settings3);
-    if (!cfg.enabled || !cfg.server || !cfg.email) return;
+    if (!anyChannel(cfg)) return;
     const now = Date.now();
     if (!changed && now - lastDirectAt < DIRECT_MIN_INTERVAL) return;
     lastDirectAt = now;
@@ -2698,11 +2732,11 @@ input:disabled, button:disabled { opacity: .5; cursor: not-allowed; }
     u.searchParams.set("order_by", "END_AT");
     u.searchParams.set("asc", "true");
     u.searchParams.set("_bps", "reminder");
-    aggregateAll(String(u)).then((items) => pushWithProgress(cfg, items, changed)).catch((err) => console.warn(`[\u66F4\u597D\u7684\u9898\u76EE\u96C6] \u90AE\u4EF6\u63D0\u9192\u540C\u6B65\u5931\u8D25\uFF08\u62C9\u53D6\u8FDB\u884C\u4E2D\u9898\u76EE\u96C6\uFF09: ${err?.message || err}`));
+    aggregateAll(String(u)).then((items) => pushWithProgress(cfg, items, changed)).catch((err) => console.warn(`[\u66F4\u597D\u7684\u9898\u76EE\u96C6] \u63D0\u9192\u540C\u6B65\u5931\u8D25\uFF08\u62C9\u53D6\u8FDB\u884C\u4E2D\u9898\u76EE\u96C6\uFF09: ${err?.message || err}`));
   }
   function pushAggregatedReminders(settings3) {
     const cfg = reminderCfg(settings3);
-    if (!cfg.enabled || !cfg.server || !cfg.email || !ACTIVE_PATH_RE.test(location.pathname)) return;
+    if (!anyChannel(cfg) || !ACTIVE_PATH_RE.test(location.pathname)) return;
     const changed = consumeRemindCfgChange(settings3);
     void pushWithProgress(cfg, aggregateItems(), changed);
   }

@@ -144,8 +144,8 @@ async function init() {
     aaPanel.sync(settings); // SPA 换题集/换路由后悬浮球跟着显隐
   }, 3000);
 
-  // 打开 PTA 任意页面即同步一次邮件提醒订阅（延迟 2s 避开页面首屏请求；
-  // 预占节流窗口：若聚合钩子先完成推送，到点后不再重复拉取）
+  // 打开 PTA 任意页面即同步一次提醒（浏览器通知 / 邮件两条通道，任一开启才上报；
+  // 延迟 2s 避开页面首屏请求；预占节流窗口：若聚合钩子先完成推送，到点后不再重复拉取）
   reminders.armDirectCooldown();
   setTimeout(() => reminders.syncRemindersDirect(settings), 2000);
 
