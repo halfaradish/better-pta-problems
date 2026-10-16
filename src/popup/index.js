@@ -77,7 +77,7 @@ function renderRemindersSummary() {
   }
   el.classList.remove('warn');
   const on = [];
-  if ($('reminderBrowser').checked) on.push('浏览器通知');
+  if ($('reminderBrowser').checked) on.push('浏览器提醒');
   // 邮件按实际生效口径算：开关开且地址、邮箱都填齐（与 reminderChannels 一致）
   if ($('reminderEmailEnabled').checked
     && $('reminderServer').value.trim() && $('reminderEmail').value.trim()) on.push('邮件提醒');
@@ -212,26 +212,38 @@ async function checkNotifyPermission() {
   renderRemindersSummary();
 }
 
-const showReminderStatus = (text, cls) => {
-  const status = $('reminderStatus');
-  status.textContent = text;
-  status.className = 'status' + (cls ? ' ' + cls : '');
+// 反馈位分工：两个测试按钮各有自己的状态位，就长在按钮正下方（曾经共用一个、
+// 放在页面底部——点完反馈落在 390px 之外，看着像「点了没反应」）
+const setStatus = (el, text, cls) => {
+  el.textContent = text;
+  el.className = 'status' + (cls ? ' ' + cls : '');
 };
+const showNotifyStatus = (text, cls) => setStatus($('notifyStatus'), text, cls);
+const showReminderStatus = (text, cls) => setStatus($('reminderStatus'), text, cls);
+
+// 后台没响应时的兜底：正常一两百毫秒就回（SW 冷启动也就 1s 上下），
+// 迟迟不回就当场报错——否则按钮永远卡在「发送中…」，再点还被 notifyBusy 挡住，表现就是「点了没反应」
+function sendToBackground(msg, ms = 12000) {
+  return Promise.race([
+    chrome.runtime.sendMessage(msg),
+    new Promise((_, reject) => setTimeout(() => reject(new Error('后台没有响应，请重试')), ms)),
+  ]);
+}
 
 $('testNotify').addEventListener('click', async () => {
   if (notifyBusy || $('testNotify').disabled) return;
   notifyBusy = true;
   try {
-    showReminderStatus('发送中…');
-    const res = await chrome.runtime.sendMessage({ type: 'BPS_NOTIFY_TEST' });
+    showNotifyStatus('发送中…');
+    const res = await sendToBackground({ type: 'BPS_NOTIFY_TEST' });
     if (res?.ok) {
-      showReminderStatus('已发送，看看系统通知', 'ok');
+      showNotifyStatus('已发送；没弹横幅就去系统通知中心找', 'ok');
       checkNotifyPermission();
     } else {
-      showReminderStatus('失败：' + (res?.error || '未知错误'), 'err');
+      showNotifyStatus('失败：' + (res?.error || '未知错误'), 'err');
     }
   } catch (err) {
-    showReminderStatus('失败：' + (err?.message || err), 'err');
+    showNotifyStatus('失败：' + (err?.message || err), 'err');
   } finally {
     notifyBusy = false;
   }
@@ -263,7 +275,7 @@ $('testReminder').addEventListener('click', async () => {
       await chrome.storage.session.set({ testSentAt: Date.now() }); // 冷却起点：请求发出即计时，SMTP 失败也要等
     } catch (_) { /* 无 session 存储，仅靠后端冷却 */ }
     startTestCooldown(TEST_COOLDOWN_MS / 1000);
-    const res = await chrome.runtime.sendMessage({ type: 'BPS_TEST', server, email });
+    const res = await sendToBackground({ type: 'BPS_TEST', server, email });
     if (res?.ok) showReminderStatus('已发送，请查收', 'ok');
     else showReminderStatus('失败：' + (res?.error || '未知错误'), 'err');
   } catch (err) {

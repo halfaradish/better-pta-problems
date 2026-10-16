@@ -181,6 +181,9 @@ async function notifyTest() {
   if (await notifyPermission() === 'denied') {
     return { ok: false, error: '系统已关闭浏览器通知（系统设置或专注助手），请先允许后重试' };
   }
+  // 先清掉上一条测试通知：固定 id 直接 create 是「原地更新」，
+  // 更新不会重新弹横幅——上一条还躺在通知中心时，用户就会觉得「说已发送但没弹窗」
+  try { await chrome.notifications.clear(TEST_NOTIFY_ID); } catch (_) { /* 没清掉也继续 */ }
   const ok = await showNotification({
     id: TEST_NOTIFY_ID,
     title: '浏览器通知已开启',

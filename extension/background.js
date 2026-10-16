@@ -334,6 +334,10 @@
     if (await notifyPermission() === "denied") {
       return { ok: false, error: "\u7CFB\u7EDF\u5DF2\u5173\u95ED\u6D4F\u89C8\u5668\u901A\u77E5\uFF08\u7CFB\u7EDF\u8BBE\u7F6E\u6216\u4E13\u6CE8\u52A9\u624B\uFF09\uFF0C\u8BF7\u5148\u5141\u8BB8\u540E\u91CD\u8BD5" };
     }
+    try {
+      await chrome.notifications.clear(TEST_NOTIFY_ID);
+    } catch (_) {
+    }
     const ok = await showNotification({
       id: TEST_NOTIFY_ID,
       title: "\u6D4F\u89C8\u5668\u901A\u77E5\u5DF2\u5F00\u542F",

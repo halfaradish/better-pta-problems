@@ -132,10 +132,10 @@
     .row-value.warn { color: var(--color-danger); }
     .entry:hover .row-title, .entry:hover .chev { color: var(--color-primary); } /* PTA 列表项：悬停标题转主色 */
 
-    /* 主开关行：面板锚点，两行文案随开关切换 */
-    .master { min-height: 48px; }
-    .master .row-title { font-weight: 500; }
-    .master .row-leading { flex-direction: column; gap: 0; align-items: stretch; }
+    /* 两行行（标题 + 说明）：主开关行与提醒页的通道行同款 */
+    .row-lg { min-height: 48px; }
+    .row-lg .row-title { font-weight: 500; }
+    .row-lg .row-leading { flex-direction: column; gap: 0; align-items: stretch; }
     .master:has(#enabled:checked) { background: var(--bg-light); }
     .when-on, .when-off { display: none; font-size: 13px; line-height: 16px; color: var(--text-lightest); }
     .master:has(#enabled:checked) .when-on { display: block; }
@@ -159,14 +159,12 @@
     .switch:disabled { opacity: .6; cursor: not-allowed; }
 
     /* ---------- 字段 ---------- */
+    /* 区块标题：提醒页按通道分块（浏览器提醒 / 邮件提醒 / 全局设置），块内一眼看出测试按钮属于哪条通道 */
+    .block-head { padding: 10px 12px 2px; font-size: 13px; line-height: 16px; font-weight: 500; color: var(--text-light); }
     .block { padding: 8px 12px; }
+    .block-actions { padding: 0 12px 10px; }
     .field + .field { margin-top: 8px; }
     .field-label { display: block; margin-bottom: 4px; font-size: 13px; line-height: 16px; color: var(--text-light); }
-    .pair { display: flex; gap: 8px; align-items: flex-start; }
-    .pair .field { min-width: 0; margin-top: 0; }
-    /* 服务器地址天生比邮箱短，左列定宽，把宽度让给邮箱的占位符 */
-    .pair .field:first-child { flex: 0 0 112px; }
-    .pair .field:last-child { flex: 1 1 auto; }
     input[type="text"], textarea {
       width: 100%; padding: 5px 12px; height: 32px;
       border: 1px solid var(--input-border); border-radius: 4px;
@@ -198,15 +196,11 @@
     .btn-solid { background: var(--color-primary); color: var(--text-white); }
     .btn-outline { border-color: currentColor; }
     .btn-block { width: 100%; }
-    .block > .btn-block { margin-top: 8px; }
-    .test-row { display: flex; gap: 8px; }
-    .test-row .btn { min-width: 150px; flex: 1 1 0; padding: 0 10px; } /* 等宽：冷却期文案变长也不跳 */
+    .block > .btn-block, .block-actions > .btn-block { margin-top: 8px; }
 
-    /* ---------- 状态位（结果反馈与冷却提示共用） ---------- */
-    .status {
-      display: block; margin: 8px 12px 0; min-height: 16px;
-      font-size: 13px; line-height: 16px; color: var(--text-light);
-    }
+    /* ---------- 状态位（各测试按钮正下方各留一个；空着不占位，反馈出现时页面才长） ---------- */
+    .status { display: block; font-size: 13px; line-height: 16px; color: var(--text-light); }
+    .status:not(:empty) { margin-top: 8px; }
     .status.ok { color: var(--color-pass); }
     .status.err { color: var(--color-danger); }
 
@@ -250,7 +244,7 @@
   <div class="pages" id="pages">
     <section class="page is-active" id="page-main" aria-label="设置">
       <div class="card">
-        <label class="row master" for="enabled">
+        <label class="row row-lg master" for="enabled">
           <span class="row-leading">
             <span class="row-title">启用增强</span>
             <span class="when-on">列表页按下方配置增强</span>
@@ -319,42 +313,51 @@
 
     <section class="page" id="page-reminders" aria-label="题目关闭倒计时提醒">
       <div class="card">
-        <label class="row">
-          <span class="row-leading"><span class="row-title">浏览器通知</span><span class="row-hint" id="notifyState" title="零配置：数据只留在本机，浏览器在运行就能弹出">零配置 · 本机弹窗</span></span>
+        <label class="row row-lg">
+          <span class="row-leading">
+            <span class="row-title">浏览器提醒</span>
+            <span class="row-hint" id="notifyState" title="零配置：数据只留在本机，浏览器在运行就能弹出">零配置 · 本机弹窗</span>
+          </span>
           <input type="checkbox" class="switch" id="reminderBrowser" checked>
         </label>
-        <label class="row">
-          <span class="row-leading"><span class="row-title">邮件提醒</span><span class="row-hint">需自建服务</span></span>
+        <div class="block-actions">
+          <button type="button" id="testNotify" class="btn btn-outline btn-block">发送测试通知</button>
+          <p class="status" id="notifyStatus" role="status" aria-live="polite"></p>
+        </div>
+      </div>
+
+      <div class="card">
+        <label class="row row-lg">
+          <span class="row-leading">
+            <span class="row-title">邮件提醒</span>
+            <span class="row-hint">需自建服务</span>
+          </span>
           <input type="checkbox" class="switch" id="reminderEmailEnabled" checked>
         </label>
+        <div class="block">
+          <div class="field">
+            <label class="field-label" for="reminderServer">提醒服务器</label>
+            <input type="text" id="reminderServer" placeholder="ip:port" autocomplete="off" spellcheck="false" title="自建后端地址；配置了令牌时写作 ip:port/令牌">
+          </div>
+          <div class="field">
+            <label class="field-label" for="reminderEmail">接收邮箱</label>
+            <input type="text" id="reminderEmail" placeholder="you@example.com" autocomplete="off" spellcheck="false">
+          </div>
+          <p class="hint">打开 PTA 时自动同步；提前 3 天 / 1 天各发一封，地址与邮箱都填齐才算开启。</p>
+        </div>
+        <div class="block-actions">
+          <button type="button" id="testReminder" class="btn btn-outline btn-block">测试邮件</button>
+          <p class="status" id="reminderStatus" role="status" aria-live="polite"></p>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="block-head">全局设置</div>
         <label class="row">
           <span class="row-leading"><span class="row-title">已完成的不再提醒</span><span class="row-hint">考试型 · 有提交即算</span></span>
           <input type="checkbox" class="switch" id="reminderSkipDone" checked>
         </label>
       </div>
-
-      <div class="card">
-        <div class="block">
-          <div class="pair">
-            <div class="field">
-              <label class="field-label" for="reminderServer">提醒服务器</label>
-              <input type="text" id="reminderServer" placeholder="ip:port" autocomplete="off" spellcheck="false" title="自建后端地址；配置了令牌时写作 ip:port/令牌">
-            </div>
-            <div class="field">
-              <label class="field-label" for="reminderEmail">接收邮箱</label>
-              <input type="text" id="reminderEmail" placeholder="you@example.com" autocomplete="off" spellcheck="false">
-            </div>
-          </div>
-          <p class="hint">打开 PTA 时自动同步；提前 3 天 / 1 天各发一封，地址与邮箱都填齐才算开启。</p>
-        </div>
-        <div class="block">
-          <div class="test-row">
-            <button type="button" id="testNotify" class="btn btn-solid">发送测试通知</button>
-            <button type="button" id="testReminder" class="btn btn-outline">测试邮件</button>
-          </div>
-        </div>
-      </div>
-      <p class="status" id="reminderStatus" role="status" aria-live="polite"></p>
     </section>
 
     <section class="page" id="page-rules" aria-label="课程识别与高级规则">
@@ -386,7 +389,9 @@
           <input type="file" id="importFile" accept="application/json,.json" hidden>
         </div>
       </div>
-      <p class="status" id="backupStatus" role="status" aria-live="polite"></p>
+      <div class="block-actions">
+        <p class="status" id="backupStatus" role="status" aria-live="polite"></p>
+      </div>
     </section>
   </div>
 

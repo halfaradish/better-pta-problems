@@ -193,7 +193,7 @@
     }
     el.classList.remove("warn");
     const on = [];
-    if ($("reminderBrowser").checked) on.push("\u6D4F\u89C8\u5668\u901A\u77E5");
+    if ($("reminderBrowser").checked) on.push("\u6D4F\u89C8\u5668\u63D0\u9192");
     if ($("reminderEmailEnabled").checked && $("reminderServer").value.trim() && $("reminderEmail").value.trim()) on.push("\u90AE\u4EF6\u63D0\u9192");
     el.textContent = on.length ? on.join(" \xB7 ") : "\u4E24\u4E2A\u901A\u9053\u90FD\u5DF2\u5173\u95ED";
   }
@@ -306,25 +306,32 @@
     }
     renderRemindersSummary();
   }
-  var showReminderStatus = (text, cls) => {
-    const status = $("reminderStatus");
-    status.textContent = text;
-    status.className = "status" + (cls ? " " + cls : "");
+  var setStatus = (el, text, cls) => {
+    el.textContent = text;
+    el.className = "status" + (cls ? " " + cls : "");
   };
+  var showNotifyStatus = (text, cls) => setStatus($("notifyStatus"), text, cls);
+  var showReminderStatus = (text, cls) => setStatus($("reminderStatus"), text, cls);
+  function sendToBackground(msg, ms = 12e3) {
+    return Promise.race([
+      chrome.runtime.sendMessage(msg),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("\u540E\u53F0\u6CA1\u6709\u54CD\u5E94\uFF0C\u8BF7\u91CD\u8BD5")), ms))
+    ]);
+  }
   $("testNotify").addEventListener("click", async () => {
     if (notifyBusy || $("testNotify").disabled) return;
     notifyBusy = true;
     try {
-      showReminderStatus("\u53D1\u9001\u4E2D\u2026");
-      const res = await chrome.runtime.sendMessage({ type: "BPS_NOTIFY_TEST" });
+      showNotifyStatus("\u53D1\u9001\u4E2D\u2026");
+      const res = await sendToBackground({ type: "BPS_NOTIFY_TEST" });
       if (res?.ok) {
-        showReminderStatus("\u5DF2\u53D1\u9001\uFF0C\u770B\u770B\u7CFB\u7EDF\u901A\u77E5", "ok");
+        showNotifyStatus("\u5DF2\u53D1\u9001\uFF1B\u6CA1\u5F39\u6A2A\u5E45\u5C31\u53BB\u7CFB\u7EDF\u901A\u77E5\u4E2D\u5FC3\u627E", "ok");
         checkNotifyPermission();
       } else {
-        showReminderStatus("\u5931\u8D25\uFF1A" + (res?.error || "\u672A\u77E5\u9519\u8BEF"), "err");
+        showNotifyStatus("\u5931\u8D25\uFF1A" + (res?.error || "\u672A\u77E5\u9519\u8BEF"), "err");
       }
     } catch (err) {
-      showReminderStatus("\u5931\u8D25\uFF1A" + (err?.message || err), "err");
+      showNotifyStatus("\u5931\u8D25\uFF1A" + (err?.message || err), "err");
     } finally {
       notifyBusy = false;
     }
@@ -372,7 +379,7 @@
       } catch (_) {
       }
       startTestCooldown(TEST_COOLDOWN_MS / 1e3);
-      const res = await chrome.runtime.sendMessage({ type: "BPS_TEST", server, email });
+      const res = await sendToBackground({ type: "BPS_TEST", server, email });
       if (res?.ok) showReminderStatus("\u5DF2\u53D1\u9001\uFF0C\u8BF7\u67E5\u6536", "ok");
       else showReminderStatus("\u5931\u8D25\uFF1A" + (res?.error || "\u672A\u77E5\u9519\u8BEF"), "err");
     } catch (err) {
