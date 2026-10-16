@@ -18,12 +18,16 @@
     // 点开题目集在新标签页打开（绕过 PTA 的 SPA 同页跳转）
     progress: true,
     // 考试型题目集的答题状态胶囊（顶替原生「已开放」，见 content/progress.js）
-    reminderEnabled: true,
-    // 题目关闭邮件提醒总开关（与下面两项配置配合；关闭即暂停同步）
+    // 题目关闭提醒的两个通道（v7 起拆开）：浏览器通知零配置，邮件需自建后端。
+    // 注意：v6 及以前的「启用邮件提醒」总开关（reminderEnabled）由迁移更名为 reminderEmailEnabled
+    reminderBrowser: true,
+    // 浏览器通知通道（纯本地；关闭即不再落盘与弹通知）
+    reminderEmailEnabled: true,
+    // 邮件提醒通道开关；需服务器地址与邮箱齐备才真正生效
     reminderSkipDone: true,
-    // 已完成的题目集不再提醒：推送订阅时剔除已全部提交/判分的条目（口径见 content/reminders.js）
+    // 已完成的题目集不再提醒：推送时剔除已全部提交/判分的条目（口径见 content/reminders.js）
     reminderServer: "",
-    // 邮件提醒后端地址（ip:port，可加 /令牌 后缀）；空 = 关闭
+    // 邮件提醒后端地址（ip:port，可加 /令牌 后缀）；空 = 邮件通道未配置
     reminderEmail: "",
     // 提醒邮件接收邮箱
     // 自动答题（实验）：入口为题目页的悬浮球面板（弹窗只留总开关），见 docs/自动答题初探.md §9
@@ -46,7 +50,7 @@
     settingsVersion: 0
     // 0 = 旧版设置；v4 起「列表/分组」不再持久化（改为按路由的会话内状态）
   };
-  var SETTINGS_VERSION = 6;
+  var SETTINGS_VERSION = 7;
   var HAS_CHROME_STORAGE = typeof chrome !== "undefined" && !!chrome.storage?.sync;
   function needsMigration(raw) {
     return (raw?.settingsVersion || 0) < SETTINGS_VERSION;
@@ -59,6 +63,8 @@
         s.autoAnswerApiKeys = { ...s.autoAnswerApiKeys || {}, [s.autoAnswerGateway || "deepseek"]: s.autoAnswerApiKey };
       }
       delete s.autoAnswerApiKey;
+      s.reminderEmailEnabled = typeof raw?.reminderEnabled === "boolean" ? raw.reminderEnabled : s.reminderEmailEnabled !== false;
+      delete s.reminderEnabled;
       s.settingsVersion = SETTINGS_VERSION;
     }
     return s;
@@ -122,17 +128,97 @@
   var $ = (id) => document.getElementById(id);
   var stored = { ...DEFAULTS };
   var hasChrome = HAS_CHROME_STORAGE;
+  var PAGE_TITLES = {
+    reminders: "\u9898\u76EE\u5173\u95ED\u5012\u8BA1\u65F6\u63D0\u9192",
+    rules: "\u8BFE\u7A0B\u8BC6\u522B\u4E0E\u9AD8\u7EA7\u89C4\u5219",
+    backup: "\u914D\u7F6E\u5BFC\u5165\u5BFC\u51FA"
+  };
+  var pageEls = {
+    main: $("page-main"),
+    reminders: $("page-reminders"),
+    rules: $("page-rules"),
+    backup: $("page-backup")
+  };
+  var pagesBox = $("pages");
+  var currentPage = "main";
+  var entryFocus = null;
+  function syncPageHeight() {
+    const el = pageEls[currentPage];
+    if (el) pagesBox.style.height = el.offsetHeight + "px";
+  }
+  function showPage(name, { focusBack = true } = {}) {
+    const next = pageEls[name] ? name : "main";
+    if (next === currentPage) return;
+    currentPage = next;
+    const isMain = next === "main";
+    $("headMain").hidden = !isMain;
+    $("headPage").hidden = isMain;
+    if (!isMain) $("pageTitle").textContent = PAGE_TITLES[next];
+    for (const [k, el] of Object.entries(pageEls)) el.classList.toggle("is-active", k === next);
+    syncPageHeight();
+    if (isMain) {
+      if (entryFocus && document.contains(entryFocus)) entryFocus.focus({ preventScroll: true });
+    } else if (focusBack) {
+      $("pageBack").focus({ preventScroll: true });
+    }
+  }
+  for (const el of document.querySelectorAll(".entry")) {
+    el.addEventListener("click", () => {
+      entryFocus = el;
+      showPage(el.dataset.goto);
+    });
+  }
+  $("pageBack").addEventListener("click", () => showPage("main"));
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && currentPage !== "main") {
+      e.preventDefault();
+      showPage("main");
+    }
+  });
+  for (const el of Object.values(pageEls)) {
+    new ResizeObserver((entries) => {
+      if (entries.some((entry) => entry.target === pageEls[currentPage])) syncPageHeight();
+    }).observe(el);
+  }
+  window.addEventListener("resize", syncPageHeight);
+  pagesBox.classList.add("js-ready");
+  syncPageHeight();
+  var notifyDenied = false;
+  function renderRemindersSummary() {
+    const el = $("remindersSummary");
+    if (notifyDenied && $("reminderBrowser").checked) {
+      el.textContent = "\u7CFB\u7EDF\u901A\u77E5\u5DF2\u5173";
+      el.classList.add("warn");
+      return;
+    }
+    el.classList.remove("warn");
+    const on = [];
+    if ($("reminderBrowser").checked) on.push("\u6D4F\u89C8\u5668\u901A\u77E5");
+    if ($("reminderEmailEnabled").checked && $("reminderServer").value.trim() && $("reminderEmail").value.trim()) on.push("\u90AE\u4EF6\u63D0\u9192");
+    el.textContent = on.length ? on.join(" \xB7 ") : "\u4E24\u4E2A\u901A\u9053\u90FD\u5DF2\u5173\u95ED";
+  }
+  function renderRulesSummary() {
+    const n = $("rules").value.split("\n").filter((line) => line.trim()).length;
+    $("rulesSummary").textContent = n ? `${n} \u6761\u81EA\u5B9A\u4E49\u89C4\u5219` : "\u81EA\u52A8\u8BC6\u522B";
+  }
+  function renderEntrySummaries() {
+    renderRemindersSummary();
+    renderRulesSummary();
+  }
   async function load() {
     stored = await loadSettings();
     for (const k of ["enabled", "badge", "countdown", "mergeSimilar", "openInNewTab", "progress"]) $(k).checked = !!stored[k];
     $("separators").value = stored.separators;
     $("rules").value = stored.rules || "";
-    $("reminderEnabled").checked = stored.reminderEnabled !== false;
+    $("reminderBrowser").checked = stored.reminderBrowser !== false;
+    $("reminderEmailEnabled").checked = stored.reminderEmailEnabled !== false;
     $("reminderSkipDone").checked = stored.reminderSkipDone !== false;
     $("reminderServer").value = stored.reminderServer || "";
     $("reminderEmail").value = stored.reminderEmail || "";
-    applyReminderEnabled();
+    applyReminderSwitches();
     resumeTestCooldown();
+    checkNotifyPermission();
+    renderEntrySummaries();
     $("autoAnswer").checked = !!stored.autoAnswer;
   }
   function collect() {
@@ -145,7 +231,8 @@
       progress: $("progress").checked,
       separators: $("separators").value.trim() || DEFAULTS.separators,
       rules: $("rules").value.trim(),
-      reminderEnabled: $("reminderEnabled").checked,
+      reminderBrowser: $("reminderBrowser").checked,
+      reminderEmailEnabled: $("reminderEmailEnabled").checked,
       reminderSkipDone: $("reminderSkipDone").checked,
       reminderServer: $("reminderServer").value.trim(),
       reminderEmail: $("reminderEmail").value.trim(),
@@ -161,12 +248,15 @@
   var testCooldownUntil = 0;
   var countdownTimer = null;
   var testBusy = false;
-  function applyReminderEnabled() {
-    const on = $("reminderEnabled").checked;
-    $("reminderSkipDone").disabled = !on;
-    $("reminderServer").disabled = !on;
-    $("reminderEmail").disabled = !on;
-    $("testReminder").disabled = !on || Date.now() < testCooldownUntil;
+  var notifyBusy = false;
+  function applyReminderSwitches() {
+    const emailOn = $("reminderEmailEnabled").checked;
+    const anyOn = emailOn || $("reminderBrowser").checked;
+    $("reminderSkipDone").disabled = !anyOn;
+    $("reminderServer").disabled = !emailOn;
+    $("reminderEmail").disabled = !emailOn;
+    $("testReminder").disabled = !emailOn || Date.now() < testCooldownUntil;
+    $("testNotify").disabled = !$("reminderBrowser").checked;
   }
   function readTestSentAt() {
     try {
@@ -185,63 +275,114 @@
         clearInterval(countdownTimer);
         countdownTimer = null;
         testCooldownUntil = 0;
-        $("testReminder").textContent = "\u53D1\u9001\u6D4B\u8BD5\u90AE\u4EF6";
-        applyReminderEnabled();
+        $("testReminder").textContent = "\u6D4B\u8BD5\u90AE\u4EF6";
+        applyReminderSwitches();
       } else {
         $("testReminder").textContent = `\u51B7\u5374\u4E2D\uFF08${left}s\uFF09`;
       }
     }, 1e3);
-    applyReminderEnabled();
+    applyReminderSwitches();
   }
   async function resumeTestCooldown() {
     const sentAt = await readTestSentAt();
     const left = Math.ceil((sentAt + TEST_COOLDOWN_MS - Date.now()) / 1e3);
     if (left > 0) startTestCooldown(left);
   }
+  async function checkNotifyPermission() {
+    const state = $("notifyState");
+    notifyDenied = false;
+    try {
+      notifyDenied = await chrome.notifications.getPermissionLevel() === "denied";
+    } catch (_) {
+    }
+    if (notifyDenied) {
+      state.textContent = "\u7CFB\u7EDF\u901A\u77E5\u5DF2\u5173";
+      state.classList.add("warn");
+      state.title = "\u7CFB\u7EDF\u672A\u5141\u8BB8\u6D4F\u89C8\u5668\u53D1\u9001\u901A\u77E5\uFF08\u7CFB\u7EDF\u8BBE\u7F6E\u6216\u4E13\u6CE8\u52A9\u624B\uFF09\uFF0C\u901A\u77E5\u4E0D\u4F1A\u5F39\u51FA";
+    } else {
+      state.textContent = "\u96F6\u914D\u7F6E \xB7 \u672C\u673A\u5F39\u7A97";
+      state.classList.remove("warn");
+      state.title = "\u96F6\u914D\u7F6E\uFF1A\u6570\u636E\u53EA\u7559\u5728\u672C\u673A\uFF0C\u6D4F\u89C8\u5668\u5728\u8FD0\u884C\u5C31\u80FD\u5F39\u51FA";
+    }
+    renderRemindersSummary();
+  }
+  var showReminderStatus = (text, cls) => {
+    const status = $("reminderStatus");
+    status.textContent = text;
+    status.className = "status" + (cls ? " " + cls : "");
+  };
+  $("testNotify").addEventListener("click", async () => {
+    if (notifyBusy || $("testNotify").disabled) return;
+    notifyBusy = true;
+    try {
+      showReminderStatus("\u53D1\u9001\u4E2D\u2026");
+      const res = await chrome.runtime.sendMessage({ type: "BPS_NOTIFY_TEST" });
+      if (res?.ok) {
+        showReminderStatus("\u5DF2\u53D1\u9001\uFF0C\u770B\u770B\u7CFB\u7EDF\u901A\u77E5", "ok");
+        checkNotifyPermission();
+      } else {
+        showReminderStatus("\u5931\u8D25\uFF1A" + (res?.error || "\u672A\u77E5\u9519\u8BEF"), "err");
+      }
+    } catch (err) {
+      showReminderStatus("\u5931\u8D25\uFF1A" + (err?.message || err), "err");
+    } finally {
+      notifyBusy = false;
+    }
+  });
   for (const k of ["enabled", "badge", "countdown", "mergeSimilar", "openInNewTab", "progress", "autoAnswer"]) $(k).addEventListener("change", save);
   $("separators").addEventListener("input", save);
-  $("rules").addEventListener("input", save);
-  $("reminderServer").addEventListener("input", save);
-  $("reminderEmail").addEventListener("input", save);
-  $("reminderEnabled").addEventListener("change", () => {
+  $("rules").addEventListener("input", () => {
     save();
-    applyReminderEnabled();
+    renderRulesSummary();
+  });
+  $("reminderServer").addEventListener("input", () => {
+    save();
+    renderRemindersSummary();
+  });
+  $("reminderEmail").addEventListener("input", () => {
+    save();
+    renderRemindersSummary();
+  });
+  $("reminderBrowser").addEventListener("change", () => {
+    save();
+    applyReminderSwitches();
+    renderRemindersSummary();
+  });
+  $("reminderEmailEnabled").addEventListener("change", () => {
+    save();
+    applyReminderSwitches();
+    renderRemindersSummary();
   });
   $("reminderSkipDone").addEventListener("change", save);
   $("testReminder").addEventListener("click", async () => {
     if (testBusy || $("testReminder").disabled) return;
     testBusy = true;
     try {
-      const status = $("reminderStatus");
-      const show = (text, cls) => {
-        status.textContent = text;
-        status.className = "status" + (cls ? " " + cls : "");
-      };
       const server = $("reminderServer").value.trim();
       const email = $("reminderEmail").value.trim();
-      if (!server) return show("\u8BF7\u5148\u586B\u5199\u670D\u52A1\u5668\u5730\u5740", "err");
-      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return show("\u90AE\u7BB1\u683C\u5F0F\u4E0D\u6B63\u786E", "err");
+      if (!server) return showReminderStatus("\u8BF7\u5148\u586B\u5199\u670D\u52A1\u5668\u5730\u5740", "err");
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return showReminderStatus("\u90AE\u7BB1\u683C\u5F0F\u4E0D\u6B63\u786E", "err");
       const sentAt = await readTestSentAt();
       const waitLeft = Math.ceil((sentAt + TEST_COOLDOWN_MS - Date.now()) / 1e3);
-      if (waitLeft > 0) return show(`\u8BF7 ${waitLeft} \u79D2\u540E\u518D\u8BD5`, "err");
+      if (waitLeft > 0) return showReminderStatus(`\u8BF7 ${waitLeft} \u79D2\u540E\u518D\u8BD5`, "err");
       save();
-      show("\u53D1\u9001\u4E2D\u2026");
+      showReminderStatus("\u53D1\u9001\u4E2D\u2026");
       try {
         await chrome.storage.session.set({ testSentAt: Date.now() });
       } catch (_) {
       }
       startTestCooldown(TEST_COOLDOWN_MS / 1e3);
       const res = await chrome.runtime.sendMessage({ type: "BPS_TEST", server, email });
-      if (res?.ok) show("\u5DF2\u53D1\u9001\uFF0C\u8BF7\u67E5\u6536", "ok");
-      else show("\u5931\u8D25\uFF1A" + (res?.error || "\u672A\u77E5\u9519\u8BEF"), "err");
+      if (res?.ok) showReminderStatus("\u5DF2\u53D1\u9001\uFF0C\u8BF7\u67E5\u6536", "ok");
+      else showReminderStatus("\u5931\u8D25\uFF1A" + (res?.error || "\u672A\u77E5\u9519\u8BEF"), "err");
     } catch (err) {
-      $("reminderStatus").textContent = "\u5931\u8D25\uFF1A" + (err?.message || err);
-      $("reminderStatus").className = "status err";
+      showReminderStatus("\u5931\u8D25\uFF1A" + (err?.message || err), "err");
     } finally {
       testBusy = false;
     }
   });
   $("reset").addEventListener("click", async () => {
+    if (!confirm("\u6062\u590D\u9ED8\u8BA4\u5C06\u628A\u5168\u90E8\u8BBE\u7F6E\u91CD\u7F6E\u4E3A\u521D\u59CB\u503C\uFF08\u542B\u5404\u670D\u52A1 API Key\uFF09\uFF0C\u786E\u5B9A\uFF1F")) return;
     if (hasChrome) await saveSettings({ ...DEFAULTS });
     load();
   });

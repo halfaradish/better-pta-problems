@@ -5,164 +5,225 @@
   <meta name="color-scheme" content="light dark">
   <title>更好的题目集</title>
   <style>
+    /* 设计令牌：2026-10-16 实测自 pintia.cn（:root / .dark 变量与 .pc-button、输入框、菜单浮层等组件 CSS）。
+       改色、改圆角、改时长前请回 PTA 页面复核，不要凭印象调。 */
     :root {
       color-scheme: light dark;
-      --bg: #ffffff;
-      --hairline: #eceff2;
-      --text: #242a32;
-      --text-2: #5c6672;
-      --text-3: #6f7a88;
-      --accent: #0a4991;
-      --accent-strong: #0a4991;
-      --accent-fill: #0a4991;
-      --accent-soft: #e8f0fa;
-      --accent-ring: rgba(10, 73, 145, .16);
-      --input-bg: #f6f8fa;
-      --input-border: #dfe3e8;
-      --switch-off: #d6dbe1;
-      --ok: #2b8a3e;
-      --err: #e03131;
+      --bg-site: hsl(204, 24%, 95%);
+      --bg-base: hsl(0, 0%, 100%);
+      --bg-light: hsl(211, 20%, 97%);
+      --bg-normal: hsl(211, 20%, 93%);
+      --border-all: hsla(0, 0%, 0%, .06);
+      --color-primary: hsl(212, 89%, 53%);
+      --color-pass: hsl(100, 60%, 47%);
+      --color-danger: hsl(3, 68%, 53%);
+      --text-darkest: hsl(0, 0%, 0%);
+      --text-dark: hsl(0, 0%, 10%);
+      --text-normal: hsl(0, 0%, 25%);
+      --text-light: hsl(0, 0%, 45%);
+      --text-lightest: hsl(0, 0%, 60%);
+      --text-white: hsl(0, 0%, 100%);
+      --input-border: #ced4da;          /* PTA 输入框边框（PTA 源码里是字面量，不是变量） */
+      --ring: rgba(10, 73, 145, .25);   /* PTA 输入框聚焦环色（同样是字面量） */
+      --trs-fast: .15s;
+      --trs-normal: .2s;
+      --ease: cubic-bezier(.4, 0, .2, 1);
+      --card-shadow: 0 1px 2px rgba(0, 0, 0, .05);
     }
     @media (prefers-color-scheme: dark) {
       :root {
-        --bg: #1a1c20;
-        --hairline: #2a2d33;
-        --text: #e9ebee;
-        --text-2: #a8b0bb;
-        --text-3: #8d96a3;
-        --accent: #79aaee;
-        --accent-strong: #8fbbf3;
-        --accent-fill: #2b6cb8;
-        --accent-soft: rgba(88, 140, 220, .2);
-        --accent-ring: rgba(121, 170, 238, .28);
-        --input-bg: #22252b;
-        --input-border: #34383f;
-        --switch-off: #3a3f47;
-        --ok: #55c07a;
-        --err: #f47067;
+        /* PTA 的暗色由 .dark 类切换，这里是它的 .dark 取值改为跟随系统 */
+        --bg-site: hsl(0, 0%, 20%);
+        --bg-base: hsl(0, 0%, 25%);
+        --bg-light: hsl(0, 0%, 28%);
+        --bg-normal: hsl(0, 0%, 31%);
+        --border-all: hsla(0, 0%, 100%, .06);
+        --color-primary: hsl(212, 100%, 60%);
+        --text-darkest: hsl(0, 0%, 100%);
+        --text-dark: hsl(0, 0%, 90%);
+        --text-normal: hsl(0, 0%, 75%);
+        --text-light: hsl(0, 0%, 60%);
+        --text-lightest: hsl(0, 0%, 50%);
+        --input-border: hsl(0, 0%, 50%);
+        --card-shadow: 0 1px 2px rgba(0, 0, 0, .18);
       }
     }
     * { box-sizing: border-box; }
+    [hidden] { display: none !important; } /* 头部两块靠 hidden 切换，别被上面的 display:flex 盖过 */
     body {
-      width: 360px; margin: 0; padding: 4px 16px 0;
-      background: var(--bg); color: var(--text);
-      font: 13px/1.5 system-ui, "Microsoft YaHei", "PingFang SC", sans-serif;
+      width: 360px; margin: 0;
+      background: var(--bg-site); color: var(--text-normal);
+      font: 15px/20px Harmony, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+        "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif;
       -webkit-font-smoothing: antialiased;
     }
-    :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-    input:focus-visible, textarea:focus-visible { outline: none; }
+    :focus-visible { outline: 2px solid var(--color-primary); outline-offset: 1px; }
+    input:focus-visible, textarea:focus-visible { outline: none; } /* PTA 输入框用边框 + 环表达聚焦 */
 
-    /* ---------- 头部 ---------- */
-    .head { display: flex; align-items: center; gap: 10px; padding-bottom: 0; }
-    .head img { width: 30px; height: 30px; border-radius: 8px; }
-    .head-title { display: flex; align-items: center; gap: 7px; font-size: 15px; font-weight: 650; letter-spacing: .01em; }
-    .ver { font-size: 11px; font-weight: 500; line-height: 17px; padding: 0 7px; border: 1px solid var(--input-border); border-radius: 9999px; background: var(--input-bg); color: var(--text-2); }
-    .head-sub { margin-top: 0; font-size: 12px; color: var(--text-3); }
+    /* ---------- 头部：主页面显示身份，子页面换成「返回 + 页名」，两者等高不跳 ---------- */
+    .head {
+      display: flex; align-items: center;
+      height: 56px; padding: 0 12px;
+      background: var(--bg-base); border-bottom: 1px solid var(--border-all);
+    }
+    .head-id { display: flex; align-items: center; gap: 10px; padding-left: 4px; }
+    .head-id img { width: 30px; height: 30px; border-radius: 8px; }
+    .head-title { display: flex; align-items: center; gap: 7px; font-size: 15px; font-weight: 500; }
+    .ver {
+      padding: 0 7px; border-radius: 9999px; background: var(--bg-light);
+      font-size: 11px; font-weight: 400; line-height: 17px; color: var(--text-lightest);
+    }
+    .head-sub { font-size: 13px; line-height: 16px; color: var(--text-lightest); }
+    .head-page { display: flex; align-items: center; gap: 4px; min-width: 0; }
+    .icon-btn {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 32px; height: 32px; flex: none; padding: 0;
+      border: 0; border-radius: 8px; background: none; color: var(--text-normal); cursor: pointer;
+      transition: background var(--trs-fast) var(--ease), color var(--trs-fast) var(--ease);
+    }
+    .icon-btn:hover { background: var(--bg-light); color: var(--color-primary); }
+    .page-title {
+      margin: 0; font-size: 15px; font-weight: 700; line-height: 20px; color: var(--text-normal);
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .chev { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
 
-    main > * + * { border-top: 1px solid var(--hairline); }
-    section, details { padding: 2px 0 3px; }
+    /* ---------- 页面栈：子页面从右往左滑入 ---------- */
+    /* .js-ready 由 popup.js 加上：脚本没跑（或报错）时四页按文档流摊开、内容照样能读，
+       而不是只剩一个空壳；堆叠定位与滑动都只在脚本接管后才启用。 */
+    .pages { position: relative; overflow: hidden; transition: height var(--trs-normal) var(--ease); }
+    .page { padding-bottom: 12px; }
+    .js-ready .page {
+      position: absolute; top: 0; left: 0; right: 0;
+      visibility: hidden; transform: translateX(100%);
+      transition: transform var(--trs-normal) var(--ease), visibility 0s linear var(--trs-normal);
+    }
+    .js-ready .page.is-active {
+      visibility: visible; transform: none;
+      transition: transform var(--trs-normal) var(--ease), visibility 0s;
+    }
+
+    /* ---------- 卡片与行 ---------- */
+    .card {
+      margin: 8px 12px 0; border-radius: 8px;
+      background: var(--bg-base); box-shadow: var(--card-shadow);
+      overflow: hidden; /* 整行悬停底色被卡片圆角裁切 */
+    }
+    .row {
+      display: flex; align-items: center; justify-content: space-between; gap: 12px;
+      width: 100%; min-height: 34px; padding: 7px 12px;
+      border: 0; background: none; text-align: left; font: inherit; color: inherit;
+      cursor: pointer; transition: background var(--trs-fast) var(--ease);
+    }
+    .row + .row, .block + .block { border-top: 1px solid var(--border-all); }
+    .row:hover { background: var(--bg-light); }
+    .row-leading { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
+    .row-title {
+      font-size: 15px; line-height: 20px; color: var(--text-normal); white-space: nowrap;
+      transition: color var(--trs-fast) var(--ease);
+    }
+    .row-hint { font-size: 13px; line-height: 16px; color: var(--text-lightest); }
+    .row-hint.warn { color: var(--color-danger); } /* 行内警告（如系统通知被关） */
+    .row-trailing { display: flex; align-items: center; gap: 6px; min-width: 0; }
+    .row-value {
+      font-size: 13px; line-height: 16px; color: var(--text-lightest);
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .row-value.warn { color: var(--color-danger); }
+    .entry:hover .row-title, .entry:hover .chev { color: var(--color-primary); } /* PTA 列表项：悬停标题转主色 */
+
+    /* 主开关行：面板锚点，两行文案随开关切换 */
+    .master { min-height: 48px; }
+    .master .row-title { font-weight: 500; }
+    .master .row-leading { flex-direction: column; gap: 0; align-items: stretch; }
+    .master:has(#enabled:checked) { background: var(--bg-light); }
+    .when-on, .when-off { display: none; font-size: 13px; line-height: 16px; color: var(--text-lightest); }
+    .master:has(#enabled:checked) .when-on { display: block; }
+    .master:not(:has(#enabled:checked)) .when-off { display: block; }
 
     /* ---------- 开关（原生 checkbox 样式化，保留键盘与读屏语义） ---------- */
     .switch {
       appearance: none; -webkit-appearance: none; flex: none;
       width: 36px; height: 20px; margin: 0; border-radius: 9999px;
-      background: var(--switch-off); cursor: pointer; position: relative;
-      transition: background .18s ease;
+      background: var(--bg-normal); cursor: pointer; position: relative;
+      transition: background var(--trs-fast) var(--ease);
     }
     .switch::after {
       content: ""; position: absolute; top: 2px; left: 2px;
       width: 16px; height: 16px; border-radius: 50%;
       background: #fff; box-shadow: 0 1px 2px rgba(0, 0, 0, .25);
-      transition: transform .18s ease;
+      transition: transform var(--trs-fast) var(--ease);
     }
-    .switch:checked { background: var(--accent-fill); }
+    .switch:checked { background: var(--color-primary); }
     .switch:checked::after { transform: translateX(16px); }
-    .switch:disabled, input:disabled, textarea:disabled, button:disabled { opacity: .45; cursor: not-allowed; }
-
-    .row { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 26px; cursor: pointer; }
-    .row .q { margin-left: 6px; font-size: 12px; color: var(--text-3); }
-
-    /* ---------- 主开关行：面板的锚点控件，开启时整行淡蓝 ---------- */
-    .master {
-      display: flex; align-items: center; justify-content: space-between; gap: 12px;
-      margin: 0 -16px; padding: 2px 16px;
-      transition: background .18s ease;
-    }
-    .master:has(#enabled:checked) { background: var(--accent-soft); }
-    .master .row-text { display: flex; flex-direction: column; }
-    .master .row-title { font-weight: 600; }
-    .when-on, .when-off { display: none; font-size: 12px; color: var(--text-2); }
-    .master:has(#enabled:checked) .when-on { display: block; }
-    .master:not(:has(#enabled:checked)) .when-off { display: block; }
-    .rows { padding: 0; }
-
-    /* ---------- 可折叠区块（课程识别） ---------- */
-    summary {
-      display: flex; align-items: center; justify-content: space-between; gap: 12px;
-      min-height: 26px; cursor: pointer; list-style: none; font-weight: 600;
-    }
-    summary::-webkit-details-marker { display: none; }
-    .caret {
-      flex: none; width: 7px; height: 7px; margin-right: 3px;
-      border-right: 1.6px solid var(--text-3); border-bottom: 1.6px solid var(--text-3);
-      transform: rotate(45deg); transition: transform .15s ease;
-    }
-    details[open] .caret { transform: rotate(225deg); }
+    .switch:disabled { opacity: .6; cursor: not-allowed; }
 
     /* ---------- 字段 ---------- */
-    .field { margin-top: 3px; }
-    .field-label { display: block; margin-bottom: 3px; font-size: 12px; color: var(--text-2); }
+    .block { padding: 8px 12px; }
+    .field + .field { margin-top: 8px; }
+    .field-label { display: block; margin-bottom: 4px; font-size: 13px; line-height: 16px; color: var(--text-light); }
+    .pair { display: flex; gap: 8px; align-items: flex-start; }
+    .pair .field { min-width: 0; margin-top: 0; }
+    /* 服务器地址天生比邮箱短，左列定宽，把宽度让给邮箱的占位符 */
+    .pair .field:first-child { flex: 0 0 112px; }
+    .pair .field:last-child { flex: 1 1 auto; }
     input[type="text"], textarea {
-      width: 100%; padding: 5px 9px;
-      border: 1px solid var(--input-border); border-radius: 8px;
-      background: var(--input-bg); color: var(--text); font: inherit;
-      transition: border-color .15s ease, background .15s ease, box-shadow .15s ease;
+      width: 100%; padding: 5px 12px; height: 32px;
+      border: 1px solid var(--input-border); border-radius: 4px;
+      background: var(--bg-base); color: var(--text-normal); font: inherit;
+      transition: border-color var(--trs-fast) var(--ease), box-shadow var(--trs-fast) var(--ease);
     }
     input[type="text"]:focus, textarea:focus {
-      outline: none; border-color: var(--accent); background: var(--bg);
-      box-shadow: 0 0 0 3px var(--accent-ring);
+      outline: none; border-color: var(--color-primary); box-shadow: 0 0 0 2px var(--ring);
     }
-    input::placeholder, textarea::placeholder { color: var(--text-3); }
-    textarea { resize: vertical; min-height: 64px; }
-    .hint { margin: 2px 0 0; font-size: 12px; color: var(--text-3); }
+    input::placeholder, textarea::placeholder { color: var(--text-lightest); font-style: italic; }
+    input:disabled, textarea:disabled {
+      background: var(--bg-light); color: var(--text-lightest); cursor: not-allowed;
+    }
+    textarea { height: auto; min-height: 64px; resize: vertical; }
+    .hint { margin: 6px 0 0; font-size: 13px; line-height: 16px; color: var(--text-lightest); }
 
-    /* ---------- 提醒区 ---------- */
-    .sec-head { font-weight: 600; margin-bottom: 2px; }
-    .test-row { display: flex; align-items: center; gap: 10px; margin-top: 2px; }
-    .status { min-width: 0; font-size: 12px; color: var(--text-2); }
-    .status.ok { color: var(--ok); font-weight: 500; }
-    .status.err { color: var(--err); }
+    /* ---------- 按钮（对齐 .pc-button：hover 压暗、按下 1px、禁用降透明） ---------- */
+    .btn {
+      display: inline-flex; align-items: center; justify-content: center; height: 32px;
+      padding: 0 15px; border: 1px solid transparent; border-radius: 4px;
+      background: none; color: var(--color-primary); font: inherit; cursor: pointer;
+      filter: brightness(var(--brightness, 1));
+      transition: all var(--trs-normal) ease;
+    }
+    .btn:not(:disabled):hover { --brightness: .85; }
+    .btn:not(:disabled):active { transform: translateY(1px); }
+    .btn:disabled { opacity: .6; cursor: not-allowed; }
+    .btn:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 1px; }
+    .btn-solid { background: var(--color-primary); color: var(--text-white); }
+    .btn-outline { border-color: currentColor; }
+    .btn-block { width: 100%; }
+    .block > .btn-block { margin-top: 8px; }
+    .test-row { display: flex; gap: 8px; }
+    .test-row .btn { min-width: 150px; flex: 1 1 0; padding: 0 10px; } /* 等宽：冷却期文案变长也不跳 */
 
-    /* ---------- 按钮 ---------- */
-    button {
-      font: inherit; padding: 5px 12px;
-      border: 1px solid var(--input-border); border-radius: 8px;
-      background: var(--bg); color: var(--text); cursor: pointer;
-      transition: border-color .15s ease, color .15s ease, background .15s ease;
+    /* ---------- 状态位（结果反馈与冷却提示共用） ---------- */
+    .status {
+      display: block; margin: 8px 12px 0; min-height: 16px;
+      font-size: 13px; line-height: 16px; color: var(--text-light);
     }
-    button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
-    .btn-primary { min-width: 100px; border-color: transparent; background: var(--accent-soft); color: var(--accent-strong); font-weight: 500; }
-    .btn-primary:hover:not(:disabled) { border-color: transparent; filter: brightness(.96); }
-    .btn-ghost { min-height: 24px; padding: 3px 10px; font-size: 12px; }
+    .status.ok { color: var(--color-pass); }
+    .status.err { color: var(--color-danger); }
 
-    /* ---------- 页脚（两行：仓库链接 / 配置管理） ---------- */
-    footer {
-      display: flex; align-items: center; justify-content: space-between; gap: 10px;
-      flex-wrap: wrap; row-gap: 0;
-      margin-top: 0; padding-top: 2px; border-top: 1px solid var(--hairline);
+    /* ---------- 页脚：仓库链接与「恢复默认」同为文字链接 ---------- */
+    .foot {
+      display: flex; align-items: center; justify-content: space-between; gap: 12px;
+      margin: 8px 12px 0;
     }
-    .foot-backup {
-      flex-basis: 100%; display: flex; align-items: center; gap: 10px;
-      margin-top: 1px; min-width: 0;
+    .link {
+      display: inline-flex; align-items: center; gap: 6px; min-width: 0; padding: 0;
+      border: 0; background: none; cursor: pointer; font: inherit;
+      font-size: 13px; line-height: 16px; color: var(--text-light); text-decoration: none;
+      transition: color var(--trs-fast) var(--ease);
     }
-    .foot-backup button { flex: none; white-space: nowrap; } /* 文案挤入时不许按钮换行，长状态文本由状态位消化 */
-    .repo {
-      display: inline-flex; align-items: center; gap: 6px; min-width: 0; min-height: 24px;
-      color: var(--text-2); font-size: 12px; text-decoration: none;
-    }
-    .repo:hover { color: var(--accent); }
-    .repo svg { flex: none; width: 14px; height: 14px; fill: currentColor; }
-    .repo span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .link:hover { color: var(--color-primary); }
+    .link svg { flex: none; width: 14px; height: 14px; fill: currentColor; }
+    .link span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
     @media (prefers-reduced-motion: reduce) {
       *, *::before, *::after { transition: none !important; }
@@ -171,83 +232,163 @@
 </head>
 <body>
   <header class="head">
-    <img src="../icons/icon48.png" alt="" width="30" height="30">
-    <div class="head-text">
-      <div class="head-title">更好的题目集 <span class="ver" id="version">v0.9.4</span></div>
-      <div class="head-sub">PTA 题目集列表增强</div>
+    <div class="head-id" id="headMain">
+      <img src="../icons/icon48.png" alt="" width="30" height="30">
+      <div class="head-text">
+        <div class="head-title">更好的题目集 <span class="ver" id="version">v0.11.0</span></div>
+        <div class="head-sub">PTA 题目集列表增强</div>
+      </div>
+    </div>
+    <div class="head-page" id="headPage" hidden>
+      <button type="button" class="icon-btn" id="pageBack" aria-label="返回">
+        <svg class="chev" viewBox="0 0 16 16" aria-hidden="true"><path d="M10 3.5 5.5 8l4.5 4.5"/></svg>
+      </button>
+      <h1 class="page-title" id="pageTitle">设置</h1>
     </div>
   </header>
 
-  <main>
-    <section class="enhance">
-      <div class="master">
-        <label class="row" for="enabled">
-          <span class="row-text">
+  <div class="pages" id="pages">
+    <section class="page is-active" id="page-main" aria-label="设置">
+      <div class="card">
+        <label class="row master" for="enabled">
+          <span class="row-leading">
             <span class="row-title">启用增强</span>
             <span class="when-on">列表页按下方配置增强</span>
             <span class="when-off">已停用，页面保持 PTA 原样</span>
           </span>
           <input type="checkbox" class="switch" id="enabled" checked>
         </label>
+        <label class="row">
+          <span class="row-leading"><span class="row-title">卡片课程徽章</span></span>
+          <input type="checkbox" class="switch" id="badge" checked>
+        </label>
+        <label class="row">
+          <span class="row-leading"><span class="row-title">截止倒计时</span><span class="row-hint">剩 7 天内显示</span></span>
+          <input type="checkbox" class="switch" id="countdown" checked>
+        </label>
+        <label class="row">
+          <span class="row-leading"><span class="row-title">同教师课程归并</span></span>
+          <input type="checkbox" class="switch" id="mergeSimilar" checked>
+        </label>
+        <label class="row">
+          <span class="row-leading"><span class="row-title">新标签页打开题目集</span></span>
+          <input type="checkbox" class="switch" id="openInNewTab" checked>
+        </label>
+        <label class="row">
+          <span class="row-leading"><span class="row-title">答题进度</span><span class="row-hint">考试型题目集</span></span>
+          <input type="checkbox" class="switch" id="progress" checked>
+        </label>
+        <label class="row">
+          <span class="row-leading"><span class="row-title">自动答题面板</span><span class="row-hint">实验 · 题目页悬浮球</span></span>
+          <input type="checkbox" class="switch" id="autoAnswer">
+        </label>
       </div>
-      <div class="rows">
-        <label class="row"><span class="row-text">卡片课程徽章</span><input type="checkbox" class="switch" id="badge" checked></label>
-        <label class="row"><span class="row-text">截止倒计时<span class="q">剩 7 天内显示</span></span><input type="checkbox" class="switch" id="countdown" checked></label>
-        <label class="row"><span class="row-text">同教师课程归并</span><input type="checkbox" class="switch" id="mergeSimilar" checked></label>
-        <label class="row"><span class="row-text">新标签页打开题目集</span><input type="checkbox" class="switch" id="openInNewTab" checked></label>
-        <label class="row"><span class="row-text">答题进度<span class="q">考试型题目集</span></span><input type="checkbox" class="switch" id="progress" checked></label>
-        <label class="row"><span class="row-text">自动答题面板<span class="q">实验 · 题目页悬浮球</span></span><input type="checkbox" class="switch" id="autoAnswer"></label>
+
+      <div class="card">
+        <button type="button" class="row entry" data-goto="reminders">
+          <span class="row-leading"><span class="row-title">题目关闭倒计时提醒</span></span>
+          <span class="row-trailing">
+            <span class="row-value" id="remindersSummary">浏览器通知</span>
+            <svg class="chev" viewBox="0 0 16 16" aria-hidden="true"><path d="M6 3.5 10.5 8 6 12.5"/></svg>
+          </span>
+        </button>
+        <button type="button" class="row entry" data-goto="rules">
+          <span class="row-leading"><span class="row-title">课程识别与高级规则</span></span>
+          <span class="row-trailing">
+            <span class="row-value" id="rulesSummary">自动识别</span>
+            <svg class="chev" viewBox="0 0 16 16" aria-hidden="true"><path d="M6 3.5 10.5 8 6 12.5"/></svg>
+          </span>
+        </button>
+        <button type="button" class="row entry" data-goto="backup">
+          <span class="row-leading"><span class="row-title">配置导入导出</span></span>
+          <span class="row-trailing">
+            <span class="row-value">JSON 配置备份</span>
+            <svg class="chev" viewBox="0 0 16 16" aria-hidden="true"><path d="M6 3.5 10.5 8 6 12.5"/></svg>
+          </span>
+        </button>
+      </div>
+
+      <footer class="foot">
+        <a class="link" href="https://github.com/halfaradish/better-pta-problems" target="_blank" rel="noreferrer" title="GitHub 仓库">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg>
+          <span>halfaradish/better-pta-problems</span>
+        </a>
+        <button type="button" class="link" id="reset">恢复默认</button>
+      </footer>
+    </section>
+
+    <section class="page" id="page-reminders" aria-label="题目关闭倒计时提醒">
+      <div class="card">
+        <label class="row">
+          <span class="row-leading"><span class="row-title">浏览器通知</span><span class="row-hint" id="notifyState" title="零配置：数据只留在本机，浏览器在运行就能弹出">零配置 · 本机弹窗</span></span>
+          <input type="checkbox" class="switch" id="reminderBrowser" checked>
+        </label>
+        <label class="row">
+          <span class="row-leading"><span class="row-title">邮件提醒</span><span class="row-hint">需自建服务</span></span>
+          <input type="checkbox" class="switch" id="reminderEmailEnabled" checked>
+        </label>
+        <label class="row">
+          <span class="row-leading"><span class="row-title">已完成的不再提醒</span><span class="row-hint">考试型 · 有提交即算</span></span>
+          <input type="checkbox" class="switch" id="reminderSkipDone" checked>
+        </label>
+      </div>
+
+      <div class="card">
+        <div class="block">
+          <div class="pair">
+            <div class="field">
+              <label class="field-label" for="reminderServer">提醒服务器</label>
+              <input type="text" id="reminderServer" placeholder="ip:port" autocomplete="off" spellcheck="false" title="自建后端地址；配置了令牌时写作 ip:port/令牌">
+            </div>
+            <div class="field">
+              <label class="field-label" for="reminderEmail">接收邮箱</label>
+              <input type="text" id="reminderEmail" placeholder="you@example.com" autocomplete="off" spellcheck="false">
+            </div>
+          </div>
+          <p class="hint">打开 PTA 时自动同步；提前 3 天 / 1 天各发一封，地址与邮箱都填齐才算开启。</p>
+        </div>
+        <div class="block">
+          <div class="test-row">
+            <button type="button" id="testNotify" class="btn btn-solid">发送测试通知</button>
+            <button type="button" id="testReminder" class="btn btn-outline">测试邮件</button>
+          </div>
+        </div>
+      </div>
+      <p class="status" id="reminderStatus" role="status" aria-live="polite"></p>
+    </section>
+
+    <section class="page" id="page-rules" aria-label="课程识别与高级规则">
+      <div class="card">
+        <div class="block">
+          <div class="field">
+            <label class="field-label" for="separators">课程名分隔符</label>
+            <input type="text" id="separators" value="--,｜,|" autocomplete="off" spellcheck="false">
+            <p class="hint">逗号分隔多个；标题命中即取前段为课程名。</p>
+          </div>
+          <div class="field">
+            <label class="field-label" for="rules">自定义规则</label>
+            <textarea id="rules" rows="4" placeholder="例如：2025- =&gt; 2025级课程" spellcheck="false"></textarea>
+            <p class="hint">每行一条「关键词=&gt;课程名」，包含匹配，优先于自动识别；无分隔符时按 作业/实验/考试/期中/复习题 等关键词识别。</p>
+          </div>
+        </div>
       </div>
     </section>
 
-    <details>
-      <summary>课程识别与高级规则<span class="caret" aria-hidden="true"></span></summary>
-      <div class="field">
-        <label class="field-label" for="separators">课程名分隔符</label>
-        <input type="text" id="separators" value="--,｜,|" autocomplete="off" spellcheck="false">
-        <p class="hint">逗号分隔多个；标题命中即取前段为课程名</p>
+    <section class="page" id="page-backup" aria-label="配置导入导出">
+      <div class="card">
+        <div class="block">
+          <p class="hint">导出全部设置为 JSON 文件（含各服务 API Key，请妥善保管）。</p>
+          <button type="button" id="exportSettings" class="btn btn-outline btn-block">导出配置</button>
+        </div>
+        <div class="block">
+          <p class="hint">从 JSON 文件导入设置，会覆盖当前全部配置。</p>
+          <button type="button" id="importSettings" class="btn btn-outline btn-block">导入配置</button>
+          <input type="file" id="importFile" accept="application/json,.json" hidden>
+        </div>
       </div>
-      <div class="field">
-        <label class="field-label" for="rules">自定义规则</label>
-        <textarea id="rules" rows="3" placeholder="例如：2025- => 2025级课程"></textarea>
-        <p class="hint">每行一条「关键词=&gt;课程名」，包含匹配，优先于自动识别；无分隔符时按 作业/实验/考试/期中/复习题 等关键词识别</p>
-      </div>
-    </details>
-
-    <section>
-      <div class="sec-head">题目关闭倒计时提醒</div>
-      <label class="row"><span class="row-text">启用邮件提醒</span><input type="checkbox" class="switch" id="reminderEnabled" checked></label>
-      <label class="row"><span class="row-text">已完成的不再提醒<span class="q">考试型 · 有提交即算</span></span><input type="checkbox" class="switch" id="reminderSkipDone" checked></label>
-      <div class="field">
-        <label class="field-label" for="reminderServer">提醒服务器</label>
-        <input type="text" id="reminderServer" placeholder="例如 123.45.67.89:8787" autocomplete="off" spellcheck="false">
-        <p class="hint">自建后端地址 ip:port，配置令牌时写作 ip:port/令牌</p>
-      </div>
-      <div class="field">
-        <label class="field-label" for="reminderEmail">接收邮箱</label>
-        <input type="text" id="reminderEmail" placeholder="you@example.com" autocomplete="off" spellcheck="false">
-        <p class="hint">打开 PTA 即自动同步；截止前 3 天、1 天各发一封</p>
-      </div>
-      <div class="test-row">
-        <button type="button" id="testReminder" class="btn-primary">发送测试邮件</button>
-        <span id="reminderStatus" class="status" role="status" aria-live="polite"></span>
-      </div>
+      <p class="status" id="backupStatus" role="status" aria-live="polite"></p>
     </section>
-  </main>
-
-  <footer>
-    <a class="repo" href="https://github.com/halfaradish/better-pta-problems" target="_blank" rel="noreferrer" title="GitHub 仓库">
-      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg>
-      <span>halfaradish/better-pta-problems</span>
-    </a>
-    <div class="foot-backup">
-      <button type="button" id="exportSettings" class="btn-ghost" title="导出全部设置为 JSON 文件（含各服务 API Key，请妥善保管）">导出配置</button>
-      <button type="button" id="importSettings" class="btn-ghost" title="从 JSON 文件导入设置（覆盖当前全部配置）">导入配置</button>
-      <button type="button" id="reset" class="btn-ghost">恢复默认</button>
-      <span id="backupStatus" class="status" role="status" aria-live="polite"></span>
-      <input type="file" id="importFile" accept="application/json,.json" hidden>
-    </div>
-  </footer>
+  </div>
 
   <script src="popup.js"></script>
 </body>
