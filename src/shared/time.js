@@ -20,6 +20,18 @@ export function fmtCloseLocal(d) {
   return hm === '00:00' ? date : `${date} ${hm}`;
 }
 
+// 「N 天前」式相对时间（检查更新等场景的简短回指）；未来或非法输入返回空串
+export function fmtAgoShort(ts, now = Date.now()) {
+  const s = Math.round((now - ts) / 1000);
+  if (!Number.isFinite(s) || s < 0) return '';
+  if (s < 60) return '刚刚';
+  const min = Math.floor(s / 60);
+  if (min < 60) return `${min} 分钟前`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr} 小时前`;
+  return `${Math.floor(hr / 24)} 天前`;
+}
+
 // 剩余时间文案；已截止或 >7 天返回 null（不显示）
 export function fmtCountdown(closeAt, now = Date.now()) {
   const ms = closeAt - now;

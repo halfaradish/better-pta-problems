@@ -47,6 +47,7 @@
         --input-border: hsl(0, 0%, 50%);
         --card-shadow: 0 1px 2px rgba(0, 0, 0, .18);
       }
+      .ver.upd { background: hsla(212, 100%, 60%, .16); }
     }
     * { box-sizing: border-box; }
     [hidden] { display: none !important; } /* 头部两块靠 hidden 切换，别被上面的 display:flex 盖过 */
@@ -72,7 +73,10 @@
     .ver {
       padding: 0 7px; border-radius: 9999px; background: var(--bg-light);
       font-size: 11px; font-weight: 400; line-height: 17px; color: var(--text-lightest);
+      transition: background var(--trs-normal) var(--ease), color var(--trs-normal) var(--ease);
     }
+    /* 发现新版本：版本胶囊点亮成主色淡底，与「检查更新」行的状态呼应 */
+    .ver.upd { background: hsla(212, 89%, 53%, .12); color: var(--color-primary); font-weight: 500; }
     .head-sub { font-size: 13px; line-height: 16px; color: var(--text-lightest); }
     .head-page { display: flex; align-items: center; gap: 4px; min-width: 0; }
     .icon-btn {
@@ -130,7 +134,18 @@
       overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     }
     .row-value.warn { color: var(--color-danger); }
-    .entry:hover .row-title, .entry:hover .chev { color: var(--color-primary); } /* PTA 列表项：悬停标题转主色 */
+    .row-value.ok { color: var(--color-pass); }
+    .row-value.upd { color: var(--color-primary); font-weight: 500; }
+    .entry:hover .row-title, .entry:hover .chev, .row-act:hover .row-title { color: var(--color-primary); } /* PTA 列表项：悬停标题转主色 */
+
+    /* 检查更新：动作行（点击触发检查，发现新版后点击改为打开发布页）。
+       与入口行同款行语法，右侧摘要随状态流动；检查中用转圈替代箭头。 */
+    .spin {
+      flex: none; width: 12px; height: 12px; border-radius: 50%;
+      border: 2px solid var(--bg-normal); border-top-color: var(--color-primary);
+      animation: bps-spin .7s linear infinite;
+    }
+    @keyframes bps-spin { to { transform: rotate(360deg); } }
 
     /* 两行行（标题 + 说明）：主开关行与提醒页的通道行同款 */
     .row-lg { min-height: 48px; }
@@ -221,6 +236,7 @@
 
     @media (prefers-reduced-motion: reduce) {
       *, *::before, *::after { transition: none !important; }
+      .spin { display: none; } /* 停不下来的转圈对减弱动效用户没有信息量，留文字「检查中…」 */
     }
   </style>
 </head>
@@ -298,6 +314,14 @@
           <span class="row-trailing">
             <span class="row-value">JSON 配置备份</span>
             <svg class="chev" viewBox="0 0 16 16" aria-hidden="true"><path d="M6 3.5 10.5 8 6 12.5"/></svg>
+          </span>
+        </button>
+        <button type="button" class="row row-act" id="checkUpdate">
+          <span class="row-leading"><span class="row-title">检查更新</span></span>
+          <span class="row-trailing">
+            <span class="spin" id="updateSpin" hidden></span>
+            <span class="row-value" id="updateValue" role="status" aria-live="polite">检查一下</span>
+            <svg class="chev" id="updateChev" viewBox="0 0 16 16" aria-hidden="true" hidden><path d="M6 3.5 10.5 8 6 12.5"/></svg>
           </span>
         </button>
       </div>

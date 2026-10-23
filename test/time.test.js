@@ -1,7 +1,7 @@
 // 关闭时间的解析与倒计时文案
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { fmtCloseLocal, fmtCountdown, parseCloseTime } from '../src/shared/time.js';
+import { fmtAgoShort, fmtCloseLocal, fmtCountdown, parseCloseTime } from '../src/shared/time.js';
 
 test('parseCloseTime：带日期与当天两种写法', () => {
   const dated = parseCloseTime('关闭时间: 2026-10-17 23:59 · 还有 3 天');
@@ -37,4 +37,14 @@ test('fmtCountdown：分档文案与等级，超 7 天或已截止不显示', ()
   assert.deepEqual(at(3 * 86400000), { text: '剩 3 天', level: 1 });
   assert.equal(at(8 * 86400000), null);
   assert.equal(at(-1000), null);
+});
+
+test('fmtAgoShort：相对时间分档，未来与非法输入不显示', () => {
+  const now = Date.parse('2026-10-24T12:00:00Z');
+  assert.equal(fmtAgoShort(now - 30 * 1000, now), '刚刚');
+  assert.equal(fmtAgoShort(now - 5 * 60000, now), '5 分钟前');
+  assert.equal(fmtAgoShort(now - 3 * 3600000, now), '3 小时前');
+  assert.equal(fmtAgoShort(now - 2 * 86400000, now), '2 天前');
+  assert.equal(fmtAgoShort(now + 1000, now), '');
+  assert.equal(fmtAgoShort(NaN, now), '');
 });

@@ -124,6 +124,42 @@
     return next;
   }
 
+  // src/shared/update.js
+  function normalizeVersion(v) {
+    return String(v || "").trim().replace(/^v/i, "").split(/[-+]/)[0];
+  }
+  function compareVersions(a, b) {
+    const pa = String(a || "").split(".").map((x) => parseInt(x, 10) || 0);
+    const pb = String(b || "").split(".").map((x) => parseInt(x, 10) || 0);
+    const len = Math.max(pa.length, pb.length);
+    for (let i = 0; i < len; i++) {
+      const d = (pa[i] || 0) - (pb[i] || 0);
+      if (d) return d < 0 ? -1 : 1;
+    }
+    return 0;
+  }
+  function pickReleaseInfo(data) {
+    const version = normalizeVersion(data && (data.tag_name || data.name));
+    if (!/^\d+(\.\d+)*$/.test(version)) return null;
+    return {
+      version,
+      url: typeof data.html_url === "string" && data.html_url ? data.html_url : "",
+      publishedAt: typeof data.published_at === "string" ? data.published_at : ""
+    };
+  }
+
+  // src/shared/time.js
+  function fmtAgoShort(ts, now = Date.now()) {
+    const s = Math.round((now - ts) / 1e3);
+    if (!Number.isFinite(s) || s < 0) return "";
+    if (s < 60) return "\u521A\u521A";
+    const min = Math.floor(s / 60);
+    if (min < 60) return `${min} \u5206\u949F\u524D`;
+    const hr = Math.floor(min / 60);
+    if (hr < 24) return `${hr} \u5C0F\u65F6\u524D`;
+    return `${Math.floor(hr / 24)} \u5929\u524D`;
+  }
+
   // src/popup/index.js
   var $ = (id) => document.getElementById(id);
   var stored = { ...DEFAULTS };
@@ -441,9 +477,154 @@
       showBackup("\u5BFC\u5165\u5931\u8D25\uFF1A" + (err?.message || "\u6587\u4EF6\u4E0D\u662F\u6709\u6548\u7684\u914D\u7F6E"), "err");
     }
   });
+  var UPDATE = {
+    API: "https://api.github.com/repos/halfaradish/better-pta-problems/releases/latest",
+    RELEASES: "https://github.com/halfaradish/better-pta-problems/releases",
+    KEY: "bpsUpdateCache",
+    TTL: 6 * 3600 * 1e3,
+    TIMEOUT: 1e4
+  };
+  var CURRENT_VERSION = (() => {
+    try {
+      return chrome.runtime.getManifest().version;
+    } catch (_) {
+      return ($("version").textContent || "").replace(/^v/, "") || "0.0.0";
+    }
+  })();
+  var updateLatest = null;
+  var updateCheckedAt = 0;
+  var updateError = "";
+  var updateChecking = false;
+  var updateAutoBusy = false;
+  function renderUpdate() {
+    const value = $("updateValue");
+    const spin = $("updateSpin");
+    const chev = $("updateChev");
+    const row = $("checkUpdate");
+    const hasUpdate = !!updateLatest && compareVersions(updateLatest.version, CURRENT_VERSION) > 0;
+    value.className = "row-value";
+    spin.toggleAttribute("hidden", !updateChecking);
+    chev.toggleAttribute("hidden", updateChecking || !!updateError || !hasUpdate);
+    $("version").classList.toggle("upd", hasUpdate);
+    let tip = "\u8FDE\u63A5 GitHub Releases \u68C0\u67E5\u65B0\u7248\u672C";
+    if (updateChecking) {
+      value.textContent = "\u68C0\u67E5\u4E2D\u2026";
+    } else if (updateError) {
+      value.textContent = "\u68C0\u67E5\u5931\u8D25";
+      value.classList.add("warn");
+      tip = `\u68C0\u67E5\u5931\u8D25\uFF1A${updateError}\uFF08\u70B9\u51FB\u91CD\u8BD5\uFF09`;
+    } else if (hasUpdate) {
+      value.textContent = `${updateLatest.version} \u53EF\u66F4\u65B0`;
+      value.classList.add("upd");
+      tip = `\u65B0\u7248\u672C v${updateLatest.version}\uFF0C\u70B9\u51FB\u6253\u5F00\u53D1\u5E03\u9875\uFF1B\u4E0B\u8F7D\u540E\u89E3\u538B\u8986\u76D6\u539F\u76EE\u5F55\u3001\u5728\u6269\u5C55\u7BA1\u7406\u9875\u5237\u65B0\u5373\u53EF\uFF0C\u8BBE\u7F6E\u4E0D\u4F1A\u4E22`;
+    } else if (updateLatest) {
+      value.textContent = "\u5DF2\u662F\u6700\u65B0";
+      value.classList.add("ok");
+      tip = `\u4E0A\u6B21\u68C0\u67E5\uFF1A${updateCheckedAt ? fmtAgoShort(updateCheckedAt) : "\u521A\u521A"}\uFF0C\u5F53\u524D\u5DF2\u662F\u6700\u65B0\u7248`;
+    } else {
+      value.textContent = "\u68C0\u67E5\u4E00\u4E0B";
+      if (updateCheckedAt) tip = `\u4E0A\u6B21\u68C0\u67E5\uFF1A${fmtAgoShort(updateCheckedAt)}\uFF0C\u70B9\u51FB\u518D\u67E5\u4E00\u6B21`;
+    }
+    row.title = tip;
+  }
+  async function fetchLatestRelease() {
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), UPDATE.TIMEOUT);
+    try {
+      const res = await fetch(UPDATE.API, {
+        headers: { Accept: "application/vnd.github+json" },
+        signal: ctl.signal
+      });
+      if (res.status === 404) throw new Error("\u4ED3\u5E93\u8FD8\u6CA1\u6709\u53D1\u5E03\u7248\u672C");
+      if (res.status === 403 && res.headers.get("x-ratelimit-remaining") === "0") {
+        throw new Error("GitHub \u63A5\u53E3\u9650\u6D41\uFF0C\u8BF7\u7A0D\u540E\u518D\u8BD5");
+      }
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      const info = pickReleaseInfo(await res.json());
+      if (!info) throw new Error("\u53D1\u5E03\u6570\u636E\u65E0\u6CD5\u8BC6\u522B");
+      return info;
+    } catch (err) {
+      if (err?.name === "AbortError") throw new Error("\u8BF7\u6C42\u8D85\u65F6\uFF0C\u8BF7\u68C0\u67E5\u7F51\u7EDC");
+      throw err;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  function applyUpdateResult(info) {
+    updateLatest = info;
+    updateCheckedAt = Date.now();
+    updateError = "";
+  }
+  async function readUpdateCache() {
+    try {
+      const cache = (await chrome.storage.local.get(UPDATE.KEY))[UPDATE.KEY];
+      return cache && cache.current === CURRENT_VERSION ? cache : null;
+    } catch (_) {
+      return null;
+    }
+  }
+  async function writeUpdateCache() {
+    try {
+      await chrome.storage.local.set({
+        [UPDATE.KEY]: { checkedAt: updateCheckedAt, latest: updateLatest, current: CURRENT_VERSION }
+      });
+    } catch (_) {
+    }
+  }
+  async function manualCheck() {
+    if (updateChecking) return;
+    updateChecking = true;
+    updateError = "";
+    renderUpdate();
+    try {
+      applyUpdateResult(await fetchLatestRelease());
+      await writeUpdateCache();
+    } catch (err) {
+      updateError = err?.message || String(err);
+    } finally {
+      updateChecking = false;
+      renderUpdate();
+    }
+  }
+  async function silentCheck() {
+    if (updateAutoBusy || updateChecking) return;
+    updateAutoBusy = true;
+    try {
+      applyUpdateResult(await fetchLatestRelease());
+      await writeUpdateCache();
+    } catch (_) {
+      return;
+    } finally {
+      updateAutoBusy = false;
+    }
+    if (!updateChecking) renderUpdate();
+  }
+  async function initUpdateCheck() {
+    const cache = await readUpdateCache();
+    if (cache) {
+      updateLatest = cache.latest || null;
+      updateCheckedAt = cache.checkedAt || 0;
+    }
+    renderUpdate();
+    if (!cache || Date.now() - (cache.checkedAt || 0) > UPDATE.TTL) silentCheck();
+  }
+  $("checkUpdate").addEventListener("click", () => {
+    if (updateChecking) return;
+    if (updateLatest && compareVersions(updateLatest.version, CURRENT_VERSION) > 0) {
+      const url = updateLatest.url || UPDATE.RELEASES;
+      try {
+        chrome.tabs.create({ url });
+      } catch (_) {
+        window.open(url, "_blank", "noreferrer");
+      }
+      return;
+    }
+    manualCheck();
+  });
   try {
     $("version").textContent = "v" + chrome.runtime.getManifest().version;
   } catch (_) {
   }
   load();
+  initUpdateCheck();
 })();

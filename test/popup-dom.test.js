@@ -54,6 +54,18 @@ test('每个入口行的 data-goto 都指向存在的页面，且标题表里有
   assert.ok(htmlIds.has('pageBack'), '缺少返回键 #pageBack');
 });
 
+test('检查更新是动作行：不进页面栈，状态件齐备', () => {
+  // 动作行点击是「检查 / 打开发布页」，不是跳子页面——绝不能带 data-goto（会混进入口行正则）
+  const row = html.match(/<button[^>]*id="checkUpdate"[^>]*>/);
+  assert.ok(row, '缺少 #checkUpdate 行');
+  assert.match(row[0], /class="row row-act"/, '应使用动作行类 row-act');
+  assert.ok(!row[0].includes('data-goto'), '检查更新行不能带 data-goto');
+  for (const id of ['updateSpin', 'updateValue', 'updateChev']) {
+    assert.ok(htmlIds.has(id), `缺少检查更新的状态件 #${id}`);
+  }
+  assert.ok(js.includes('UPDATE.API') && js.includes('releases/latest'), 'popup.js 应请求 GitHub Releases API');
+});
+
 test('弹窗里的静态版本号与 manifest 一致（非扩展环境下的回退文案）', () => {
   assert.match(html, new RegExp(`>v${manifest.version.replace(/\./g, '\\.')}<`),
     `popup.html 的版本回退文案应写成 v${manifest.version}`);

@@ -5,6 +5,8 @@ import {
   DEFAULTS, HAS_CHROME_STORAGE, SETTINGS_VERSION,
   loadSettings, migrate, sanitizeSettings, saveSettings, unwrapExport,
 } from '../shared/settings.js';
+import { compareVersions, pickReleaseInfo } from '../shared/update.js';
+import { fmtAgoShort } from '../shared/time.js';
 
 const $ = id => document.getElementById(id);
 let stored = { ...DEFAULTS };
@@ -346,5 +348,161 @@ $('importFile').addEventListener('change', async e => {
   }
 });
 
+/* ---------- 检查更新（GitHub Releases） ---------- */
+/* GitHub API 带 Access-Control-Allow-Origin: *，弹窗直连即可，不需要 host_permissions
+ * （加了反而会让已安装的扩展因权限变更在更新时被禁用等用户重新批准）。
+ * 结果存 chrome.storage.local：打开弹窗先渲染缓存结论，超过 6h 再静默复查一次——
+ * 静默检查失败不打扰（保持缓存或初始态），点行才算显式检查、失败当场报。 */
+const UPDATE = {
+  API: 'https://api.github.com/repos/halfaradish/better-pta-problems/releases/latest',
+  RELEASES: 'https://github.com/halfaradish/better-pta-problems/releases',
+  KEY: 'bpsUpdateCache',
+  TTL: 6 * 3600 * 1000,
+  TIMEOUT: 10000,
+};
+const CURRENT_VERSION = (() => {
+  try { return chrome.runtime.getManifest().version; } catch (_) {
+    return ($('version').textContent || '').replace(/^v/, '') || '0.0.0';
+  }
+})();
+
+let updateLatest = null;   // { version, url, publishedAt } | null：已知的服务端最新版
+let updateCheckedAt = 0;   // 上次成功检查的时刻
+let updateError = '';      // 只承接显式检查的失败；静默检查失败保持沉默
+let updateChecking = false;
+let updateAutoBusy = false;
+
+function renderUpdate() {
+  const value = $('updateValue');
+  const spin = $('updateSpin');
+  const chev = $('updateChev');
+  const row = $('checkUpdate');
+  const hasUpdate = !!updateLatest && compareVersions(updateLatest.version, CURRENT_VERSION) > 0;
+  value.className = 'row-value';
+  // SVGElement 没有 hidden IDL 属性（设 .hidden 只是 expando，动不了真特性），统一走 toggleAttribute
+  spin.toggleAttribute('hidden', !updateChecking);
+  chev.toggleAttribute('hidden', updateChecking || !!updateError || !hasUpdate); // 箭头只表示「点出去看发布页」
+  $('version').classList.toggle('upd', hasUpdate);
+  let tip = '连接 GitHub Releases 检查新版本';
+  if (updateChecking) {
+    value.textContent = '检查中…';
+  } else if (updateError) {
+    value.textContent = '检查失败';
+    value.classList.add('warn');
+    tip = `检查失败：${updateError}（点击重试）`;
+  } else if (hasUpdate) {
+    value.textContent = `${updateLatest.version} 可更新`;
+    value.classList.add('upd');
+    tip = `新版本 v${updateLatest.version}，点击打开发布页；下载后解压覆盖原目录、在扩展管理页刷新即可，设置不会丢`;
+  } else if (updateLatest) {
+    value.textContent = '已是最新';
+    value.classList.add('ok');
+    tip = `上次检查：${updateCheckedAt ? fmtAgoShort(updateCheckedAt) : '刚刚'}，当前已是最新版`;
+  } else {
+    value.textContent = '检查一下';
+    if (updateCheckedAt) tip = `上次检查：${fmtAgoShort(updateCheckedAt)}，点击再查一次`;
+  }
+  row.title = tip;
+}
+
+async function fetchLatestRelease() {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), UPDATE.TIMEOUT);
+  try {
+    const res = await fetch(UPDATE.API, {
+      headers: { Accept: 'application/vnd.github+json' },
+      signal: ctl.signal,
+    });
+    if (res.status === 404) throw new Error('仓库还没有发布版本');
+    if (res.status === 403 && res.headers.get('x-ratelimit-remaining') === '0') {
+      throw new Error('GitHub 接口限流，请稍后再试');
+    }
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const info = pickReleaseInfo(await res.json());
+    if (!info) throw new Error('发布数据无法识别');
+    return info;
+  } catch (err) {
+    if (err?.name === 'AbortError') throw new Error('请求超时，请检查网络');
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function applyUpdateResult(info) {
+  updateLatest = info;
+  updateCheckedAt = Date.now();
+  updateError = '';
+}
+
+async function readUpdateCache() {
+  try {
+    const cache = (await chrome.storage.local.get(UPDATE.KEY))[UPDATE.KEY];
+    return cache && cache.current === CURRENT_VERSION ? cache : null; // 版本变了（刚升级过）：旧结论作废
+  } catch (_) {
+    return null;
+  }
+}
+
+async function writeUpdateCache() {
+  try {
+    await chrome.storage.local.set({
+      [UPDATE.KEY]: { checkedAt: updateCheckedAt, latest: updateLatest, current: CURRENT_VERSION },
+    });
+  } catch (_) { /* 无扩展环境：仅本次会话内有效 */ }
+}
+
+async function manualCheck() {
+  if (updateChecking) return;
+  updateChecking = true;
+  updateError = '';
+  renderUpdate();
+  try {
+    applyUpdateResult(await fetchLatestRelease());
+    await writeUpdateCache();
+  } catch (err) {
+    updateError = err?.message || String(err);
+  } finally {
+    updateChecking = false;
+    renderUpdate();
+  }
+}
+
+async function silentCheck() {
+  if (updateAutoBusy || updateChecking) return;
+  updateAutoBusy = true;
+  try {
+    applyUpdateResult(await fetchLatestRelease());
+    await writeUpdateCache();
+  } catch (_) {
+    return; // 静默检查失败不打扰：缓存里有什么就显示什么
+  } finally {
+    updateAutoBusy = false;
+  }
+  if (!updateChecking) renderUpdate();
+}
+
+// 打开弹窗：缓存没过期直接渲染；过期（或从未查过）就静默复查一轮
+async function initUpdateCheck() {
+  const cache = await readUpdateCache();
+  if (cache) {
+    updateLatest = cache.latest || null;
+    updateCheckedAt = cache.checkedAt || 0;
+  }
+  renderUpdate();
+  if (!cache || Date.now() - (cache.checkedAt || 0) > UPDATE.TTL) silentCheck();
+}
+
+$('checkUpdate').addEventListener('click', () => {
+  if (updateChecking) return;
+  if (updateLatest && compareVersions(updateLatest.version, CURRENT_VERSION) > 0) {
+    const url = updateLatest.url || UPDATE.RELEASES;
+    try { chrome.tabs.create({ url }); } catch (_) { window.open(url, '_blank', 'noreferrer'); }
+    return;
+  }
+  manualCheck();
+});
+
 try { $('version').textContent = 'v' + chrome.runtime.getManifest().version; } catch (_) { /* 非扩展环境保留静态文案 */ }
 load();
+initUpdateCheck();
