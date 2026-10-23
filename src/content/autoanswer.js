@@ -6,12 +6,15 @@
  *
  * 运行位置在内容脚本（弹窗只是入口，关弹窗不打断）；编排与收题在同一文档内做
  * 题型切换（点侧栏类型链接走 SPA 路由，不触发整页刷新，运行状态得以保留）。
- * LLM 请求由页面上下文直发（OpenAI 兼容端点普遍允许跨域），不新增 host_permissions。
+ * LLM 请求：OpenCode Go 经后台端口转发（页面直连被 CORS 拦），其它 OpenAI 兼容
+ * 端点由页面上下文直发。
  *
  * 纯函数（parseChoiceAnswer / normalizeTF / parseFillAnswers / buildPrompt /
  * extractFromRichHtml？——DOM 相关的 collectQuestion 依赖 document，不进单测）
  * 尽量拆出来供 node:test 覆盖。
  */
+
+import { LLM_DIRECT_TIMEOUT_MS, LLM_MAX_ATTEMPTS, LLM_MAX_IDLE_ATTEMPTS, LLM_TOTAL_TIMEOUT_MS } from '../shared/llm.js';
 
 // 侧栏类型名 → exam-submissions 协议的 problemType
 export const TYPE_BY_NAME = {
@@ -33,11 +36,19 @@ const abortedError = () => {
   return err;
 };
 
+// 扩展被重载/更新后，旧内容脚本的 chrome.runtime 立即失效，任何重试都不会成功；
+// 单独成类，避免像网络错误一样白试三次（真机 7-10 报过 Extension context invalidated）。
+const isInvalidatedMessage = msg => /Extension context invalidated/i.test(String(msg || ''));
+const invalidatedError = () => {
+  const err = new Error('扩展已被重新加载或更新，当前页面无法继续请求；请刷新 PTA 页面后重跑');
+  err.kind = 'invalidated';
+  return err;
+};
+
 /* ---------- 带时限的 fetch ----------
  * 服务瘫痪的最坏型态是连接挂起不回包：fetch 无内置超时，请求能吊死几分钟，期间引擎
  * 的 worker 全停在 await、事件流一行不出——面板看似死机，发生了什么只能靠猜。
  * 第三方/慢源请求统一套时限，AbortError 转成人话错误，由调用方的前缀拼成完整日志。 */
-const CHAT_TIMEOUT_MS = 120000;  // 单次 LLM 请求 120s：慢模型的长输出别误杀，但绝不无限等
 const IMAGE_TIMEOUT_MS = 30000;  // 题图转取 30s：图源挂起不拖垮整题
 
 async function fetchBounded(url, opts = {}, ms, stopSignal) {
@@ -52,7 +63,11 @@ async function fetchBounded(url, opts = {}, ms, stopSignal) {
     return await fetch(url, { ...opts, signal: ctl.signal });
   } catch (err) {
     if (stopSignal?.aborted) throw abortedError();
-    if (err?.name === 'AbortError') throw new Error(`请求 ${Math.round(ms / 1000)}s 无响应，已按超时中断`);
+    if (err?.name === 'AbortError') {
+      const timeoutErr = new Error(`请求 ${Math.round(ms / 1000)}s 无响应，已按超时中断`);
+      timeoutErr.kind = 'timeout';
+      throw timeoutErr;
+    }
     throw err;
   } finally {
     clearTimeout(timer);
@@ -669,12 +684,24 @@ export function parseLlmErrorBody(body) {
   }
 }
 
-// 重试策略：429/5xx 与网络错误可退避重试；400/401/403/404 是配置或凭证问题，
-// 重试不会变好（指南 §6/§8.13）；用户中止立即放弃。
+// 错误分类决定重试口径（2026-10-23 真机故障后收窄）：
+// - 卡死（idle）/ 总超时（timeout）不再连试 3 次，避免每题静默 4–6 分钟；
+// - 429/5xx、网络错误、后台通道被回收可重试（最多 3 次）；
+// - 400/401/403/404 是配置或凭证问题，重试不会变好；用户中止立即放弃。
+export function classifyLlmError(err) {
+  if (!err) return 'fatal';
+  if (err.aborted || err.kind === 'abort') return 'aborted';
+  if (err.kind === 'invalidated') return 'invalidated';
+  if (err.channelClosed) return 'channel';
+  if (err.kind === 'idle') return 'idle';
+  if (err.kind === 'total' || err.kind === 'timeout') return 'timeout';
+  if (err.status == null || err.status === 0) return 'network';
+  return err.status === 429 || err.status >= 500 ? 'retry' : 'fatal';
+}
+
 export function isRetryableLlmError(err) {
-  if (!err || err.aborted) return false;
-  if (err.status == null || err.status === 0) return true;
-  return err.status === 429 || err.status >= 500;
+  const kind = classifyLlmError(err);
+  return kind === 'channel' || kind === 'idle' || kind === 'network' || kind === 'retry';
 }
 
 function httpError(status, body, logId) {
@@ -718,52 +745,74 @@ export function assertChatModel(cfg) {
 
 // OpenCode 网关不返回 CORS 头（预检直接 404），页面 fetch 必被浏览器拦下；
 // 改由 background 转发（manifest host_permissions 已覆盖 opencode.ai）。
-const hasBgFetch = typeof chrome !== 'undefined' && !!chrome.runtime?.sendMessage;
+const hasBgFetch = typeof chrome !== 'undefined' && !!chrome.runtime?.connect && !!chrome.runtime?.sendMessage;
 
-function backgroundChat(msg, timeoutMs) {
+/* 后台转发走端口（bps-llm）：首块/生成进度是多次消息，最终结果一次 done。
+ * 旧的单条 sendMessage 要横跨整段生成，worker 被回收时只剩 message channel closed；
+ * 端口模式能显式收到 onDisconnect，内容脚本据此按可重试错误处理，不再丢最后一条日志。
+ * 页面关闭/用户中止时断开端口，后台的 onDisconnect 会连带取消在途生成。 */
+export function backgroundChat(msg, { timeoutMs, signal, onProgress } = {}) {
   return new Promise((resolve, reject) => {
+    let port = null;
     let settled = false;
-    const timer = setTimeout(() => {
-      if (!settled) {
-        settled = true;
-        reject(new Error(`后台转发 ${Math.round(timeoutMs / 1000)}s 无响应`));
-      }
+    let timer = null;
+    const cleanup = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+    };
+    const finish = (fn, value) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      try { port?.disconnect(); } catch (_) { /* 已断 */ }
+      fn(value);
+    };
+    const onAbort = () => {
+      try {
+        chrome.runtime.sendMessage({ type: 'BPS_LLM_ABORT', reqId: msg.reqId }, () => { void chrome.runtime.lastError; });
+      } catch (_) { /* 后台不在也本地放弃 */ }
+      finish(reject, abortedError());
+    };
+    timer = setTimeout(() => {
+      const err = new Error(`后台转发 ${Math.round(timeoutMs / 1000)}s 无响应`);
+      err.kind = 'timeout';
+      finish(reject, err);
     }, timeoutMs + 5000);
     try {
-      chrome.runtime.sendMessage(msg, rsp => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        if (chrome.runtime.lastError) return reject(new Error(chrome.runtime.lastError.message));
-        resolve(rsp);
-      });
+      port = chrome.runtime.connect({ name: 'bps-llm' });
     } catch (err) {
-      settled = true;
-      clearTimeout(timer);
-      reject(err);
+      finish(reject, isInvalidatedMessage(err?.message) ? invalidatedError() : err);
+      return;
+    }
+    if (signal?.aborted) { onAbort(); return; }
+    signal?.addEventListener('abort', onAbort, { once: true });
+    port.onMessage.addListener(m => {
+      if (!m || settled) return;
+      if (m.type === 'progress') {
+        try { onProgress?.(m); } catch (_) { /* 面板异常不阻断 */ }
+        return;
+      }
+      if (m.type === 'done') finish(resolve, m);
+    });
+    port.onDisconnect.addListener(() => {
+      let lastMsg = '';
+      try { lastMsg = chrome.runtime.lastError?.message || ''; } catch (_) { lastMsg = 'Extension context invalidated'; }
+      if (settled) return;
+      if (isInvalidatedMessage(lastMsg)) { finish(reject, invalidatedError()); return; }
+      const err = new Error('后台转发连接被回收（service worker 重启或扩展重载）');
+      err.channelClosed = true;
+      finish(reject, err);
+    });
+    try { port.postMessage({ ...msg }); } catch (err) {
+      finish(reject, isInvalidatedMessage(err?.message) ? invalidatedError() : err);
     }
   });
 }
 
-// 后台转发没有 AbortSignal 可传：用本地竞速立即收摊，同时通知 background
-// 按 reqId 中断在途 fetch（中止按钮要求「在途请求立即断开」）。
-function raceAbort(promise, signal, onAbort) {
-  if (!signal) return promise;
-  if (signal.aborted) { onAbort?.(); return Promise.reject(abortedError()); }
-  return new Promise((resolve, reject) => {
-    const stop = () => { onAbort?.(); reject(abortedError()); };
-    signal.addEventListener('abort', stop, { once: true });
-    promise.then(
-      v => { signal.removeEventListener('abort', stop); resolve(v); },
-      e => { signal.removeEventListener('abort', stop); reject(e); },
-    );
-  });
-}
-
-async function chatViaBackground(cfg, messages) {
+async function chatViaBackground(cfg, messages, opts = {}) {
   if (!hasBgFetch) throw new Error('OpenCode Go 需要扩展后台转发，当前环境不可用');
   const reqId = 'llm-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
-  const rsp = await raceAbort(backgroundChat({
+  const rsp = await backgroundChat({
     type: 'BPS_LLM_CHAT',
     reqId,
     baseUrl: cfg.baseUrl,
@@ -771,16 +820,21 @@ async function chatViaBackground(cfg, messages) {
     model: cfg.model,
     session: sessionHeader(),
     messages,
-  }, CHAT_TIMEOUT_MS), runAbort?.signal ?? null, () => {
-    try {
-      chrome.runtime.sendMessage({ type: 'BPS_LLM_ABORT', reqId }, () => { void chrome.runtime.lastError; });
-    } catch (_) { /* 后台不在也本地放弃 */ }
+  }, {
+    timeoutMs: LLM_TOTAL_TIMEOUT_MS,
+    signal: runAbort?.signal ?? null,
+    onProgress: opts.onProgress,
   });
   if (!rsp) throw new Error('后台转发无响应');
   if (!rsp.ok) {
+    if (rsp.kind === 'abort') throw abortedError();
     if (rsp.status) throw httpError(rsp.status, rsp.text || rsp.reason || '', rsp.logId);
-    throw new Error('LLM 请求失败：' + (rsp.reason || '未知错误'));
+    const err = new Error(rsp.reason || '后台转发无响应');
+    if (rsp.kind) err.kind = rsp.kind;
+    throw err;
   }
+  // 流式成功：后台已把增量拼成整段文本；非流式（网关忽略 stream）仍是整段 JSON
+  if (typeof rsp.content === 'string') return rsp.content;
   let data = null;
   try { data = JSON.parse(rsp.text); } catch (_) { throw new Error('LLM 响应不是合法 JSON'); }
   const text = data?.choices?.[0]?.message?.content;
@@ -788,9 +842,9 @@ async function chatViaBackground(cfg, messages) {
   return text;
 }
 
-async function chatOnce(cfg, messages) {
+async function chatOnce(cfg, messages, opts = {}) {
   assertChatModel(cfg);
-  if (cfg.gateway === 'opencode') return chatViaBackground(cfg, messages);
+  if (cfg.gateway === 'opencode') return chatViaBackground(cfg, messages, opts);
   const base = normalizeBaseUrl(cfg.baseUrl);
   const res = await fetchBounded(base + '/chat/completions', {
     method: 'POST',
@@ -799,7 +853,7 @@ async function chatOnce(cfg, messages) {
       Authorization: 'Bearer ' + String(cfg.apiKey || '').trim(),
     },
     body: JSON.stringify({ model: cfg.model, temperature: 0, messages }),
-  }, CHAT_TIMEOUT_MS, runAbort?.signal ?? null);
+  }, LLM_DIRECT_TIMEOUT_MS, runAbort?.signal ?? null);
   if (!res.ok) {
     const t = await res.text().catch(() => '');
     throw httpError(res.status, t, res.headers.get('x-opencode-log-id') || '');
@@ -811,20 +865,57 @@ async function chatOnce(cfg, messages) {
   return text;
 }
 
-// 有上限的退避（指数 + 抖动）：只对可重试错误生效，最多 3 次尝试。
-const MAX_CHAT_ATTEMPTS = 3;
+// 有上限的退避（指数 + 抖动）：只对可重试错误生效；卡死/总超时不再连试 3 次。
 const retryDelay = attempt => 900 * 2 ** (attempt - 1) + Math.floor(Math.random() * 250);
 
-async function chatWithRetry(cfg, messages) {
+function shortErrText(err) {
+  return String(err?.message || err).replace(/^LLM 请求失败：/, '').slice(0, 90);
+}
+
+// 逐次尝试都记日志：此前只有首尾两行，网关卡住时中间 4–6 分钟完全静默，无法与死机区分。
+// 流式进度（首块 / 每 15s 已收字符数）也由后台经端口送上来，这里转成面板日志。
+async function chatWithRetry(cfg, messages, opts = {}) {
+  const label = opts.label ? `${opts.label}：` : '';
+  const onProgress = evt => {
+    if (evt.phase === 'stream') {
+      fire({ kind: 'log', level: 'info', text: `${label}网关已建立流，等待首块…` });
+    } else if (evt.phase === 'first') {
+      fire({ kind: 'log', level: 'info', text: `${label}模型已开始输出（等待 ${(evt.elapsedMs / 1000).toFixed(1)}s）` });
+    } else if (evt.phase === 'tick') {
+      fire({ kind: 'log', level: 'info', text: `${label}生成中… 已收到 ${evt.chars} 字符（${(evt.elapsedMs / 1000).toFixed(1)}s）` });
+    } else if (evt.phase === 'thinking' || evt.phase === 'thinking-tick') {
+      fire({ kind: 'log', level: 'info', text: `${label}模型思考中… 已收到 ${evt.chars} 字符推理（${(evt.elapsedMs / 1000).toFixed(1)}s）` });
+    } else if (evt.phase === 'stream-wait') {
+      fire({ kind: 'log', level: 'info', text: `${label}流已建立，等待生成内容（${(evt.elapsedMs / 1000).toFixed(1)}s）…` });
+    } else if (evt.phase === 'waiting') {
+      // 后台每 20s 发一次保活进度：既让用户看到没有死机，也证明 worker 还活着
+      fire({ kind: 'log', level: 'info', text: `${label}仍在等待网关响应（${(evt.elapsedMs / 1000).toFixed(1)}s）…` });
+    }
+  };
+  const startedAt = Date.now();
+  let attempts = 0;
   let lastErr = null;
-  for (let attempt = 1; attempt <= MAX_CHAT_ATTEMPTS; attempt++) {
+  for (let attempt = 1; ; attempt++) {
+    attempts = attempt;
+    const t0 = Date.now();
     try {
-      return await chatOnce(cfg, messages);
+      return await chatOnce(cfg, messages, { onProgress });
     } catch (err) {
       lastErr = err;
-      if (err?.aborted || attempt >= MAX_CHAT_ATTEMPTS || !isRetryableLlmError(err)) break;
-      await sleep(retryDelay(attempt));
+      const kind = classifyLlmError(err);
+      const max = kind === 'idle' ? LLM_MAX_IDLE_ATTEMPTS : LLM_MAX_ATTEMPTS;
+      const canRetry = kind !== 'aborted' && kind !== 'fatal' && kind !== 'timeout'
+        && kind !== 'invalidated' && attempt < max;
+      if (!canRetry) break;
+      const delay = retryDelay(attempt);
+      const took = ((Date.now() - t0) / 1000).toFixed(1);
+      fire({ kind: 'log', level: 'warn', text: `${label}第 ${attempt}/${max} 次请求失败（${shortErrText(err)}，用时 ${took}s），${(delay / 1000).toFixed(1)}s 后重试` });
+      await sleep(delay);
     }
+  }
+  // 最终失败也带上次数与总耗时，避免「4 分钟静默 + 一句报错」看不出发生过重试
+  if (attempts > 1 && lastErr?.message && !lastErr.aborted) {
+    lastErr.message = `${lastErr.message}（共尝试 ${attempts} 次，总用时 ${((Date.now() - startedAt) / 1000).toFixed(1)}s）`;
   }
   throw lastErr;
 }
@@ -915,7 +1006,7 @@ async function answerOne(q, cfg) {
   try {
     raw = globalThis.__BPS_LLM_MOCK__
       ? await globalThis.__BPS_LLM_MOCK__(messages)
-      : await chatWithRetry(cfg, messages);
+      : await chatWithRetry(cfg, messages, { label: q.label || q.id.slice(-4) });
   } catch (err) {
     if (runAbort?.signal.aborted || err?.aborted) return { ok: false, reason: '已中止' };
     return { ok: false, reason: 'LLM 调用失败：' + (err?.message || err) };
@@ -967,12 +1058,11 @@ function clearRelay() {
 /* ---------- PTA 访问频率限制 ----------
  * PTA 在请求过快时会把整页换成错误页（「您访问得太快啦，不如休息一会儿吧」）。
  * 续跑每题要整页装载两次（collect → reload verify），连续翻页容易触发，因此：
- * 1) 每次切题/重载前等 1–5s（PAGE_LOAD_WAIT_*，只求错开连续装载，不拖慢整体节奏）；
+ * 1) 每次切题/重载前固定等 5s（PAGE_LOAD_WAIT_MS；实测 1–5s 随机仍会触发限流）；
  * 2) 一旦识别到限流页就暂停重载本题，冷却按 60/120/180s 递增，仍不行才中止。
  * 冷却次数存进续跑单（rlTries），跨页保留；处理到真实题目页后清零。
  */
-const PAGE_LOAD_WAIT_MIN_MS = 1000;      // 切题/重载前的基础等待
-const PAGE_LOAD_WAIT_JITTER_MS = 4000;   // 叠加 0–4s 随机抖动（合计 1–5s）
+const PAGE_LOAD_WAIT_MS = 5000; // 切题/重载前的固定等待（1–5s 随机实测仍会撞限流）
 const RATE_LIMIT_WAITS_MS = [60000, 120000, 180000];
 const NAVIGATE_CHECK_MS = 10000; // 翻页后多久检查「是不是还停在原页」，失败重试一次再收摊
 
@@ -1010,11 +1100,11 @@ function navigateRelay(target, r, what) {
   check(0);
 }
 
-// 每次切题/重载前等 1–5s：只求错开连续整页装载，不再按文档存活时长补足
+// 每次切题/重载前固定等 5s：随机 1–5s 实测仍会触发限流（用户真机反馈），
+// 不再按文档存活时长补足，也不加抖动
 async function pacePageLoad(where) {
-  const wait = PAGE_LOAD_WAIT_MIN_MS + Math.floor(Math.random() * PAGE_LOAD_WAIT_JITTER_MS);
-  fire({ kind: 'log', level: 'info', text: `${where}：等待 ${Math.ceil(wait / 1000)}s 再切换（避免 PTA 访问频率限制）…` });
-  await sleep(wait);
+  fire({ kind: 'log', level: 'info', text: `${where}：等待 ${PAGE_LOAD_WAIT_MS / 1000}s 再切换（避免 PTA 访问频率限制）…` });
+  await sleep(PAGE_LOAD_WAIT_MS);
 }
 
 // 返回 true 表示已接管（暂停或中止），调用方不要再推进续跑
@@ -1225,11 +1315,11 @@ async function relayCollect(r, prob) {
 
   const messages = buildPrompt({ ...q, langLabel: wantLangLabel });
   let raw = null;
-  fire({ kind: 'log', level: 'info', text: `${label}：请求模型中…` }); // await 期间的事件流在场日志
+  fire({ kind: 'log', level: 'info', text: `${label}：请求模型中…（${r.cfg.model || '未知模型'}）` }); // await 期间的事件流在场日志
   try {
     raw = globalThis.__BPS_LLM_MOCK__
       ? await globalThis.__BPS_LLM_MOCK__(messages)
-      : await chatWithRetry(r.cfg, messages);
+      : await chatWithRetry(r.cfg, messages, { label });
   } catch (err) {
     if (userStopped(r)) { stopRelayByUser(r); return; } // 中止来的失败不算题目的失败，别记假账
     relayRecordFail(r, prob, label, 'LLM 调用失败：' + (err?.message || err));
@@ -1572,7 +1662,7 @@ export async function handleRun(config = {}) {
           if (q.answered && !cfg.overwrite) { stats.skippedAnswered += 1; fire({ kind: 'log', level: 'info', text: `${q.label || q.id.slice(-4)}：跳过，已作答` }); tick(); continue; }
           if (q.hasImg && !cfg.images) { stats.skippedImage += 1; fire({ kind: 'log', level: 'warn', text: `${q.label || q.id.slice(-4)}：跳过，含图片（未开「作答含图题」）` }); tick(); continue; }
           // 请求在途的在场日志：服务挂起时 worker 停在 await，没有这行日志就与死机无法区分
-          fire({ kind: 'log', level: 'info', text: `${q.label || q.id.slice(-4)}：请求模型中…` });
+          fire({ kind: 'log', level: 'info', text: `${q.label || q.id.slice(-4)}：请求模型中…（${cfg.model || '未知模型'}）` });
           const r = await answerOne(q, cfg);
           if (r.ok) { stats.ok.push(q.id); fire({ kind: 'log', level: 'ok', text: `${q.label || q.id.slice(-4)} → ${r.text}` }); }
           else { stats.failed.push({ id: q.id, reason: r.reason }); fire({ kind: 'log', level: 'err', text: `${q.label || q.id.slice(-4)}：${r.reason}` }); }

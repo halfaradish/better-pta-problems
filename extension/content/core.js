@@ -269,6 +269,12 @@
     return null;
   }
 
+  // src/shared/llm.js
+  var LLM_TOTAL_TIMEOUT_MS = 3e5;
+  var LLM_DIRECT_TIMEOUT_MS = 12e4;
+  var LLM_MAX_ATTEMPTS = 3;
+  var LLM_MAX_IDLE_ATTEMPTS = 2;
+
   // src/content/autoanswer.js
   var TYPE_BY_NAME = {
     "\u5224\u65AD\u9898": "TRUE_OR_FALSE",
@@ -284,7 +290,12 @@
     err.aborted = true;
     return err;
   };
-  var CHAT_TIMEOUT_MS = 12e4;
+  var isInvalidatedMessage = (msg) => /Extension context invalidated/i.test(String(msg || ""));
+  var invalidatedError = () => {
+    const err = new Error("\u6269\u5C55\u5DF2\u88AB\u91CD\u65B0\u52A0\u8F7D\u6216\u66F4\u65B0\uFF0C\u5F53\u524D\u9875\u9762\u65E0\u6CD5\u7EE7\u7EED\u8BF7\u6C42\uFF1B\u8BF7\u5237\u65B0 PTA \u9875\u9762\u540E\u91CD\u8DD1");
+    err.kind = "invalidated";
+    return err;
+  };
   var IMAGE_TIMEOUT_MS = 3e4;
   async function fetchBounded(url, opts = {}, ms, stopSignal) {
     const ctl = new AbortController();
@@ -301,7 +312,11 @@
       return await fetch(url, { ...opts, signal: ctl.signal });
     } catch (err) {
       if (stopSignal?.aborted) throw abortedError();
-      if (err?.name === "AbortError") throw new Error(`\u8BF7\u6C42 ${Math.round(ms / 1e3)}s \u65E0\u54CD\u5E94\uFF0C\u5DF2\u6309\u8D85\u65F6\u4E2D\u65AD`);
+      if (err?.name === "AbortError") {
+        const timeoutErr = new Error(`\u8BF7\u6C42 ${Math.round(ms / 1e3)}s \u65E0\u54CD\u5E94\uFF0C\u5DF2\u6309\u8D85\u65F6\u4E2D\u65AD`);
+        timeoutErr.kind = "timeout";
+        throw timeoutErr;
+      }
       throw err;
     } finally {
       clearTimeout(timer);
@@ -827,10 +842,15 @@
       return { type: "", message: text.slice(0, 160) };
     }
   }
-  function isRetryableLlmError(err) {
-    if (!err || err.aborted) return false;
-    if (err.status == null || err.status === 0) return true;
-    return err.status === 429 || err.status >= 500;
+  function classifyLlmError(err) {
+    if (!err) return "fatal";
+    if (err.aborted || err.kind === "abort") return "aborted";
+    if (err.kind === "invalidated") return "invalidated";
+    if (err.channelClosed) return "channel";
+    if (err.kind === "idle") return "idle";
+    if (err.kind === "total" || err.kind === "timeout") return "timeout";
+    if (err.status == null || err.status === 0) return "network";
+    return err.status === 429 || err.status >= 500 ? "retry" : "fatal";
   }
   function httpError(status, body, logId) {
     const parsed = parseLlmErrorBody(body);
@@ -863,59 +883,89 @@
     err.status = 400;
     throw err;
   }
-  var hasBgFetch = typeof chrome !== "undefined" && !!chrome.runtime?.sendMessage;
-  function backgroundChat(msg, timeoutMs) {
+  var hasBgFetch = typeof chrome !== "undefined" && !!chrome.runtime?.connect && !!chrome.runtime?.sendMessage;
+  function backgroundChat(msg, { timeoutMs, signal, onProgress } = {}) {
     return new Promise((resolve, reject) => {
+      let port = null;
       let settled = false;
-      const timer = setTimeout(() => {
-        if (!settled) {
-          settled = true;
-          reject(new Error(`\u540E\u53F0\u8F6C\u53D1 ${Math.round(timeoutMs / 1e3)}s \u65E0\u54CD\u5E94`));
+      let timer = null;
+      const cleanup = () => {
+        clearTimeout(timer);
+        signal?.removeEventListener("abort", onAbort);
+      };
+      const finish = (fn, value) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        try {
+          port?.disconnect();
+        } catch (_) {
         }
+        fn(value);
+      };
+      const onAbort = () => {
+        try {
+          chrome.runtime.sendMessage({ type: "BPS_LLM_ABORT", reqId: msg.reqId }, () => {
+            void chrome.runtime.lastError;
+          });
+        } catch (_) {
+        }
+        finish(reject, abortedError());
+      };
+      timer = setTimeout(() => {
+        const err = new Error(`\u540E\u53F0\u8F6C\u53D1 ${Math.round(timeoutMs / 1e3)}s \u65E0\u54CD\u5E94`);
+        err.kind = "timeout";
+        finish(reject, err);
       }, timeoutMs + 5e3);
       try {
-        chrome.runtime.sendMessage(msg, (rsp) => {
-          if (settled) return;
-          settled = true;
-          clearTimeout(timer);
-          if (chrome.runtime.lastError) return reject(new Error(chrome.runtime.lastError.message));
-          resolve(rsp);
-        });
+        port = chrome.runtime.connect({ name: "bps-llm" });
       } catch (err) {
-        settled = true;
-        clearTimeout(timer);
-        reject(err);
+        finish(reject, isInvalidatedMessage(err?.message) ? invalidatedError() : err);
+        return;
+      }
+      if (signal?.aborted) {
+        onAbort();
+        return;
+      }
+      signal?.addEventListener("abort", onAbort, { once: true });
+      port.onMessage.addListener((m) => {
+        if (!m || settled) return;
+        if (m.type === "progress") {
+          try {
+            onProgress?.(m);
+          } catch (_) {
+          }
+          return;
+        }
+        if (m.type === "done") finish(resolve, m);
+      });
+      port.onDisconnect.addListener(() => {
+        let lastMsg = "";
+        try {
+          lastMsg = chrome.runtime.lastError?.message || "";
+        } catch (_) {
+          lastMsg = "Extension context invalidated";
+        }
+        if (settled) return;
+        if (isInvalidatedMessage(lastMsg)) {
+          finish(reject, invalidatedError());
+          return;
+        }
+        const err = new Error("\u540E\u53F0\u8F6C\u53D1\u8FDE\u63A5\u88AB\u56DE\u6536\uFF08service worker \u91CD\u542F\u6216\u6269\u5C55\u91CD\u8F7D\uFF09");
+        err.channelClosed = true;
+        finish(reject, err);
+      });
+      try {
+        port.postMessage({ ...msg });
+      } catch (err) {
+        finish(reject, isInvalidatedMessage(err?.message) ? invalidatedError() : err);
       }
     });
   }
-  function raceAbort(promise, signal, onAbort) {
-    if (!signal) return promise;
-    if (signal.aborted) {
-      onAbort?.();
-      return Promise.reject(abortedError());
-    }
-    return new Promise((resolve, reject) => {
-      const stop = () => {
-        onAbort?.();
-        reject(abortedError());
-      };
-      signal.addEventListener("abort", stop, { once: true });
-      promise.then(
-        (v) => {
-          signal.removeEventListener("abort", stop);
-          resolve(v);
-        },
-        (e) => {
-          signal.removeEventListener("abort", stop);
-          reject(e);
-        }
-      );
-    });
-  }
-  async function chatViaBackground(cfg, messages) {
+  async function chatViaBackground(cfg, messages, opts = {}) {
     if (!hasBgFetch) throw new Error("OpenCode Go \u9700\u8981\u6269\u5C55\u540E\u53F0\u8F6C\u53D1\uFF0C\u5F53\u524D\u73AF\u5883\u4E0D\u53EF\u7528");
     const reqId = "llm-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 10);
-    const rsp = await raceAbort(backgroundChat({
+    const rsp = await backgroundChat({
       type: "BPS_LLM_CHAT",
       reqId,
       baseUrl: cfg.baseUrl,
@@ -923,19 +973,20 @@
       model: cfg.model,
       session: sessionHeader(),
       messages
-    }, CHAT_TIMEOUT_MS), runAbort?.signal ?? null, () => {
-      try {
-        chrome.runtime.sendMessage({ type: "BPS_LLM_ABORT", reqId }, () => {
-          void chrome.runtime.lastError;
-        });
-      } catch (_) {
-      }
+    }, {
+      timeoutMs: LLM_TOTAL_TIMEOUT_MS,
+      signal: runAbort?.signal ?? null,
+      onProgress: opts.onProgress
     });
     if (!rsp) throw new Error("\u540E\u53F0\u8F6C\u53D1\u65E0\u54CD\u5E94");
     if (!rsp.ok) {
+      if (rsp.kind === "abort") throw abortedError();
       if (rsp.status) throw httpError(rsp.status, rsp.text || rsp.reason || "", rsp.logId);
-      throw new Error("LLM \u8BF7\u6C42\u5931\u8D25\uFF1A" + (rsp.reason || "\u672A\u77E5\u9519\u8BEF"));
+      const err = new Error(rsp.reason || "\u540E\u53F0\u8F6C\u53D1\u65E0\u54CD\u5E94");
+      if (rsp.kind) err.kind = rsp.kind;
+      throw err;
     }
+    if (typeof rsp.content === "string") return rsp.content;
     let data = null;
     try {
       data = JSON.parse(rsp.text);
@@ -946,9 +997,9 @@
     if (typeof text !== "string" || !text.trim()) throw new Error("LLM \u54CD\u5E94\u4E3A\u7A7A");
     return text;
   }
-  async function chatOnce(cfg, messages) {
+  async function chatOnce(cfg, messages, opts = {}) {
     assertChatModel(cfg);
-    if (cfg.gateway === "opencode") return chatViaBackground(cfg, messages);
+    if (cfg.gateway === "opencode") return chatViaBackground(cfg, messages, opts);
     const base = normalizeBaseUrl(cfg.baseUrl);
     const res = await fetchBounded(base + "/chat/completions", {
       method: "POST",
@@ -957,7 +1008,7 @@
         Authorization: "Bearer " + String(cfg.apiKey || "").trim()
       },
       body: JSON.stringify({ model: cfg.model, temperature: 0, messages })
-    }, CHAT_TIMEOUT_MS, runAbort?.signal ?? null);
+    }, LLM_DIRECT_TIMEOUT_MS, runAbort?.signal ?? null);
     if (!res.ok) {
       const t = await res.text().catch(() => "");
       throw httpError(res.status, t, res.headers.get("x-opencode-log-id") || "");
@@ -972,18 +1023,49 @@
     if (typeof text !== "string" || !text.trim()) throw new Error("LLM \u54CD\u5E94\u4E3A\u7A7A");
     return text;
   }
-  var MAX_CHAT_ATTEMPTS = 3;
   var retryDelay = (attempt) => 900 * 2 ** (attempt - 1) + Math.floor(Math.random() * 250);
-  async function chatWithRetry(cfg, messages) {
+  function shortErrText(err) {
+    return String(err?.message || err).replace(/^LLM 请求失败：/, "").slice(0, 90);
+  }
+  async function chatWithRetry(cfg, messages, opts = {}) {
+    const label = opts.label ? `${opts.label}\uFF1A` : "";
+    const onProgress = (evt) => {
+      if (evt.phase === "stream") {
+        fire({ kind: "log", level: "info", text: `${label}\u7F51\u5173\u5DF2\u5EFA\u7ACB\u6D41\uFF0C\u7B49\u5F85\u9996\u5757\u2026` });
+      } else if (evt.phase === "first") {
+        fire({ kind: "log", level: "info", text: `${label}\u6A21\u578B\u5DF2\u5F00\u59CB\u8F93\u51FA\uFF08\u7B49\u5F85 ${(evt.elapsedMs / 1e3).toFixed(1)}s\uFF09` });
+      } else if (evt.phase === "tick") {
+        fire({ kind: "log", level: "info", text: `${label}\u751F\u6210\u4E2D\u2026 \u5DF2\u6536\u5230 ${evt.chars} \u5B57\u7B26\uFF08${(evt.elapsedMs / 1e3).toFixed(1)}s\uFF09` });
+      } else if (evt.phase === "thinking" || evt.phase === "thinking-tick") {
+        fire({ kind: "log", level: "info", text: `${label}\u6A21\u578B\u601D\u8003\u4E2D\u2026 \u5DF2\u6536\u5230 ${evt.chars} \u5B57\u7B26\u63A8\u7406\uFF08${(evt.elapsedMs / 1e3).toFixed(1)}s\uFF09` });
+      } else if (evt.phase === "stream-wait") {
+        fire({ kind: "log", level: "info", text: `${label}\u6D41\u5DF2\u5EFA\u7ACB\uFF0C\u7B49\u5F85\u751F\u6210\u5185\u5BB9\uFF08${(evt.elapsedMs / 1e3).toFixed(1)}s\uFF09\u2026` });
+      } else if (evt.phase === "waiting") {
+        fire({ kind: "log", level: "info", text: `${label}\u4ECD\u5728\u7B49\u5F85\u7F51\u5173\u54CD\u5E94\uFF08${(evt.elapsedMs / 1e3).toFixed(1)}s\uFF09\u2026` });
+      }
+    };
+    const startedAt = Date.now();
+    let attempts = 0;
     let lastErr = null;
-    for (let attempt = 1; attempt <= MAX_CHAT_ATTEMPTS; attempt++) {
+    for (let attempt = 1; ; attempt++) {
+      attempts = attempt;
+      const t0 = Date.now();
       try {
-        return await chatOnce(cfg, messages);
+        return await chatOnce(cfg, messages, { onProgress });
       } catch (err) {
         lastErr = err;
-        if (err?.aborted || attempt >= MAX_CHAT_ATTEMPTS || !isRetryableLlmError(err)) break;
-        await sleep(retryDelay(attempt));
+        const kind = classifyLlmError(err);
+        const max = kind === "idle" ? LLM_MAX_IDLE_ATTEMPTS : LLM_MAX_ATTEMPTS;
+        const canRetry = kind !== "aborted" && kind !== "fatal" && kind !== "timeout" && kind !== "invalidated" && attempt < max;
+        if (!canRetry) break;
+        const delay = retryDelay(attempt);
+        const took = ((Date.now() - t0) / 1e3).toFixed(1);
+        fire({ kind: "log", level: "warn", text: `${label}\u7B2C ${attempt}/${max} \u6B21\u8BF7\u6C42\u5931\u8D25\uFF08${shortErrText(err)}\uFF0C\u7528\u65F6 ${took}s\uFF09\uFF0C${(delay / 1e3).toFixed(1)}s \u540E\u91CD\u8BD5` });
+        await sleep(delay);
       }
+    }
+    if (attempts > 1 && lastErr?.message && !lastErr.aborted) {
+      lastErr.message = `${lastErr.message}\uFF08\u5171\u5C1D\u8BD5 ${attempts} \u6B21\uFF0C\u603B\u7528\u65F6 ${((Date.now() - startedAt) / 1e3).toFixed(1)}s\uFF09`;
     }
     throw lastErr;
   }
@@ -1062,7 +1144,7 @@
     const messages = images ? [{ role: "system", content: basePrompt[0].content }, { role: "user", content: assembleImgMessage(basePrompt[1].content, images) }] : basePrompt;
     let raw = null;
     try {
-      raw = globalThis.__BPS_LLM_MOCK__ ? await globalThis.__BPS_LLM_MOCK__(messages) : await chatWithRetry(cfg, messages);
+      raw = globalThis.__BPS_LLM_MOCK__ ? await globalThis.__BPS_LLM_MOCK__(messages) : await chatWithRetry(cfg, messages, { label: q.label || q.id.slice(-4) });
     } catch (err) {
       if (runAbort?.signal.aborted || err?.aborted) return { ok: false, reason: "\u5DF2\u4E2D\u6B62" };
       return { ok: false, reason: "LLM \u8C03\u7528\u5931\u8D25\uFF1A" + (err?.message || err) };
@@ -1113,8 +1195,7 @@
     } catch (_) {
     }
   }
-  var PAGE_LOAD_WAIT_MIN_MS = 1e3;
-  var PAGE_LOAD_WAIT_JITTER_MS = 4e3;
+  var PAGE_LOAD_WAIT_MS = 5e3;
   var RATE_LIMIT_WAITS_MS = [6e4, 12e4, 18e4];
   var NAVIGATE_CHECK_MS = 1e4;
   function isRateLimitedText(text) {
@@ -1153,9 +1234,8 @@
     check(0);
   }
   async function pacePageLoad(where) {
-    const wait = PAGE_LOAD_WAIT_MIN_MS + Math.floor(Math.random() * PAGE_LOAD_WAIT_JITTER_MS);
-    fire({ kind: "log", level: "info", text: `${where}\uFF1A\u7B49\u5F85 ${Math.ceil(wait / 1e3)}s \u518D\u5207\u6362\uFF08\u907F\u514D PTA \u8BBF\u95EE\u9891\u7387\u9650\u5236\uFF09\u2026` });
-    await sleep(wait);
+    fire({ kind: "log", level: "info", text: `${where}\uFF1A\u7B49\u5F85 ${PAGE_LOAD_WAIT_MS / 1e3}s \u518D\u5207\u6362\uFF08\u907F\u514D PTA \u8BBF\u95EE\u9891\u7387\u9650\u5236\uFF09\u2026` });
+    await sleep(PAGE_LOAD_WAIT_MS);
   }
   function pauseForRateLimit(r, where) {
     const tries = Number(r.rlTries) || 0;
@@ -1351,9 +1431,9 @@ ${failDetails(s.failed)}`;
     const wantLangLabel = COMPILER_LABELS[compilerId] || q.langLabel || "";
     const messages = buildPrompt({ ...q, langLabel: wantLangLabel });
     let raw = null;
-    fire({ kind: "log", level: "info", text: `${label}\uFF1A\u8BF7\u6C42\u6A21\u578B\u4E2D\u2026` });
+    fire({ kind: "log", level: "info", text: `${label}\uFF1A\u8BF7\u6C42\u6A21\u578B\u4E2D\u2026\uFF08${r.cfg.model || "\u672A\u77E5\u6A21\u578B"}\uFF09` });
     try {
-      raw = globalThis.__BPS_LLM_MOCK__ ? await globalThis.__BPS_LLM_MOCK__(messages) : await chatWithRetry(r.cfg, messages);
+      raw = globalThis.__BPS_LLM_MOCK__ ? await globalThis.__BPS_LLM_MOCK__(messages) : await chatWithRetry(r.cfg, messages, { label });
     } catch (err) {
       if (userStopped(r)) {
         stopRelayByUser(r);
@@ -1695,7 +1775,7 @@ ${failDetails(s.failed)}`;
               tick();
               continue;
             }
-            fire({ kind: "log", level: "info", text: `${q.label || q.id.slice(-4)}\uFF1A\u8BF7\u6C42\u6A21\u578B\u4E2D\u2026` });
+            fire({ kind: "log", level: "info", text: `${q.label || q.id.slice(-4)}\uFF1A\u8BF7\u6C42\u6A21\u578B\u4E2D\u2026\uFF08${cfg.model || "\u672A\u77E5\u6A21\u578B"}\uFF09` });
             const r = await answerOne(q, cfg);
             if (r.ok) {
               stats.ok.push(q.id);

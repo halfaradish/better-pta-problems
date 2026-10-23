@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
-  assembleImgMessage, assertChatModel, buildPrompt, clearPersistedLog, COMPILER_LABELS, compilerIdFromLabel, failDetails,
+  assembleImgMessage, assertChatModel, buildPrompt, classifyLlmError, clearPersistedLog, COMPILER_LABELS, compilerIdFromLabel, failDetails,
   isRateLimitedText, isRetryableLlmError, nonChatProtocol, normalizeBaseUrl, normalizeTF, parseChoiceAnswer, parseCodeAnswer,
   parseFillAnswers, parseLlmErrorBody, persistLogLine, readPersistedLog, relaySummaryLine, seedCodingProblemCache, TYPE_BY_NAME,
   normalizeLangLabel,
@@ -263,6 +263,27 @@ test('LLM 错误体：两种网关形状 + 重试判定', () => {
   for (const status of [400, 401, 403, 404]) assert.equal(isRetryableLlmError({ status }), false, String(status));
   assert.equal(isRetryableLlmError({ aborted: true }), false);
   assert.equal(isRetryableLlmError(null), false);
+});
+
+test('classifyLlmError：卡死/总超时不重试，通道回收与网络错误可重试', () => {
+  assert.equal(classifyLlmError({ aborted: true }), 'aborted');
+  assert.equal(classifyLlmError({ kind: 'abort' }), 'aborted');
+  assert.equal(classifyLlmError({ channelClosed: true }), 'channel');
+  assert.equal(classifyLlmError({ kind: 'idle' }), 'idle');
+  assert.equal(classifyLlmError({ kind: 'total' }), 'timeout');
+  assert.equal(classifyLlmError({ kind: 'timeout' }), 'timeout');
+  assert.equal(classifyLlmError({ kind: 'invalidated' }), 'invalidated');
+  assert.equal(classifyLlmError({ status: 429 }), 'retry');
+  assert.equal(classifyLlmError({ status: 502 }), 'retry');
+  assert.equal(classifyLlmError({ status: 401 }), 'fatal');
+  assert.equal(classifyLlmError(new Error('Failed to fetch')), 'network');
+  assert.equal(classifyLlmError(null), 'fatal');
+  // 卡死只允许重试一次；总超时/直连超时不重试；通道回收按普通可重试处理
+  assert.equal(isRetryableLlmError({ kind: 'idle' }), true);
+  assert.equal(isRetryableLlmError({ channelClosed: true }), true);
+  assert.equal(isRetryableLlmError({ kind: 'timeout' }), false);
+  assert.equal(isRetryableLlmError({ kind: 'total' }), false);
+  assert.equal(isRetryableLlmError({ kind: 'invalidated' }), false);
 });
 
 test('PTA 限流页识别：专有文案直接命中，泛化词需错误页外壳', () => {
