@@ -279,6 +279,11 @@
   var EXAM_PROBLEMS_RE = /^\/problem-sets\/(\d+)\/exam\/problems(\/type\/(\d+))?/;
   var LETTERS = "ABCDEFGHIJ";
   var sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  var abortedError = () => {
+    const err = new Error("\u5DF2\u4E2D\u6B62");
+    err.aborted = true;
+    return err;
+  };
   var CHAT_TIMEOUT_MS = 12e4;
   var IMAGE_TIMEOUT_MS = 3e4;
   async function fetchBounded(url, opts = {}, ms, stopSignal) {
@@ -288,14 +293,14 @@
     if (stopSignal) {
       if (stopSignal.aborted) {
         clearTimeout(timer);
-        throw new Error("\u5DF2\u4E2D\u6B62");
+        throw abortedError();
       }
       stopSignal.addEventListener("abort", stopNow, { once: true });
     }
     try {
       return await fetch(url, { ...opts, signal: ctl.signal });
     } catch (err) {
-      if (stopSignal?.aborted) throw new Error("\u5DF2\u4E2D\u6B62");
+      if (stopSignal?.aborted) throw abortedError();
       if (err?.name === "AbortError") throw new Error(`\u8BF7\u6C42 ${Math.round(ms / 1e3)}s \u65E0\u54CD\u5E94\uFF0C\u5DF2\u6309\u8D85\u65F6\u4E2D\u65AD`);
       throw err;
     } finally {
@@ -803,29 +808,180 @@
     s = s.replace(/\/+$/, "").replace(/\/chat\/completions$/i, "").replace(/\/+$/, "");
     return s;
   }
-  async function chatOnce(cfg, messages) {
-    const base = normalizeBaseUrl(cfg.baseUrl);
-    const headers = {
-      "Content-Type": "application/json",
-      Authorization: "Bearer " + String(cfg.apiKey || "").trim()
-    };
-    if (cfg.gateway === "opencode") {
-      headers["x-opencode-session"] = sessionHeader();
-      headers["User-Agent"] = "better-pta-problems/0.9";
+  function parseLlmErrorBody(body) {
+    const text = String(body || "").trim();
+    if (!text) return null;
+    try {
+      const o = JSON.parse(text);
+      const e = o && typeof o === "object" ? o.error && typeof o.error === "object" ? o.error : o : null;
+      if (!e || typeof e !== "object") return null;
+      const type = typeof e.type === "string" ? e.type : "";
+      const message = typeof e.message === "string" ? e.message : "";
+      if (!type && !message) return null;
+      return { type, message };
+    } catch (_) {
+      return { type: "", message: text.slice(0, 160) };
     }
+  }
+  function isRetryableLlmError(err) {
+    if (!err || err.aborted) return false;
+    if (err.status == null || err.status === 0) return true;
+    return err.status === 429 || err.status >= 500;
+  }
+  function httpError(status, body, logId) {
+    const parsed = parseLlmErrorBody(body);
+    const detail = parsed ? [parsed.type, parsed.message].filter(Boolean).join("\uFF1A") : String(body || "").trim().slice(0, 160);
+    const suffix = logId ? `\uFF08x-opencode-log-id: ${logId}\uFF09` : "";
+    const err = new Error(`LLM HTTP ${status}${detail ? "\uFF0C" + detail : ""}${suffix}`);
+    err.status = status;
+    return err;
+  }
+  var NON_CHAT_MODEL_RULES = [
+    { re: /^gpt-/i, protocol: "OpenAI Responses" },
+    { re: /^grok-/i, protocol: "OpenAI Responses" },
+    { re: /^muse-spark-/i, protocol: "OpenAI Responses" },
+    { re: /^claude-/i, protocol: "Anthropic Messages" },
+    { re: /^minimax-m3$/i, protocol: "Anthropic Messages" },
+    // m3.1-flash 属 chat 系，不能用前缀
+    { re: /^qwen3\.[78]-/i, protocol: "Anthropic Messages" },
+    { re: /^gemini-/i, protocol: "Google generateContent" }
+  ];
+  function nonChatProtocol(modelId) {
+    const id = String(modelId || "").trim();
+    const hit = NON_CHAT_MODEL_RULES.find((x) => x.re.test(id));
+    return hit ? hit.protocol : "";
+  }
+  function assertChatModel(cfg) {
+    if (!cfg || cfg.gateway !== "opencode") return;
+    const protocol = nonChatProtocol(cfg.model);
+    if (!protocol) return;
+    const err = new Error(`\u6A21\u578B ${cfg.model} \u8D70 ${protocol} \u534F\u8BAE\uFF0C\u672C\u5F15\u64CE\u53EA\u652F\u6301 /chat/completions\uFF1B\u8BF7\u6539\u7528 glm / kimi / deepseek / longcat / mimo \u7B49 chat \u7CFB\u6A21\u578B`);
+    err.status = 400;
+    throw err;
+  }
+  var hasBgFetch = typeof chrome !== "undefined" && !!chrome.runtime?.sendMessage;
+  function backgroundChat(msg, timeoutMs) {
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (!settled) {
+          settled = true;
+          reject(new Error(`\u540E\u53F0\u8F6C\u53D1 ${Math.round(timeoutMs / 1e3)}s \u65E0\u54CD\u5E94`));
+        }
+      }, timeoutMs + 5e3);
+      try {
+        chrome.runtime.sendMessage(msg, (rsp) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          if (chrome.runtime.lastError) return reject(new Error(chrome.runtime.lastError.message));
+          resolve(rsp);
+        });
+      } catch (err) {
+        settled = true;
+        clearTimeout(timer);
+        reject(err);
+      }
+    });
+  }
+  function raceAbort(promise, signal, onAbort) {
+    if (!signal) return promise;
+    if (signal.aborted) {
+      onAbort?.();
+      return Promise.reject(abortedError());
+    }
+    return new Promise((resolve, reject) => {
+      const stop = () => {
+        onAbort?.();
+        reject(abortedError());
+      };
+      signal.addEventListener("abort", stop, { once: true });
+      promise.then(
+        (v) => {
+          signal.removeEventListener("abort", stop);
+          resolve(v);
+        },
+        (e) => {
+          signal.removeEventListener("abort", stop);
+          reject(e);
+        }
+      );
+    });
+  }
+  async function chatViaBackground(cfg, messages) {
+    if (!hasBgFetch) throw new Error("OpenCode Go \u9700\u8981\u6269\u5C55\u540E\u53F0\u8F6C\u53D1\uFF0C\u5F53\u524D\u73AF\u5883\u4E0D\u53EF\u7528");
+    const reqId = "llm-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 10);
+    const rsp = await raceAbort(backgroundChat({
+      type: "BPS_LLM_CHAT",
+      reqId,
+      baseUrl: cfg.baseUrl,
+      apiKey: cfg.apiKey,
+      model: cfg.model,
+      session: sessionHeader(),
+      messages
+    }, CHAT_TIMEOUT_MS), runAbort?.signal ?? null, () => {
+      try {
+        chrome.runtime.sendMessage({ type: "BPS_LLM_ABORT", reqId }, () => {
+          void chrome.runtime.lastError;
+        });
+      } catch (_) {
+      }
+    });
+    if (!rsp) throw new Error("\u540E\u53F0\u8F6C\u53D1\u65E0\u54CD\u5E94");
+    if (!rsp.ok) {
+      if (rsp.status) throw httpError(rsp.status, rsp.text || rsp.reason || "", rsp.logId);
+      throw new Error("LLM \u8BF7\u6C42\u5931\u8D25\uFF1A" + (rsp.reason || "\u672A\u77E5\u9519\u8BEF"));
+    }
+    let data = null;
+    try {
+      data = JSON.parse(rsp.text);
+    } catch (_) {
+      throw new Error("LLM \u54CD\u5E94\u4E0D\u662F\u5408\u6CD5 JSON");
+    }
+    const text = data?.choices?.[0]?.message?.content;
+    if (typeof text !== "string" || !text.trim()) throw new Error("LLM \u54CD\u5E94\u4E3A\u7A7A");
+    return text;
+  }
+  async function chatOnce(cfg, messages) {
+    assertChatModel(cfg);
+    if (cfg.gateway === "opencode") return chatViaBackground(cfg, messages);
+    const base = normalizeBaseUrl(cfg.baseUrl);
     const res = await fetchBounded(base + "/chat/completions", {
       method: "POST",
-      headers,
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: "Bearer " + String(cfg.apiKey || "").trim()
+      },
       body: JSON.stringify({ model: cfg.model, temperature: 0, messages })
     }, CHAT_TIMEOUT_MS, runAbort?.signal ?? null);
     if (!res.ok) {
       const t = await res.text().catch(() => "");
-      throw new Error("LLM HTTP " + res.status + (t ? "\uFF1A" + t.slice(0, 140) : ""));
+      throw httpError(res.status, t, res.headers.get("x-opencode-log-id") || "");
     }
-    const data = await res.json();
+    let data = null;
+    try {
+      data = await res.json();
+    } catch (_) {
+      throw new Error("LLM \u54CD\u5E94\u4E0D\u662F\u5408\u6CD5 JSON");
+    }
     const text = data?.choices?.[0]?.message?.content;
     if (typeof text !== "string" || !text.trim()) throw new Error("LLM \u54CD\u5E94\u4E3A\u7A7A");
     return text;
+  }
+  var MAX_CHAT_ATTEMPTS = 3;
+  var retryDelay = (attempt) => 900 * 2 ** (attempt - 1) + Math.floor(Math.random() * 250);
+  async function chatWithRetry(cfg, messages) {
+    let lastErr = null;
+    for (let attempt = 1; attempt <= MAX_CHAT_ATTEMPTS; attempt++) {
+      try {
+        return await chatOnce(cfg, messages);
+      } catch (err) {
+        lastErr = err;
+        if (err?.aborted || attempt >= MAX_CHAT_ATTEMPTS || !isRetryableLlmError(err)) break;
+        await sleep(retryDelay(attempt));
+      }
+    }
+    throw lastErr;
   }
   function toDataUrlPage(src) {
     return fetchBounded(src, { credentials: "include" }, IMAGE_TIMEOUT_MS, runAbort?.signal ?? null).then((res) => {
@@ -838,7 +994,6 @@
       r.readAsDataURL(blob);
     }));
   }
-  var hasBgFetch = typeof chrome !== "undefined" && !!chrome.runtime?.sendMessage;
   async function toDataUrl(src) {
     try {
       return await toDataUrlPage(src);
@@ -902,15 +1057,11 @@
     const basePrompt = buildPrompt(q);
     const messages = images ? [{ role: "system", content: basePrompt[0].content }, { role: "user", content: assembleImgMessage(basePrompt[1].content, images) }] : basePrompt;
     let raw = null;
-    for (let attempt = 1; attempt <= 2; attempt++) {
-      try {
-        raw = globalThis.__BPS_LLM_MOCK__ ? await globalThis.__BPS_LLM_MOCK__(messages) : await chatOnce(cfg, messages);
-        break;
-      } catch (err) {
-        if (runAbort?.signal.aborted) return { ok: false, reason: "\u5DF2\u4E2D\u6B62" };
-        if (attempt === 2) return { ok: false, reason: "LLM \u8C03\u7528\u5931\u8D25\uFF1A" + (err?.message || err) };
-        await sleep(900);
-      }
+    try {
+      raw = globalThis.__BPS_LLM_MOCK__ ? await globalThis.__BPS_LLM_MOCK__(messages) : await chatWithRetry(cfg, messages);
+    } catch (err) {
+      if (runAbort?.signal.aborted || err?.aborted) return { ok: false, reason: "\u5DF2\u4E2D\u6B62" };
+      return { ok: false, reason: "LLM \u8C03\u7528\u5931\u8D25\uFF1A" + (err?.message || err) };
     }
     const json = parseJsonLoose(raw);
     if (!json) return { ok: false, reason: "LLM \u8F93\u51FA\u65E0\u6CD5\u89E3\u6790\uFF1A" + String(raw).slice(0, 60) };
@@ -958,6 +1109,54 @@
     } catch (_) {
     }
   }
+  var PAGE_LOAD_GAP_MS = 12e3;
+  var RATE_LIMIT_WAITS_MS = [6e4, 12e4, 18e4];
+  function isRateLimitedText(text) {
+    const s = String(text || "").replace(/\s+/g, "");
+    if (s.includes("\u60A8\u8BBF\u95EE\u5F97\u592A\u5FEB\u5566")) return true;
+    const shell = s.includes("\u53CD\u9988\u95EE\u9898") || s.includes("\u6D4F\u89C8\u5668\u4FE1\u606F") || s.includes("\u9519\u8BEF\u4FE1\u606F") || s.includes("feedback@pat-edu.com");
+    if (!shell) return false;
+    return s.includes("\u8BBF\u95EE\u5F97\u592A\u5FEB") || s.includes("\u8BBF\u95EE\u8FC7\u4E8E\u9891\u7E41") || s.includes("\u64CD\u4F5C\u8FC7\u4E8E\u9891\u7E41");
+  }
+  function rateLimitedNow() {
+    try {
+      return isRateLimitedText((document.body?.innerText || "").slice(0, 2e4));
+    } catch (_) {
+      return false;
+    }
+  }
+  async function pacePageLoad(where) {
+    const wait = Math.max(0, PAGE_LOAD_GAP_MS - performance.now() + Math.floor(Math.random() * 4e3));
+    if (wait < 1200) return;
+    fire({ kind: "log", level: "info", text: `${where}\uFF1A\u7B49\u5F85 ${Math.ceil(wait / 1e3)}s \u518D\u5207\u6362\uFF08\u907F\u514D PTA \u8BBF\u95EE\u9891\u7387\u9650\u5236\uFF09\u2026` });
+    await sleep(wait);
+  }
+  function pauseForRateLimit(r, where) {
+    const tries = Number(r.rlTries) || 0;
+    if (tries >= RATE_LIMIT_WAITS_MS.length) {
+      abortRelay(r, `\u8FDE\u7EED\u89E6\u53D1 PTA \u8BBF\u95EE\u9891\u7387\u9650\u5236\uFF08${where}\uFF09\uFF0C\u5DF2\u51B7\u5374 ${RATE_LIMIT_WAITS_MS.map((ms) => Math.round(ms / 1e3)).join(" / ")}s \u4ECD\u88AB\u62D2\u7EDD\uFF1B\u8BF7\u4F11\u606F\u51E0\u5206\u949F\u540E\u91CD\u65B0\u5F00\u59CB\uFF0C\u5DF2\u5B8C\u6210\u7684\u9898\u76EE\u4E0D\u4F1A\u91CD\u505A`);
+      return true;
+    }
+    const wait = RATE_LIMIT_WAITS_MS[tries];
+    r.rlTries = tries + 1;
+    if (!writeRelay(r)) {
+      abortRelay(r, "sessionStorage \u5199\u5165\u5931\u8D25\uFF0C\u65E0\u6CD5\u8BB0\u5F55\u9650\u6D41\u51B7\u5374");
+      return true;
+    }
+    running = false;
+    runAbort = null;
+    restoreLeaveConfirm();
+    fire({ kind: "log", level: "warn", text: `PTA \u9650\u6D41\uFF08${where}\uFF09\uFF1A\u7B49\u5F85 ${Math.round(wait / 1e3)}s \u540E\u91CD\u8F7D\u672C\u9898\uFF08\u7B2C ${tries + 1}/${RATE_LIMIT_WAITS_MS.length} \u6B21\uFF09\u2026` });
+    const prob = r.problems?.[r.pi];
+    const target = prob ? `/problem-sets/${r.psId}/exam/problems/type/${prob.typeId}?problemSetProblemId=${prob.id}` : location.href;
+    setTimeout(() => {
+      try {
+        location.href = target;
+      } catch (_) {
+      }
+    }, wait);
+    return true;
+  }
   function startProgrammingRelay(psId, progTypes, cfg) {
     const problems = [];
     for (const t of progTypes) {
@@ -976,7 +1175,7 @@
     };
     if (!writeRelay(relay)) throw new Error("sessionStorage \u4E0D\u53EF\u5199\uFF0C\u65E0\u6CD5\u8DE8\u9875\u7EED\u8DD1\u7F16\u7A0B\u9898");
     const first = problems[0];
-    fire({ kind: "log", level: "info", text: `\u7F16\u7A0B\u9898 ${problems.length} \u9898\uFF1A\u8F6C\u300C\u9010\u9898\u6574\u9875\u88C5\u8F7D\u300D\u6A21\u5F0F\uFF0C\u65E5\u5FD7\u968F\u5404\u9875\u51FA\u73B0` });
+    fire({ kind: "log", level: "info", text: `\u7F16\u7A0B\u9898 ${problems.length} \u9898\uFF1A\u8F6C\u300C\u9010\u9898\u6574\u9875\u88C5\u8F7D\u300D\u6A21\u5F0F\uFF08\u65E5\u5FD7\u8DE8\u9875\u4FDD\u7559\uFF09` });
     pageScript("if (!window.__BPS_CONFIRM__) { window.__BPS_CONFIRM__ = window.confirm; window.confirm = function(){ return true; }; }");
     try {
       location.href = `/problem-sets/${psId}/exam/problems/type/${first.typeId}?problemSetProblemId=${first.id}`;
@@ -1004,6 +1203,10 @@
       fire({ kind: "log", level: "warn", text: "\u7F16\u7A0B\u9898\u7EED\u8DD1\u53D6\u6D88\uFF1A\u7EED\u8DD1\u5355\u5DF2\u8D8A\u754C" });
       return;
     }
+    if (rateLimitedNow()) {
+      pauseForRateLimit(r, "\u9875\u9762\u52A0\u8F7D");
+      return;
+    }
     if (!new RegExp(`problemSetProblemId=${prob.id}$`).test(location.search)) {
       clearRelay();
       fire({ kind: "log", level: "warn", text: "\u7F16\u7A0B\u9898\u7EED\u8DD1\u53D6\u6D88\uFF1A\u9875\u9762\u4E0D\u5728 " + (prob.id || "").slice(-4) + " \u4E0A\uFF08\u5DF2\u843D\u4F4D\u9898\u76EE\u4FDD\u6301\u5404\u81EA\u72B6\u6001\uFF09" });
@@ -1013,8 +1216,9 @@
     runAbort = new AbortController();
     suppressLeaveConfirm();
     fire({ kind: "state", running: true });
+    const hadHistory = readPersistedLog().length > 0;
     fire({ kind: "log", level: "info", text: `\u7F16\u7A0B\u9898\u7EED\u8DD1\uFF08\u7B2C ${r.pi + 1}/${r.problems.length} \u9898\uFF0C${r.phase === "verify" ? "\u6C34\u5408\u6821\u9A8C/\u63D0\u4EA4" : "\u6536\u96C6\u4F5C\u7B54"}\u9636\u6BB5\uFF09` });
-    if (r.summary.failed.length) {
+    if (r.summary.failed.length && !hadHistory) {
       fire({ kind: "log", level: "warn", text: `\u6B64\u524D\u5DF2\u5931\u8D25 ${r.summary.failed.length} \u9898\uFF1A
 ${failDetails(r.summary.failed)}` });
     }
@@ -1064,6 +1268,7 @@ ${failDetails(s.failed)}`;
     fire({ kind: "state", running: false, error: "\u5DF2\u4E2D\u6B62" });
   }
   async function relayNext(r, record, text) {
+    r.rlTries = 0;
     if (record === "ok") {
       r.summary.applied += 1;
       if (text) fire({ kind: "log", level: "ok", text });
@@ -1104,6 +1309,7 @@ ${failDetails(s.failed)}`;
     }
     running = false;
     restoreLeaveConfirm();
+    await pacePageLoad("\u5207\u6362\u4E0B\u4E00\u9898");
     try {
       location.href = `/problem-sets/${r.psId}/exam/problems/type/${next.typeId}?problemSetProblemId=${next.id}`;
     } catch (_) {
@@ -1112,9 +1318,14 @@ ${failDetails(s.failed)}`;
   async function relayCollect(r, prob) {
     const q = collectProgramming();
     if (!q) {
+      if (rateLimitedNow()) {
+        pauseForRateLimit(r, "\u6536\u96C6\u9898\u76EE");
+        return;
+      }
       relayRecordFail(r, prob, null, "\u7F16\u7A0B\u9898\u9875\u9762\u6536\u4E0D\u5230\u9898\u76EE");
       return relayNext(r, "fail");
     }
+    r.rlTries = 0;
     const label = q.label || prob.id.slice(-4);
     if (q.answered && !r.cfg.overwrite) return relayNext(r, "skip", `${label}\uFF1A\u8DF3\u8FC7\uFF0C\u5DF2\u4F5C\u7B54`);
     if (q.hasImg && !r.cfg.images) {
@@ -1132,21 +1343,15 @@ ${failDetails(s.failed)}`;
     const messages = buildPrompt({ ...q, langLabel: wantLangLabel });
     let raw = null;
     fire({ kind: "log", level: "info", text: `${label}\uFF1A\u8BF7\u6C42\u6A21\u578B\u4E2D\u2026` });
-    for (let attempt = 1; attempt <= 2; attempt++) {
-      try {
-        raw = globalThis.__BPS_LLM_MOCK__ ? await globalThis.__BPS_LLM_MOCK__(messages) : await chatOnce(r.cfg, messages);
-        break;
-      } catch (err) {
-        if (userStopped(r)) {
-          stopRelayByUser(r);
-          return;
-        }
-        if (attempt === 2) {
-          relayRecordFail(r, prob, label, "LLM \u8C03\u7528\u5931\u8D25\uFF1A" + (err?.message || err));
-          return relayNext(r, "fail");
-        }
-        await sleep(900);
+    try {
+      raw = globalThis.__BPS_LLM_MOCK__ ? await globalThis.__BPS_LLM_MOCK__(messages) : await chatWithRetry(r.cfg, messages);
+    } catch (err) {
+      if (userStopped(r)) {
+        stopRelayByUser(r);
+        return;
       }
+      relayRecordFail(r, prob, label, "LLM \u8C03\u7528\u5931\u8D25\uFF1A" + (err?.message || err));
+      return relayNext(r, "fail");
     }
     const code = parseCodeAnswer(raw);
     if (!code) {
@@ -1159,6 +1364,10 @@ ${failDetails(s.failed)}`;
     }
     const written = await saveDraft(prob.id, detail, compilerId, code);
     if (!written.ok) {
+      if (rateLimitedNow()) {
+        pauseForRateLimit(r, "\u5199\u8349\u7A3F");
+        return;
+      }
       relayRecordFail(r, prob, label, `\u8349\u7A3F\u5199\u5165\u5931\u8D25\uFF08HTTP ${written.status ?? "\u672A\u77E5"}${written.err ? "\uFF1A" + written.err : ""}\uFF09`);
       return relayNext(r, "fail");
     }
@@ -1175,6 +1384,7 @@ ${failDetails(s.failed)}`;
       return;
     }
     running = false;
+    await pacePageLoad("\u63D0\u4EA4\u8349\u7A3F\u540E\u6821\u9A8C");
     try {
       location.reload();
     } catch (_) {
@@ -1186,6 +1396,10 @@ ${failDetails(s.failed)}`;
       abortRelay(r, "verify \u9636\u6BB5\u7F3A\u5C11 hint\uFF08replay \u72B6\u6001\u9519\u4E71\uFF09");
       return;
     }
+    if (rateLimitedNow()) {
+      pauseForRateLimit(r, "\u6C34\u5408\u6821\u9A8C");
+      return;
+    }
     const label = hint.label || prob.id.slice(-4);
     const wantLangLabel = hint.wantLangLabel || "";
     const compilerId = hint.compilerId;
@@ -1194,6 +1408,10 @@ ${failDetails(s.failed)}`;
     const hyd = await waitHydrate(true);
     const cmText = editableCm()?.textContent || "";
     if (!hyd.ok || head && !cmText.includes(head)) {
+      if (rateLimitedNow()) {
+        pauseForRateLimit(r, "\u6C34\u5408\u6821\u9A8C");
+        return;
+      }
       const rollback = await saveDraft(prob.id, detail, compilerId, "");
       stripDraftHttpCache(prob.id);
       clearCodingProblemCache(prob.id);
@@ -1201,6 +1419,7 @@ ${failDetails(s.failed)}`;
       if (!rollback.ok) return abortRelay(r, "\u8349\u7A3F\u64A4\u9500\u5931\u8D25\uFF08\u6B8B\u7559\u4EE3\u7801\uFF09\uFF0C\u9700\u4EBA\u5DE5\u6838\u5BF9\u540E\u518D\u8BD5");
       return relayNext(r, "fail");
     }
+    r.rlTries = 0;
     const mountedLabel = langLabelOf();
     if (mountedLabel !== wantLangLabel) {
       const rollback = await saveDraft(prob.id, detail, compilerId, "");
@@ -1222,7 +1441,11 @@ ${failDetails(s.failed)}`;
       return;
     }
     const saved = await submitProgramming();
-    if (!saved.saved) {
+    if (!saved.saved || rateLimitedNow()) {
+      if (rateLimitedNow()) {
+        pauseForRateLimit(r, "\u63D0\u4EA4\u8BC4\u6D4B");
+        return;
+      }
       const rollback = await saveDraft(prob.id, detail, compilerId, "");
       stripDraftHttpCache(prob.id);
       clearCodingProblemCache(prob.id);
@@ -1269,12 +1492,44 @@ ${failDetails(s.failed)}`;
   function userStopped(r) {
     return !!(runAbort?.signal?.aborted || r?.aborted);
   }
+  var LOG_KEY = "__BPS_AA_LOG__";
+  var LOG_CAP = 200;
+  function logTime() {
+    const d = /* @__PURE__ */ new Date();
+    const p = (n) => String(n).padStart(2, "0");
+    return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+  }
+  function readPersistedLog() {
+    try {
+      const arr = JSON.parse(sessionStorage.getItem(LOG_KEY) || "[]");
+      if (!Array.isArray(arr)) return [];
+      return arr.filter((x) => x && typeof x.text === "string").map((x) => ({ level: x.level || "info", text: x.text, t: x.t || "" }));
+    } catch (_) {
+      return [];
+    }
+  }
+  function persistLogLine(level, text, t) {
+    try {
+      const arr = readPersistedLog();
+      arr.push({ level: level || "info", text: String(text ?? ""), t: t || logTime() });
+      if (arr.length > LOG_CAP) arr.splice(0, arr.length - LOG_CAP);
+      sessionStorage.setItem(LOG_KEY, JSON.stringify(arr));
+    } catch (_) {
+    }
+  }
+  function clearPersistedLog() {
+    try {
+      sessionStorage.removeItem(LOG_KEY);
+    } catch (_) {
+    }
+  }
   var eventSink = null;
   function setEventSink(fn) {
     eventSink = typeof fn === "function" ? fn : null;
   }
   var debugTrace = [];
   function fire(event) {
+    if (event.kind === "log") persistLogLine(event.level, event.text);
     debugTrace.push({ ...event, t: Date.now() });
     if (debugTrace.length > 40) debugTrace.splice(0, debugTrace.length - 40);
     try {
@@ -1333,6 +1588,12 @@ ${failDetails(s.failed)}`;
       fire({ kind: "log", level: "err", text: "\u8BF7\u5148\u9009\u62E9\u6A21\u578B\u5E76\u586B\u5199 API Key" });
       return { ok: false, error: "\u8BF7\u5148\u586B\u5199 API Key" };
     }
+    try {
+      assertChatModel(cfg);
+    } catch (err) {
+      fire({ kind: "log", level: "err", text: err.message });
+      return { ok: false, error: err.message };
+    }
     running = true;
     runAbort = new AbortController();
     suppressLeaveConfirm();
@@ -1341,6 +1602,8 @@ ${failDetails(s.failed)}`;
     let ret = null;
     let relayStarted = false;
     try {
+      clearPersistedLog();
+      fire({ kind: "log-clear" });
       fire({ kind: "state", running: true });
       fire({ kind: "log", level: "info", text: `\u5F00\u59CB\u7B54\u9898\uFF08\u6BCF\u9898\u4E00\u6B21\u8BF7\u6C42\uFF0C${cfg.overwrite ? "\u8986\u76D6\u5DF2\u4F5C\u7B54" : "\u8DF3\u8FC7\u5DF2\u7B54"}${cfg.images ? "\uFF0C\u542B\u56FE\u9898\u4F5C\u7B54" : ""}\uFF09` });
       const types = sidebarTypes().filter((t) => TYPE_BY_NAME[t.typeName] || false).filter((t) => t.total > 0);
@@ -1472,12 +1735,12 @@ ${failDetails(s.failed)}`;
     },
     opencode: {
       label: "OpenCode Go",
-      baseUrl: "https://opencode.ai/zen/go/v1",
+      baseUrl: "https://opencode.ai/inference/go/openai/v1",
       model: "glm-5.3-flash",
       gateway: "opencode",
       editableModel: true,
       // 网关模型可自填（面板多一行「模型」输入），留空用默认
-      hint: "Zen Go \u7F51\u5173 \xB7 glm / kimi / deepseek \u7CFB\u6A21\u578B\u53EF\u7528"
+      hint: "OpenCode Go \xB7 \u4EC5 chat \u7CFB\u6A21\u578B\uFF08glm / kimi / deepseek / longcat / mimo\uFF09"
     },
     custom: {
       label: "\u81EA\u5B9A\u4E49",
@@ -1773,8 +2036,10 @@ input:disabled, button:disabled { opacity: .6; cursor: not-allowed; } /* PTA \u7
     const p = (n) => String(n).padStart(2, "0");
     return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
   }
-  function appendLog(level, text) {
-    logLines.push({ level, text, t: timeStr() });
+  function appendLog(level, text, at = null, persist2 = true) {
+    const t = at || timeStr();
+    logLines.push({ level, text, t });
+    if (persist2) persistLogLine(level, text, t);
     if (logLines.length > MAX_LOG_LINES) logLines.splice(0, logLines.length - MAX_LOG_LINES);
     if (!shadow) return;
     const box = shadow.getElementById("logs");
@@ -1782,7 +2047,7 @@ input:disabled, button:disabled { opacity: .6; cursor: not-allowed; } /* PTA \u7
     const nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 30;
     const line = el("div", "line", box);
     const tag = { ok: "\u2713", err: "\u2715", warn: "!" }[level] || "\xB7";
-    line.innerHTML = `<span class="t">${timeStr()}</span><span class="lv-${level}">${tag}</span> `;
+    line.innerHTML = `<span class="t">${t}</span><span class="lv-${level}">${tag}</span> `;
     line.appendChild(document.createTextNode(text));
     while (box.children.length > MAX_LOG_LINES) box.firstChild.remove();
     if (nearBottom) box.scrollTop = box.scrollHeight;
@@ -1800,7 +2065,12 @@ input:disabled, button:disabled { opacity: .6; cursor: not-allowed; } /* PTA \u7
     box.scrollTop = box.scrollHeight;
   }
   function onEvent(ev) {
-    if (ev.kind === "log") return appendLog(ev.level, ev.text);
+    if (ev.kind === "log-clear") {
+      logLines.length = 0;
+      renderLogs();
+      return;
+    }
+    if (ev.kind === "log") return appendLog(ev.level, ev.text, null, false);
     if (ev.kind === "progress") {
       lastProgress = { done: ev.done, total: ev.total };
       if (shadow) updateRunUI();
@@ -1813,7 +2083,7 @@ input:disabled, button:disabled { opacity: .6; cursor: not-allowed; } /* PTA \u7
       } else {
         finished = true;
         finishedWithError = !!ev.error;
-        if (ev.error) appendLog("err", ev.error);
+        if (ev.error) appendLog("err", ev.error, null, false);
       }
       if (shadow) {
         updateRunUI();
@@ -2098,6 +2368,7 @@ input:disabled, button:disabled { opacity: .6; cursor: not-allowed; } /* PTA \u7
     ovw.addEventListener("change", persist);
     imgs.addEventListener("change", persist);
     clear.addEventListener("click", () => {
+      clearPersistedLog();
       logLines.length = 0;
       renderLogs();
     });
@@ -2113,6 +2384,7 @@ input:disabled, button:disabled { opacity: .6; cursor: not-allowed; } /* PTA \u7
     themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ["class"] });
     themeObserver.observe(document.body, { attributes: true, attributeFilter: ["class"] });
     document.body.appendChild(host);
+    if (!logLines.length) logLines.push(...readPersistedLog().slice(-MAX_LOG_LINES));
     renderLogs();
     updateRunUI();
     loadBallPos().then((p) => {

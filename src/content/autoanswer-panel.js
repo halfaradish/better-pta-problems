@@ -11,15 +11,16 @@
  */
 import { loadSettings, saveSettings } from '../shared/settings.js';
 import {
-  abortRun, COMPILER_LABELS, EXAM_PROBLEMS_RE, fetchAllowedCompilers,
-  handleRun, isRunning, normalizeBaseUrl, setEventSink,
+  abortRun, clearPersistedLog, COMPILER_LABELS, EXAM_PROBLEMS_RE, fetchAllowedCompilers,
+  handleRun, isRunning, normalizeBaseUrl, persistLogLine, readPersistedLog, setEventSink,
 } from './autoanswer.js';
 
 // 模型适配 presets：往这里加即可挂进面板下拉。
-// gateway 对应 autoanswer.js chatOnce 的协议分支（opencode 网关需要 x-opencode-session 等头）；
-// 网关里只有 chat-completions 协议的模型系可标 editableModel——OpenCode Zen Go 上
-// glm / kimi / deepseek 系走 /chat/completions（本引擎支持），claude / minimax 走 /messages、
-// grok / gpt 系走 /responses，均暂不解析，不许用户选（选了也是「LLM 响应为空」）。
+// gateway 对应 autoanswer.js chatOnce 的协议分支：opencode 走 background 转发
+// （网关不放行页面 CORS）并附加 x-opencode-session 会话头；网关里只有 chat-completions
+// 协议的模型系可标 editableModel——GLM / Kimi / DeepSeek / LongCat / MiMo 等走
+// /chat/completions（本引擎支持），Claude / MiniMax M3 / Qwen3.8-3.7 走 Messages、
+// GPT / Grok / Muse Spark 走 Responses、Gemini 走 generateContent，均暂不解析。
 export const PRESETS = {
   deepseek: {
     label: 'DeepSeek',
@@ -30,11 +31,11 @@ export const PRESETS = {
   },
   opencode: {
     label: 'OpenCode Go',
-    baseUrl: 'https://opencode.ai/zen/go/v1',
+    baseUrl: 'https://opencode.ai/inference/go/openai/v1',
     model: 'glm-5.3-flash',
     gateway: 'opencode',
     editableModel: true, // 网关模型可自填（面板多一行「模型」输入），留空用默认
-    hint: 'Zen Go 网关 · glm / kimi / deepseek 系模型可用',
+    hint: 'OpenCode Go · 仅 chat 系模型（glm / kimi / deepseek / longcat / mimo）',
   },
   custom: {
     label: '自定义',
@@ -351,8 +352,12 @@ function timeStr() {
 
 /* ---------- 日志 ---------- */
 
-function appendLog(level, text) {
-  logLines.push({ level, text, t: timeStr() });
+// persist：引擎事件在 fire 时已落 sessionStorage（跨页日志），面板侧只负责展示；
+// 面板自己的校验/中止提示没有经过引擎，默认也要落盘，否则切页后消失。
+function appendLog(level, text, at = null, persist = true) {
+  const t = at || timeStr();
+  logLines.push({ level, text, t });
+  if (persist) persistLogLine(level, text, t);
   if (logLines.length > MAX_LOG_LINES) logLines.splice(0, logLines.length - MAX_LOG_LINES);
   if (!shadow) return;
   const box = shadow.getElementById('logs');
@@ -360,7 +365,7 @@ function appendLog(level, text) {
   const nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 30;
   const line = el('div', 'line', box);
   const tag = { ok: '✓', err: '✕', warn: '!' }[level] || '·';
-  line.innerHTML = `<span class="t">${timeStr()}</span><span class="lv-${level}">${tag}</span> `;
+  line.innerHTML = `<span class="t">${t}</span><span class="lv-${level}">${tag}</span> `;
   line.appendChild(document.createTextNode(text));
   while (box.children.length > MAX_LOG_LINES) box.firstChild.remove();
   if (nearBottom) box.scrollTop = box.scrollHeight;
@@ -382,7 +387,12 @@ function renderLogs() {
 /* ---------- 事件流 → 面板/球 ---------- */
 
 function onEvent(ev) {
-  if (ev.kind === 'log') return appendLog(ev.level, ev.text);
+  if (ev.kind === 'log-clear') {
+    logLines.length = 0;
+    renderLogs();
+    return;
+  }
+  if (ev.kind === 'log') return appendLog(ev.level, ev.text, null, false); // 引擎已持久化
   if (ev.kind === 'progress') {
     lastProgress = { done: ev.done, total: ev.total };
     if (shadow) updateRunUI();
@@ -395,7 +405,7 @@ function onEvent(ev) {
     } else {
       finished = true;
       finishedWithError = !!ev.error;
-      if (ev.error) appendLog('err', ev.error);
+      if (ev.error) appendLog('err', ev.error, null, false); // 引擎已随日志落盘
     }
     if (shadow) {
       updateRunUI();
@@ -715,6 +725,7 @@ function mount() {
   ovw.addEventListener('change', persist);
   imgs.addEventListener('change', persist);
   clear.addEventListener('click', () => {
+    clearPersistedLog(); // 清空要跨页生效，否则下一页又把历史回放回来
     logLines.length = 0;
     renderLogs();
   });
@@ -732,6 +743,8 @@ function mount() {
   themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['class'] });
   themeObserver.observe(document.body, { attributes: true, attributeFilter: ['class'] }); // 实测暗色类在 body 上
   document.body.appendChild(host);
+  // 跨页日志：编程题续跑每题整页装载，先把 sessionStorage 里的历史回放出来
+  if (!logLines.length) logLines.push(...readPersistedLog().slice(-MAX_LOG_LINES));
   renderLogs();
   updateRunUI();
   // 恢复上次拖拽位置（异步回填；未拖过则保持 CSS 默认右下）

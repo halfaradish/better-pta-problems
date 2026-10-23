@@ -3,8 +3,9 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
-  assembleImgMessage, buildPrompt, COMPILER_LABELS, compilerIdFromLabel, failDetails, normalizeBaseUrl, normalizeTF,
-  parseChoiceAnswer, parseCodeAnswer, parseFillAnswers, relaySummaryLine, seedCodingProblemCache, TYPE_BY_NAME,
+  assembleImgMessage, assertChatModel, buildPrompt, clearPersistedLog, COMPILER_LABELS, compilerIdFromLabel, failDetails,
+  isRateLimitedText, isRetryableLlmError, nonChatProtocol, normalizeBaseUrl, normalizeTF, parseChoiceAnswer, parseCodeAnswer,
+  parseFillAnswers, parseLlmErrorBody, persistLogLine, readPersistedLog, relaySummaryLine, seedCodingProblemCache, TYPE_BY_NAME,
 } from '../src/content/autoanswer.js';
 import { PRESETS, clampBallPos, currentKey, resolveModel, withKeyFor } from '../src/content/autoanswer-panel.js';
 
@@ -203,11 +204,85 @@ test('assembleImgMessage：视觉消息 = 原文本在前（附说明），题�
 });
 
 test('PRESETS：OpenCode Go 网关适配的关键约定（协议头分支与默认模型）', () => {
-  assert.equal(PRESETS.opencode.gateway, 'opencode'); // chatOnce 靠它加 x-opencode-session
-  assert.equal(PRESETS.opencode.baseUrl, 'https://opencode.ai/zen/go/v1');
+  assert.equal(PRESETS.opencode.gateway, 'opencode'); // chatOnce 靠它走后台转发并加 x-opencode-session
+  assert.equal(PRESETS.opencode.baseUrl, 'https://opencode.ai/inference/go/openai/v1'); // 官方文档口径
   assert.equal(PRESETS.opencode.editableModel, true);
   assert.equal(PRESETS.deepseek.gateway, 'deepseek');
   assert.equal(!!PRESETS.deepseek.editableModel, false); // DeepSeek 固定 deepseek-flash
+});
+
+test('OpenCode Go：非 chat 协议模型按前缀拒绝，chat 系放行', () => {
+  for (const id of ['glm-5.3-flash', 'glm-5.3', 'kimi-k3', 'deepseek-v4.1-flash', 'longcat-2.0', 'mimo-v2.6-flash', 'minimax-m3.1-flash', 'hy3']) {
+    assert.equal(nonChatProtocol(id), '', id);
+  }
+  assert.match(nonChatProtocol('claude-haiku-5-5'), /Anthropic Messages/);
+  assert.match(nonChatProtocol('minimax-m3'), /Anthropic Messages/); // 仅精确匹配，不能误伤 m3.1-flash
+  assert.match(nonChatProtocol('qwen3.8-max'), /Anthropic Messages/);
+  assert.match(nonChatProtocol('qwen3.7-plus'), /Anthropic Messages/);
+  assert.match(nonChatProtocol('gpt-6-luna'), /OpenAI Responses/);
+  assert.match(nonChatProtocol('grok-4.7'), /OpenAI Responses/);
+  assert.match(nonChatProtocol('muse-spark-1.3-contributor'), /OpenAI Responses/);
+  assert.match(nonChatProtocol('gemini-4-argon-contributor'), /Google generateContent/);
+  // 只对 OpenCode 通道生效；自定义端点可自己代理/转协议
+  assert.doesNotThrow(() => assertChatModel({ gateway: 'custom', model: 'claude-haiku-5-5' }));
+  assert.throws(() => assertChatModel({ gateway: 'opencode', model: 'claude-haiku-5-5' }), /Anthropic Messages/);
+});
+
+test('LLM 错误体：两种网关形状 + 重试判定', () => {
+  assert.deepEqual(
+    parseLlmErrorBody('{"type":"error","error":{"type":"MissingSessionID","message":"missing"}}'),
+    { type: 'MissingSessionID', message: 'missing' },
+  );
+  assert.deepEqual(
+    parseLlmErrorBody('{"error":{"type":"server_error","message":"Go requires a credential"}}'),
+    { type: 'server_error', message: 'Go requires a credential' },
+  );
+  assert.deepEqual(parseLlmErrorBody('plain text'), { type: '', message: 'plain text' });
+  assert.equal(parseLlmErrorBody(''), null);
+  // 429 / 5xx / 网络错误可重试；配置与凭证错误不重试
+  assert.equal(isRetryableLlmError({ status: 429 }), true);
+  assert.equal(isRetryableLlmError({ status: 503 }), true);
+  assert.equal(isRetryableLlmError(new Error('Failed to fetch')), true);
+  for (const status of [400, 401, 403, 404]) assert.equal(isRetryableLlmError({ status }), false, String(status));
+  assert.equal(isRetryableLlmError({ aborted: true }), false);
+  assert.equal(isRetryableLlmError(null), false);
+});
+
+test('PTA 限流页识别：专有文案直接命中，泛化词需错误页外壳', () => {
+  assert.equal(isRateLimitedText('您访问得太快啦，不如休息一会儿吧'), true);
+  assert.equal(isRateLimitedText('错误信息 浏览器信息 反馈问题 访问过于频繁'), true);
+  assert.equal(isRateLimitedText('反馈问题：操作过于频繁'), true);
+  assert.equal(isRateLimitedText('题目：为什么访问得太快会导致缓存失效'), false);
+  assert.equal(isRateLimitedText('设计一个限流器，访问过于频繁时返回 429'), false);
+  assert.equal(isRateLimitedText('正常题目页'), false);
+  assert.equal(isRateLimitedText(''), false);
+  assert.equal(isRateLimitedText(null), false);
+});
+
+test('跨页日志：引擎落盘、读取裁剪与清空', () => {
+  const store = new Map();
+  globalThis.sessionStorage = {
+    getItem: k => (store.has(k) ? store.get(k) : null),
+    setItem: (k, v) => { store.set(k, String(v)); },
+    removeItem: k => { store.delete(k); },
+  };
+  try {
+    clearPersistedLog();
+    persistLogLine('info', '第一行', '18:55:02');
+    persistLogLine('err', '第二行', '18:55:03');
+    assert.deepEqual(
+      readPersistedLog().map(x => [x.level, x.text, x.t]),
+      [['info', '第一行', '18:55:02'], ['err', '第二行', '18:55:03']],
+    );
+    for (let i = 0; i < 205; i++) persistLogLine('info', 'x' + i, '18:55:04');
+    const capped = readPersistedLog();
+    assert.equal(capped.length, 200);
+    assert.equal(capped[capped.length - 1].text, 'x204');
+    clearPersistedLog();
+    assert.deepEqual(readPersistedLog(), []);
+  } finally {
+    delete globalThis.sessionStorage;
+  }
 });
 
 test('failDetails：失败明细逐条换行，label 缺省回退题 id 后四位', () => {

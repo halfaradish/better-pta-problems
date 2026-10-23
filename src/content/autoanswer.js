@@ -27,6 +27,12 @@ const LETTERS = 'ABCDEFGHIJ';
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
+const abortedError = () => {
+  const err = new Error('已中止');
+  err.aborted = true;
+  return err;
+};
+
 /* ---------- 带时限的 fetch ----------
  * 服务瘫痪的最坏型态是连接挂起不回包：fetch 无内置超时，请求能吊死几分钟，期间引擎
  * 的 worker 全停在 await、事件流一行不出——面板看似死机，发生了什么只能靠猜。
@@ -39,13 +45,13 @@ async function fetchBounded(url, opts = {}, ms, stopSignal) {
   const timer = setTimeout(() => ctl.abort(), ms);
   const stopNow = () => ctl.abort();
   if (stopSignal) {
-    if (stopSignal.aborted) { clearTimeout(timer); throw new Error('已中止'); }
+    if (stopSignal.aborted) { clearTimeout(timer); throw abortedError(); }
     stopSignal.addEventListener('abort', stopNow, { once: true });
   }
   try {
     return await fetch(url, { ...opts, signal: ctl.signal });
   } catch (err) {
-    if (stopSignal?.aborted) throw new Error('已中止');
+    if (stopSignal?.aborted) throw abortedError();
     if (err?.name === 'AbortError') throw new Error(`请求 ${Math.round(ms / 1000)}s 无响应，已按超时中断`);
     throw err;
   } finally {
@@ -637,31 +643,182 @@ export function normalizeBaseUrl(raw) {
   return s;
 }
 
-async function chatOnce(cfg, messages) {
-  const base = normalizeBaseUrl(cfg.baseUrl);
-  const headers = {
-    'Content-Type': 'application/json',
-    Authorization: 'Bearer ' + String(cfg.apiKey || '').trim(),
-  };
-  // OpenCode Go 网关要求：每个会话带稳定的 x-opencode-session（利于路由/缓存，
-  // 不带可能被拒 400）。DeepSeek 官方 API 不需要，不附加多余头。
-  if (cfg.gateway === 'opencode') {
-    headers['x-opencode-session'] = sessionHeader();
-    headers['User-Agent'] = 'better-pta-problems/0.9'; // 网关要求自建 UA（浏览器会忽略，仅为直连场景保留）
+// 网关错误体有两种形状（{type,error:{...}} 与 {error:{...}}）；统一成 {type,message}。
+// 非 JSON 时退回正文前缀。日志只输出这里的文案，绝不带 Authorization。
+export function parseLlmErrorBody(body) {
+  const text = String(body || '').trim();
+  if (!text) return null;
+  try {
+    const o = JSON.parse(text);
+    const e = o && typeof o === 'object' ? (o.error && typeof o.error === 'object' ? o.error : o) : null;
+    if (!e || typeof e !== 'object') return null;
+    const type = typeof e.type === 'string' ? e.type : '';
+    const message = typeof e.message === 'string' ? e.message : '';
+    if (!type && !message) return null;
+    return { type, message };
+  } catch (_) {
+    return { type: '', message: text.slice(0, 160) };
   }
+}
+
+// 重试策略：429/5xx 与网络错误可退避重试；400/401/403/404 是配置或凭证问题，
+// 重试不会变好（指南 §6/§8.13）；用户中止立即放弃。
+export function isRetryableLlmError(err) {
+  if (!err || err.aborted) return false;
+  if (err.status == null || err.status === 0) return true;
+  return err.status === 429 || err.status >= 500;
+}
+
+function httpError(status, body, logId) {
+  const parsed = parseLlmErrorBody(body);
+  const detail = parsed
+    ? [parsed.type, parsed.message].filter(Boolean).join('：')
+    : String(body || '').trim().slice(0, 160);
+  const suffix = logId ? `（x-opencode-log-id: ${logId}）` : '';
+  const err = new Error(`LLM HTTP ${status}${detail ? '，' + detail : ''}${suffix}`);
+  err.status = status;
+  return err;
+}
+
+// OpenCode Go 的模型并非都走 chat/completions（官方端点表）：GPT/Grok/Muse Spark 走
+// Responses，Claude/Minimax M3/Qwen3.8-3.7 走 Messages，Gemini 走 generateContent。
+// 按前缀拒绝而不是维护白名单——官方新增 chat 模型时不用改代码，误填时也能直接说清原因。
+const NON_CHAT_MODEL_RULES = [
+  { re: /^gpt-/i, protocol: 'OpenAI Responses' },
+  { re: /^grok-/i, protocol: 'OpenAI Responses' },
+  { re: /^muse-spark-/i, protocol: 'OpenAI Responses' },
+  { re: /^claude-/i, protocol: 'Anthropic Messages' },
+  { re: /^minimax-m3$/i, protocol: 'Anthropic Messages' }, // m3.1-flash 属 chat 系，不能用前缀
+  { re: /^qwen3\.[78]-/i, protocol: 'Anthropic Messages' },
+  { re: /^gemini-/i, protocol: 'Google generateContent' },
+];
+
+export function nonChatProtocol(modelId) {
+  const id = String(modelId || '').trim();
+  const hit = NON_CHAT_MODEL_RULES.find(x => x.re.test(id));
+  return hit ? hit.protocol : '';
+}
+
+export function assertChatModel(cfg) {
+  if (!cfg || cfg.gateway !== 'opencode') return;
+  const protocol = nonChatProtocol(cfg.model);
+  if (!protocol) return;
+  const err = new Error(`模型 ${cfg.model} 走 ${protocol} 协议，本引擎只支持 /chat/completions；请改用 glm / kimi / deepseek / longcat / mimo 等 chat 系模型`);
+  err.status = 400; // 配置错误，不触发重试
+  throw err;
+}
+
+// OpenCode 网关不返回 CORS 头（预检直接 404），页面 fetch 必被浏览器拦下；
+// 改由 background 转发（manifest host_permissions 已覆盖 opencode.ai）。
+const hasBgFetch = typeof chrome !== 'undefined' && !!chrome.runtime?.sendMessage;
+
+function backgroundChat(msg, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        reject(new Error(`后台转发 ${Math.round(timeoutMs / 1000)}s 无响应`));
+      }
+    }, timeoutMs + 5000);
+    try {
+      chrome.runtime.sendMessage(msg, rsp => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        if (chrome.runtime.lastError) return reject(new Error(chrome.runtime.lastError.message));
+        resolve(rsp);
+      });
+    } catch (err) {
+      settled = true;
+      clearTimeout(timer);
+      reject(err);
+    }
+  });
+}
+
+// 后台转发没有 AbortSignal 可传：用本地竞速立即收摊，同时通知 background
+// 按 reqId 中断在途 fetch（中止按钮要求「在途请求立即断开」）。
+function raceAbort(promise, signal, onAbort) {
+  if (!signal) return promise;
+  if (signal.aborted) { onAbort?.(); return Promise.reject(abortedError()); }
+  return new Promise((resolve, reject) => {
+    const stop = () => { onAbort?.(); reject(abortedError()); };
+    signal.addEventListener('abort', stop, { once: true });
+    promise.then(
+      v => { signal.removeEventListener('abort', stop); resolve(v); },
+      e => { signal.removeEventListener('abort', stop); reject(e); },
+    );
+  });
+}
+
+async function chatViaBackground(cfg, messages) {
+  if (!hasBgFetch) throw new Error('OpenCode Go 需要扩展后台转发，当前环境不可用');
+  const reqId = 'llm-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
+  const rsp = await raceAbort(backgroundChat({
+    type: 'BPS_LLM_CHAT',
+    reqId,
+    baseUrl: cfg.baseUrl,
+    apiKey: cfg.apiKey,
+    model: cfg.model,
+    session: sessionHeader(),
+    messages,
+  }, CHAT_TIMEOUT_MS), runAbort?.signal ?? null, () => {
+    try {
+      chrome.runtime.sendMessage({ type: 'BPS_LLM_ABORT', reqId }, () => { void chrome.runtime.lastError; });
+    } catch (_) { /* 后台不在也本地放弃 */ }
+  });
+  if (!rsp) throw new Error('后台转发无响应');
+  if (!rsp.ok) {
+    if (rsp.status) throw httpError(rsp.status, rsp.text || rsp.reason || '', rsp.logId);
+    throw new Error('LLM 请求失败：' + (rsp.reason || '未知错误'));
+  }
+  let data = null;
+  try { data = JSON.parse(rsp.text); } catch (_) { throw new Error('LLM 响应不是合法 JSON'); }
+  const text = data?.choices?.[0]?.message?.content;
+  if (typeof text !== 'string' || !text.trim()) throw new Error('LLM 响应为空');
+  return text;
+}
+
+async function chatOnce(cfg, messages) {
+  assertChatModel(cfg);
+  if (cfg.gateway === 'opencode') return chatViaBackground(cfg, messages);
+  const base = normalizeBaseUrl(cfg.baseUrl);
   const res = await fetchBounded(base + '/chat/completions', {
     method: 'POST',
-    headers,
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: 'Bearer ' + String(cfg.apiKey || '').trim(),
+    },
     body: JSON.stringify({ model: cfg.model, temperature: 0, messages }),
   }, CHAT_TIMEOUT_MS, runAbort?.signal ?? null);
   if (!res.ok) {
     const t = await res.text().catch(() => '');
-    throw new Error('LLM HTTP ' + res.status + (t ? '：' + t.slice(0, 140) : ''));
+    throw httpError(res.status, t, res.headers.get('x-opencode-log-id') || '');
   }
-  const data = await res.json();
+  let data = null;
+  try { data = await res.json(); } catch (_) { throw new Error('LLM 响应不是合法 JSON'); }
   const text = data?.choices?.[0]?.message?.content;
   if (typeof text !== 'string' || !text.trim()) throw new Error('LLM 响应为空');
   return text;
+}
+
+// 有上限的退避（指数 + 抖动）：只对可重试错误生效，最多 3 次尝试。
+const MAX_CHAT_ATTEMPTS = 3;
+const retryDelay = attempt => 900 * 2 ** (attempt - 1) + Math.floor(Math.random() * 250);
+
+async function chatWithRetry(cfg, messages) {
+  let lastErr = null;
+  for (let attempt = 1; attempt <= MAX_CHAT_ATTEMPTS; attempt++) {
+    try {
+      return await chatOnce(cfg, messages);
+    } catch (err) {
+      lastErr = err;
+      if (err?.aborted || attempt >= MAX_CHAT_ATTEMPTS || !isRetryableLlmError(err)) break;
+      await sleep(retryDelay(attempt));
+    }
+  }
+  throw lastErr;
 }
 
 // 页面上下文带登录态取图并转 data URL（初探结论：ptausercontent 图源可直接带登录态获取）。
@@ -679,8 +836,6 @@ function toDataUrlPage(src) {
     r.readAsDataURL(blob);
   }));
 }
-
-const hasBgFetch = typeof chrome !== 'undefined' && !!chrome.runtime?.sendMessage;
 
 async function toDataUrl(src) {
   try {
@@ -749,17 +904,13 @@ async function answerOne(q, cfg) {
     ? [{ role: 'system', content: basePrompt[0].content }, { role: 'user', content: assembleImgMessage(basePrompt[1].content, images) }]
     : basePrompt;
   let raw = null;
-  for (let attempt = 1; attempt <= 2; attempt++) {
-    try {
-      raw = globalThis.__BPS_LLM_MOCK__
-        ? await globalThis.__BPS_LLM_MOCK__(messages)
-        : await chatOnce(cfg, messages);
-      break;
-    } catch (err) {
-      if (runAbort?.signal.aborted) return { ok: false, reason: '已中止' };
-      if (attempt === 2) return { ok: false, reason: 'LLM 调用失败：' + (err?.message || err) };
-      await sleep(900);
-    }
+  try {
+    raw = globalThis.__BPS_LLM_MOCK__
+      ? await globalThis.__BPS_LLM_MOCK__(messages)
+      : await chatWithRetry(cfg, messages);
+  } catch (err) {
+    if (runAbort?.signal.aborted || err?.aborted) return { ok: false, reason: '已中止' };
+    return { ok: false, reason: 'LLM 调用失败：' + (err?.message || err) };
   }
   const json = parseJsonLoose(raw);
   if (!json) return { ok: false, reason: 'LLM 输出无法解析：' + String(raw).slice(0, 60) };
@@ -805,6 +956,64 @@ function clearRelay() {
   try { sessionStorage.removeItem(RELAY_KEY); } catch (_) {}
 }
 
+/* ---------- PTA 访问频率限制 ----------
+ * PTA 在请求过快时会把整页换成错误页（「您访问得太快啦，不如休息一会儿吧」）。
+ * 续跑每题要整页装载两次（collect → reload verify），连续翻页很容易触发，因此：
+ * 1) 两次整页装载之间至少隔 PAGE_LOAD_GAP_MS（按当前文档已存活时长补足 + 抖动）；
+ * 2) 一旦识别到限流页就暂停重载本题，冷却按 60/120/180s 递增，仍不行才中止。
+ * 冷却次数存进续跑单（rlTries），跨页保留；处理到真实题目页后清零。
+ */
+const PAGE_LOAD_GAP_MS = 12000; // 两次整页装载的最小间隔（再叠加 0-4s 抖动）
+const RATE_LIMIT_WAITS_MS = [60000, 120000, 180000];
+
+export function isRateLimitedText(text) {
+  const s = String(text || '').replace(/\s+/g, '');
+  // 「您访问得太快啦」是 PTA 错误页的专有文案，单独命中即可；
+  // 其余泛化词（访问过于频繁等）必须同时出现错误页外壳，避免把限流器题面当成限流页
+  if (s.includes('您访问得太快啦')) return true;
+  const shell = s.includes('反馈问题') || s.includes('浏览器信息') || s.includes('错误信息') || s.includes('feedback@pat-edu.com');
+  if (!shell) return false;
+  return s.includes('访问得太快') || s.includes('访问过于频繁') || s.includes('操作过于频繁');
+}
+
+function rateLimitedNow() {
+  try { return isRateLimitedText((document.body?.innerText || '').slice(0, 20000)); } catch (_) { return false; }
+}
+
+// 当前文档存活不足 gap 就补足；LLM 已经等了几十秒的页面直接放行
+async function pacePageLoad(where) {
+  const wait = Math.max(0, PAGE_LOAD_GAP_MS - performance.now() + Math.floor(Math.random() * 4000));
+  if (wait < 1200) return;
+  fire({ kind: 'log', level: 'info', text: `${where}：等待 ${Math.ceil(wait / 1000)}s 再切换（避免 PTA 访问频率限制）…` });
+  await sleep(wait);
+}
+
+// 返回 true 表示已接管（暂停或中止），调用方不要再推进续跑
+function pauseForRateLimit(r, where) {
+  const tries = Number(r.rlTries) || 0;
+  if (tries >= RATE_LIMIT_WAITS_MS.length) {
+    abortRelay(r, `连续触发 PTA 访问频率限制（${where}），已冷却 ${RATE_LIMIT_WAITS_MS.map(ms => Math.round(ms / 1000)).join(' / ')}s 仍被拒绝；请休息几分钟后重新开始，已完成的题目不会重做`);
+    return true;
+  }
+  const wait = RATE_LIMIT_WAITS_MS[tries];
+  r.rlTries = tries + 1;
+  if (!writeRelay(r)) {
+    abortRelay(r, 'sessionStorage 写入失败，无法记录限流冷却');
+    return true;
+  }
+  running = false;
+  runAbort = null;
+  restoreLeaveConfirm();
+  fire({ kind: 'log', level: 'warn', text: `PTA 限流（${where}）：等待 ${Math.round(wait / 1000)}s 后重载本题（第 ${tries + 1}/${RATE_LIMIT_WAITS_MS.length} 次）…` });
+  // 不 reload 当前地址：限流页可能已被换成错误页地址，直接回到续跑单里这一题的 URL
+  const prob = r.problems?.[r.pi];
+  const target = prob
+    ? `/problem-sets/${r.psId}/exam/problems/type/${prob.typeId}?problemSetProblemId=${prob.id}`
+    : location.href;
+  setTimeout(() => { try { location.href = target; } catch (_) { /* 交浏览器 */ } }, wait);
+  return true;
+}
+
 // 编程题流程入口：往 sessionStorage 里放下续跑单，然后整页跳到第一题（收集委托给 boot）
 function startProgrammingRelay(psId, progTypes, cfg) {
   const problems = [];
@@ -823,7 +1032,7 @@ function startProgrammingRelay(psId, progTypes, cfg) {
   };
   if (!writeRelay(relay)) throw new Error('sessionStorage 不可写，无法跨页续跑编程题');
   const first = problems[0];
-  fire({ kind: 'log', level: 'info', text: `编程题 ${problems.length} 题：转「逐题整页装载」模式，日志随各页出现` });
+  fire({ kind: 'log', level: 'info', text: `编程题 ${problems.length} 题：转「逐题整页装载」模式（日志跨页保留）` });
   pageScript('if (!window.__BPS_CONFIRM__) { window.__BPS_CONFIRM__ = window.confirm; window.confirm = function(){ return true; }; }');
   try { location.href = `/problem-sets/${psId}/exam/problems/type/${first.typeId}?problemSetProblemId=${first.id}`; } catch (_) { /* 导航由浏览器处理 */ }
   return true;
@@ -850,6 +1059,8 @@ export async function resumeRelay(settings) {
     fire({ kind: 'log', level: 'warn', text: '编程题续跑取消：续跑单已越界' });
     return;
   }
+  // 限流页可能被 PTA 换成别的地址/错误页：先识别再校验 URL，避免把限流误判成「用户导航走了」而弃单
+  if (rateLimitedNow()) { pauseForRateLimit(r, '页面加载'); return; }
   if (!new RegExp(`problemSetProblemId=${prob.id}$`).test(location.search)) {
     // 用户把页面开去了别处 → 弃单（已落位的题目保持各自状态）
     clearRelay();
@@ -860,10 +1071,11 @@ export async function resumeRelay(settings) {
   runAbort = new AbortController(); // 续跑页也挂终止信号，面板的中止按钮每页都有效
   suppressLeaveConfirm();
   fire({ kind: 'state', running: true });
-  // 每页的进页日志：跨页续跑每题一页，日志会清空——进页先立坐标，此前失败当场回放，
-  // 免得只见球在转、不知道滚到第几题、前几题死因如何
+  // 每页的进页日志：跨页日志已持久化（见 readPersistedLog），这里只立坐标；
+  // 历史日志丢了（用户手动清空）才回放失败清单兜底
+  const hadHistory = readPersistedLog().length > 0;
   fire({ kind: 'log', level: 'info', text: `编程题续跑（第 ${r.pi + 1}/${r.problems.length} 题，${r.phase === 'verify' ? '水合校验/提交' : '收集作答'}阶段）` });
-  if (r.summary.failed.length) {
+  if (r.summary.failed.length && !hadHistory) {
     fire({ kind: 'log', level: 'warn', text: `此前已失败 ${r.summary.failed.length} 题：\n${failDetails(r.summary.failed)}` });
   }
   try {
@@ -891,9 +1103,8 @@ export function relaySummaryLine(r) {
   return `${line}\n失败明细：\n${failDetails(s.failed)}`;
 }
 
-// 单题失败记账 + 当场报错：续跑每题失败就翻页（本页日志清空，失败原因以前只进汇总，
-// 要等全部结束后才现形，期间发生了什么无从查起）——失败必须立刻在日志里留痕，
-// 下一页 boot 时还会回放已失败清单（见 resumeRelay）。label 缺省用题 id 后四位兜底。
+// 单题失败记账 + 当场报错：失败必须立刻在日志里留痕（跨页日志会保留），
+// 不能只进汇总等全部结束才现形。label 缺省用题 id 后四位兜底。
 function relayRecordFail(r, prob, label, reason) {
   r.summary.failed.push({ id: prob.id, ...(label ? { label } : {}), reason });
   fire({ kind: 'log', level: 'err', text: `${label || prob.id.slice(-4)}：${reason}` });
@@ -922,6 +1133,7 @@ function stopRelayByUser(r) {
 
 // 推进到下一题（record: 'ok'|'skip'|'fail'——fail 的失败条目由调用方写好）；最后一题收尾
 async function relayNext(r, record, text) {
+  r.rlTries = 0; // 能走到这里说明不是限流页：下一次限流重新从 60s 冷却开始
   if (record === 'ok') {
     r.summary.applied += 1;
     if (text) fire({ kind: 'log', level: 'ok', text });
@@ -955,13 +1167,19 @@ async function relayNext(r, record, text) {
   if (!writeRelay(r)) { abortRelay(r, 'sessionStorage 写入失败'); return; }
   running = false;
   restoreLeaveConfirm();
+  await pacePageLoad('切换下一题');
   try { location.href = `/problem-sets/${r.psId}/exam/problems/type/${next.typeId}?problemSetProblemId=${next.id}`; } catch (_) { /* 导航交浏览器 */ }
 }
 
 // collect 文档：收题 → 守护 → LLM → 写草稿 → 转 verify（整页 reload）
 async function relayCollect(r, prob) {
   const q = collectProgramming();
-  if (!q) { relayRecordFail(r, prob, null, '编程题页面收不到题目'); return relayNext(r, 'fail'); }
+  if (!q) {
+    if (rateLimitedNow()) { pauseForRateLimit(r, '收集题目'); return; }
+    relayRecordFail(r, prob, null, '编程题页面收不到题目');
+    return relayNext(r, 'fail');
+  }
+  r.rlTries = 0; // 真实题目页已打开：限流冷却计数清零
   const label = q.label || prob.id.slice(-4);
   if (q.answered && !r.cfg.overwrite) return relayNext(r, 'skip', `${label}：跳过，已作答`);
   if (q.hasImg && !r.cfg.images) {
@@ -983,20 +1201,14 @@ async function relayCollect(r, prob) {
   const messages = buildPrompt({ ...q, langLabel: wantLangLabel });
   let raw = null;
   fire({ kind: 'log', level: 'info', text: `${label}：请求模型中…` }); // await 期间的事件流在场日志
-  for (let attempt = 1; attempt <= 2; attempt++) {
-    try {
-      raw = globalThis.__BPS_LLM_MOCK__
-        ? await globalThis.__BPS_LLM_MOCK__(messages)
-        : await chatOnce(r.cfg, messages);
-      break;
-    } catch (err) {
-      if (userStopped(r)) { stopRelayByUser(r); return; } // 中止来的失败不算题目的失败，别记假账
-      if (attempt === 2) {
-        relayRecordFail(r, prob, label, 'LLM 调用失败：' + (err?.message || err));
-        return relayNext(r, 'fail');
-      }
-      await sleep(900);
-    }
+  try {
+    raw = globalThis.__BPS_LLM_MOCK__
+      ? await globalThis.__BPS_LLM_MOCK__(messages)
+      : await chatWithRetry(r.cfg, messages);
+  } catch (err) {
+    if (userStopped(r)) { stopRelayByUser(r); return; } // 中止来的失败不算题目的失败，别记假账
+    relayRecordFail(r, prob, label, 'LLM 调用失败：' + (err?.message || err));
+    return relayNext(r, 'fail');
   }
   const code = parseCodeAnswer(raw);
   if (!code) {
@@ -1010,6 +1222,7 @@ async function relayCollect(r, prob) {
 
   const written = await saveDraft(prob.id, detail, compilerId, code);
   if (!written.ok) {
+    if (rateLimitedNow()) { pauseForRateLimit(r, '写草稿'); return; }
     relayRecordFail(r, prob, label, `草稿写入失败（HTTP ${written.status ?? '未知'}${written.err ? '：' + written.err : ''}）`);
     return relayNext(r, 'fail');
   }
@@ -1025,6 +1238,7 @@ async function relayCollect(r, prob) {
   r.hint = { label, compilerId, wantLangLabel, head: (code.split('\n')[0] || '').trim().slice(0, 24), detail };
   if (!writeRelay(r)) { abortRelay(r, 'sessionStorage 写入失败'); return; }
   running = false; // 文档马上销毁，复位标记避免残留运行态
+  await pacePageLoad('提交草稿后校验');
   try { location.reload(); } catch (_) { /* 交浏览器 */ }
 }
 
@@ -1032,6 +1246,7 @@ async function relayCollect(r, prob) {
 async function relayVerify(r, prob) {
   const hint = r.hint;
   if (!hint || !hint.head) { abortRelay(r, 'verify 阶段缺少 hint（replay 状态错乱）'); return; }
+  if (rateLimitedNow()) { pauseForRateLimit(r, '水合校验'); return; }
   const label = hint.label || prob.id.slice(-4);
   const wantLangLabel = hint.wantLangLabel || '';
   const compilerId = hint.compilerId;
@@ -1041,6 +1256,7 @@ async function relayVerify(r, prob) {
   const hyd = await waitHydrate(true);
   const cmText = editableCm()?.textContent || '';
   if (!hyd.ok || (head && !cmText.includes(head))) {
+    if (rateLimitedNow()) { pauseForRateLimit(r, '水合校验'); return; }
     const rollback = await saveDraft(prob.id, detail, compilerId, '');
     stripDraftHttpCache(prob.id);
     clearCodingProblemCache(prob.id);
@@ -1048,6 +1264,7 @@ async function relayVerify(r, prob) {
     if (!rollback.ok) return abortRelay(r, '草稿撤销失败（残留代码），需人工核对后再试');
     return relayNext(r, 'fail');
   }
+  r.rlTries = 0; // 水合通过 = 真实题目页，限流冷却计数清零
 
   // 语言一致性守卫：实挂语言 != 代码语言时不提交（提交载荷的 compiler 由页面默认链决定，
   // 可能不理会草稿 compiler——不能拿错配代码冒险）
@@ -1072,7 +1289,9 @@ async function relayVerify(r, prob) {
   // 中止检查必须卡在真实评测提交之前：提交即写提交记录，不能替用户「再补一枪」
   if (userStopped(r)) { stopRelayByUser(r); return; }
   const saved = await submitProgramming();
-  if (!saved.saved) {
+  if (!saved.saved || rateLimitedNow()) {
+    // 限流页可能替换在提交之后：不记账、不回滚草稿，冷却后重载本题再试
+    if (rateLimitedNow()) { pauseForRateLimit(r, '提交评测'); return; }
     const rollback = await saveDraft(prob.id, detail, compilerId, '');
     stripDraftHttpCache(prob.id);
     clearCodingProblemCache(prob.id);
@@ -1132,12 +1351,52 @@ function userStopped(r) {
 // 事件：{kind:'log', level:'info'|'ok'|'warn'|'err', text}
 //       {kind:'progress', done, total, typeName}
 //       {kind:'state', running, error?}
+/* ---------- 跨页日志 ----------
+ * 编程题续跑每题整页装载，面板内存里的日志随文档销毁；把日志同时写进 sessionStorage
+ * （同标签页跨 reload 存活），下一页挂载时先回放，整轮日志才看得全。
+ * 由引擎统一落盘（面板只展示）：日志发出时面板可能还没挂载，放在面板层会丢。
+ */
+const LOG_KEY = '__BPS_AA_LOG__';
+const LOG_CAP = 200; // 与面板 MAX_LOG_LINES 一致
+
+function logTime() {
+  const d = new Date();
+  const p = n => String(n).padStart(2, '0');
+  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+
+export function readPersistedLog() {
+  try {
+    const arr = JSON.parse(sessionStorage.getItem(LOG_KEY) || '[]');
+    if (!Array.isArray(arr)) return [];
+    return arr
+      .filter(x => x && typeof x.text === 'string')
+      .map(x => ({ level: x.level || 'info', text: x.text, t: x.t || '' }));
+  } catch (_) {
+    return [];
+  }
+}
+
+export function persistLogLine(level, text, t) {
+  try {
+    const arr = readPersistedLog();
+    arr.push({ level: level || 'info', text: String(text ?? ''), t: t || logTime() });
+    if (arr.length > LOG_CAP) arr.splice(0, arr.length - LOG_CAP);
+    sessionStorage.setItem(LOG_KEY, JSON.stringify(arr));
+  } catch (_) { /* 隐私模式/配额满：跨页日志失效不阻断运行 */ }
+}
+
+export function clearPersistedLog() {
+  try { sessionStorage.removeItem(LOG_KEY); } catch (_) {}
+}
+
 let eventSink = null;
 export function setEventSink(fn) {
   eventSink = typeof fn === 'function' ? fn : null;
 }
 const debugTrace = [];
 function fire(event) {
+  if (event.kind === 'log') persistLogLine(event.level, event.text);
   // 事件轨迹（调试/回归用黑匣子）：保留最近 40 条，同一文档内按时间序可读
   debugTrace.push({ ...event, t: Date.now() });
   if (debugTrace.length > 40) debugTrace.splice(0, debugTrace.length - 40);
@@ -1184,6 +1443,12 @@ export async function handleRun(config = {}) {
     fire({ kind: 'log', level: 'err', text: '请先选择模型并填写 API Key' });
     return { ok: false, error: '请先填写 API Key' };
   }
+  try {
+    assertChatModel(cfg); // 非 chat 系模型在开跑前就明确拒绝，不白耗每道题的一次 400
+  } catch (err) {
+    fire({ kind: 'log', level: 'err', text: err.message });
+    return { ok: false, error: err.message };
+  }
 
   running = true;
   runAbort = new AbortController(); // 中止按钮的终止信号：请求与各循环按它收摊
@@ -1193,6 +1458,8 @@ export async function handleRun(config = {}) {
   let ret = null;
   let relayStarted = false;
   try {
+    clearPersistedLog(); // 新一轮从空日志开始（跨页续跑属于同一轮，不会走到这里）
+    fire({ kind: 'log-clear' });
     fire({ kind: 'state', running: true });
     fire({ kind: 'log', level: 'info', text: `开始答题（每题一次请求，${cfg.overwrite ? '覆盖已作答' : '跳过已答'}${cfg.images ? '，含图题作答' : ''}）` });
     const types = sidebarTypes().filter(t => TYPE_BY_NAME[t.typeName] || false).filter(t => t.total > 0);
