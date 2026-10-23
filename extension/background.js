@@ -98,6 +98,94 @@
     return next;
   }
 
+  // src/shared/llm.js
+  var LLM_HEADERS_TIMEOUT_MS = 45e3;
+  var LLM_IDLE_TIMEOUT_MS = 45e3;
+  var LLM_TOTAL_TIMEOUT_MS = 3e5;
+  var LLM_PROGRESS_EVERY_MS = 15e3;
+  var LLM_KEEPALIVE_MS = 2e4;
+
+  // src/shared/sse.js
+  function stripPrefix(line) {
+    return line.slice(5).replace(/^ /, "");
+  }
+  function createSseParser(onEvent) {
+    let buf = "";
+    let dataLines = [];
+    const emit = (fn) => {
+      try {
+        fn();
+      } catch (_) {
+      }
+    };
+    const dispatch = () => {
+      if (!dataLines.length) return;
+      const lines = dataLines;
+      dataLines = [];
+      const handle = (raw) => {
+        if (raw === "[DONE]") {
+          emit(() => onEvent?.({ done: true }));
+          return true;
+        }
+        try {
+          const data = JSON.parse(raw);
+          emit(() => onEvent?.({ data }));
+          return true;
+        } catch (_) {
+          return false;
+        }
+      };
+      if (lines.length === 1) {
+        handle(lines[0]);
+        return;
+      }
+      if (handle(lines.join("\n"))) return;
+      for (const line of lines) handle(line);
+    };
+    return {
+      push(chunk) {
+        buf += String(chunk ?? "");
+        let idx;
+        while ((idx = buf.indexOf("\n")) >= 0) {
+          let line = buf.slice(0, idx);
+          buf = buf.slice(idx + 1);
+          if (line.endsWith("\r")) line = line.slice(0, -1);
+          if (line === "") {
+            dispatch();
+            continue;
+          }
+          if (line.startsWith(":")) continue;
+          if (!line.startsWith("data:")) continue;
+          dataLines.push(stripPrefix(line));
+        }
+      },
+      end() {
+        if (buf) {
+          const line = buf.endsWith("\r") ? buf.slice(0, -1) : buf;
+          buf = "";
+          if (line.startsWith("data:")) dataLines.push(stripPrefix(line));
+        }
+        dispatch();
+      }
+    };
+  }
+  function contentText(v) {
+    if (typeof v === "string") return v;
+    if (Array.isArray(v)) return v.map((p) => typeof p === "string" ? p : p?.text || "").join("");
+    return "";
+  }
+  function sseDeltaText(obj) {
+    const ch = obj?.choices?.[0];
+    const d = contentText(ch?.delta?.content);
+    if (d) return d;
+    return contentText(ch?.message?.content);
+  }
+  function sseReasoningText(obj) {
+    const ch = obj?.choices?.[0];
+    const d = ch?.delta || ch?.message || {};
+    return contentText(d.reasoning_content) || contentText(d.reasoning) || contentText(d.reasoning_details) || "";
+  }
+
   // src/shared/browser-notify.js
   var NOTIFY_BEFORE_MINUTES = [4320, 1440];
   var SCAN_PERIOD_MINUTES = 30;
@@ -223,7 +311,6 @@
     if (!res.ok || data.ok === false) throw new Error(data.error || "HTTP " + res.status);
     return data;
   }
-  var LLM_TIMEOUT_MS = 12e4;
   var llmControllers = /* @__PURE__ */ new Map();
   function opencodeChatUrl(baseUrl) {
     const base = String(baseUrl || "").trim().replace(/\/+$/, "").replace(/\/chat\/completions$/i, "").replace(/\/+$/, "");
@@ -237,7 +324,8 @@
     if (!u.pathname.startsWith("/inference/go/")) return null;
     return u.origin + u.pathname + "/chat/completions";
   }
-  async function relayLlmChat(msg) {
+  async function relayLlmChat(msg, emit = () => {
+  }) {
     const url = opencodeChatUrl(msg.baseUrl);
     if (!url) return { ok: false, status: 400, reason: "\u4EC5\u652F\u6301\u8F6C\u53D1 OpenCode Go \u7684 /inference/go/ \u7AEF\u70B9" };
     const apiKey = String(msg.apiKey || "").trim();
@@ -250,35 +338,129 @@
     const reqId = String(msg.reqId || "");
     if (!/^[A-Za-z0-9._-]{1,64}$/.test(reqId)) return { ok: false, status: 400, reason: "\u7F3A\u5C11\u6216\u975E\u6CD5\u7684 reqId" };
     const ctl = new AbortController();
-    let userAborted = false;
-    llmControllers.set(reqId, { abort: () => {
-      userAborted = true;
+    let abortReason = "";
+    const abortWith = (why) => {
+      if (ctl.signal.aborted) return;
+      abortReason = why;
       ctl.abort();
-    } });
-    const timer = setTimeout(() => ctl.abort(), LLM_TIMEOUT_MS);
+    };
+    llmControllers.set(reqId, { abort: () => abortWith("user") });
+    const startedAt = Date.now();
+    let text = "";
+    let reasoning = "";
+    let streamError = null;
+    let firstAt = 0;
+    let firstThinkAt = 0;
+    let streamOpen = false;
+    let lastProgressAt = 0;
+    let headersTimer = setTimeout(() => abortWith("headers"), LLM_HEADERS_TIMEOUT_MS);
+    let idleTimer = null;
+    const totalTimer = setTimeout(() => abortWith("total"), LLM_TOTAL_TIMEOUT_MS);
+    const armIdle = () => {
+      clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => abortWith("idle"), LLM_IDLE_TIMEOUT_MS);
+    };
+    const progress = (phase, chars) => {
+      const now = Date.now();
+      const throttled = phase === "tick" || phase === "thinking-tick";
+      if (throttled && now - lastProgressAt < LLM_PROGRESS_EVERY_MS) return;
+      if (phase !== "waiting") lastProgressAt = now;
+      try {
+        emit({ type: "progress", phase, chars, elapsedMs: now - startedAt });
+      } catch (_) {
+      }
+    };
+    const keepAliveTimer = setInterval(() => {
+      try {
+        chrome.runtime.getPlatformInfo(() => {
+          void chrome.runtime.lastError;
+        });
+      } catch (_) {
+      }
+      if (firstAt) return;
+      if (!streamOpen) progress("waiting", 0);
+      else if (!firstThinkAt) progress("stream-wait", 0);
+    }, LLM_KEEPALIVE_MS);
     try {
       const res = await fetch(url, {
         method: "POST",
         // 浏览器禁止脚本设置 User-Agent（禁止头，会被静默丢弃），这里只能保留浏览器自身 UA
         headers: {
           "Content-Type": "application/json",
+          Accept: "text/event-stream",
           Authorization: "Bearer " + apiKey,
           "x-opencode-session": session
         },
-        body: JSON.stringify({ model, temperature: 0, messages: msg.messages }),
+        body: JSON.stringify({ model, temperature: 0, stream: true, messages: msg.messages }),
         signal: ctl.signal
       });
-      const text = await res.text().catch(() => "");
-      return { ok: res.ok, status: res.status, text, logId: res.headers.get("x-opencode-log-id") || "" };
+      clearTimeout(headersTimer);
+      headersTimer = null;
+      const logId = res.headers.get("x-opencode-log-id") || "";
+      if (!res.ok) {
+        const body2 = await res.text().catch(() => "");
+        return { ok: false, status: res.status, text: body2, logId };
+      }
+      const ctype = res.headers.get("content-type") || "";
+      if (ctype.includes("text/event-stream") && res.body) {
+        armIdle();
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        const parser = createSseParser((ev) => {
+          if (ev.done) return;
+          if (ev.data?.error) {
+            streamError = ev.data.error;
+            abortWith("stream");
+            return;
+          }
+          const delta = sseDeltaText(ev.data);
+          if (delta) {
+            text += delta;
+            if (!firstAt) {
+              firstAt = Date.now();
+              progress("first", text.length);
+            } else progress("tick", text.length);
+            return;
+          }
+          const think = sseReasoningText(ev.data);
+          if (!think) return;
+          reasoning += think;
+          if (!firstThinkAt) {
+            firstThinkAt = Date.now();
+            progress("thinking", reasoning.length);
+          } else progress("thinking-tick", reasoning.length);
+        });
+        for (; ; ) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          armIdle();
+          if (!streamOpen) {
+            streamOpen = true;
+            progress("stream", 0);
+          }
+          parser.push(decoder.decode(value, { stream: true }));
+        }
+        parser.push(decoder.decode());
+        parser.end();
+        if (streamError) {
+          const detail = typeof streamError === "string" ? streamError : streamError.message || JSON.stringify(streamError).slice(0, 160);
+          return { ok: false, status: 0, reason: "\u7F51\u5173\u6D41\u9519\u8BEF\uFF1A" + detail, kind: "protocol" };
+        }
+        if (!text.trim()) return { ok: false, status: 0, reason: "\u7F51\u5173\u6D41\u7ED3\u675F\u4F46\u6CA1\u6709\u5185\u5BB9", kind: "protocol" };
+        return { ok: true, status: res.status, content: text, logId };
+      }
+      const body = await res.text();
+      return { ok: true, status: res.status, text: body, logId };
     } catch (err) {
-      const timeout = err?.name === "AbortError";
-      return {
-        ok: false,
-        status: 0,
-        reason: userAborted ? "\u5DF2\u4E2D\u6B62" : timeout ? `\u8BF7\u6C42 ${Math.round(LLM_TIMEOUT_MS / 1e3)}s \u65E0\u54CD\u5E94\uFF0C\u5DF2\u6309\u8D85\u65F6\u4E2D\u65AD` : err?.message || String(err)
-      };
+      const streamDetail = streamError ? typeof streamError === "string" ? streamError : streamError.message || "" : "";
+      const reason = abortReason === "headers" ? `\u7F51\u5173 ${Math.round(LLM_HEADERS_TIMEOUT_MS / 1e3)}s \u672A\u8FD4\u56DE\u54CD\u5E94\u5934\uFF0C\u5224\u5B9A\u5361\u4F4F` : abortReason === "idle" ? `\u7F51\u5173 ${Math.round(LLM_IDLE_TIMEOUT_MS / 1e3)}s \u65E0\u6570\u636E\uFF0C\u5224\u5B9A\u5361\u4F4F` : abortReason === "total" ? `\u751F\u6210\u8D85\u8FC7 ${Math.round(LLM_TOTAL_TIMEOUT_MS / 1e3)}s \u603B\u4E0A\u9650\uFF0C\u5DF2\u4E2D\u65AD` : abortReason === "stream" ? "\u7F51\u5173\u6D41\u9519\u8BEF" + (streamDetail ? "\uFF1A" + streamDetail : "") : abortReason === "user" ? "\u5DF2\u4E2D\u6B62" : err?.message || String(err);
+      const kind = abortReason === "headers" || abortReason === "idle" ? "idle" : abortReason === "total" ? "total" : abortReason === "user" ? "abort" : abortReason === "stream" ? "protocol" : "network";
+      return { ok: false, status: 0, reason, kind };
     } finally {
-      clearTimeout(timer);
+      clearInterval(keepAliveTimer);
+      clearTimeout(headersTimer);
+      clearTimeout(idleTimer);
+      clearTimeout(totalTimer);
       llmControllers.delete(reqId);
     }
   }
@@ -439,19 +621,41 @@
     await post(base.base, base.token, "/api/test", { email });
     return { ok: true };
   }
+  chrome.runtime.onConnect.addListener((port) => {
+    if (!port || port.name !== "bps-llm") return;
+    const jobs = /* @__PURE__ */ new Set();
+    const post2 = (obj) => {
+      try {
+        port.postMessage(obj);
+      } catch (_) {
+      }
+    };
+    port.onMessage.addListener((msg) => {
+      if (!msg || msg.type !== "BPS_LLM_CHAT" || jobs.size) return;
+      const reqId = String(msg.reqId || "");
+      jobs.add(reqId);
+      relayLlmChat(msg, post2).then(
+        (result) => post2({ type: "done", ...result }),
+        (err) => post2({ type: "done", ok: false, status: 0, reason: err?.message || String(err) })
+      ).finally(() => {
+        jobs.delete(reqId);
+      });
+    });
+    port.onDisconnect.addListener(() => {
+      for (const id of jobs) {
+        try {
+          llmControllers.get(id)?.abort();
+        } catch (_) {
+        }
+      }
+    });
+  });
   chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     if (msg && msg.type === "BPS_LLM_ABORT") {
       const entry = llmControllers.get(String(msg.reqId || ""));
       if (entry) entry.abort();
       sendResponse({ ok: !!entry });
       return false;
-    }
-    if (msg && msg.type === "BPS_LLM_CHAT") {
-      relayLlmChat(msg).then(
-        sendResponse,
-        (err) => sendResponse({ ok: false, status: 0, reason: err?.message || String(err) })
-      );
-      return true;
     }
     if (msg && msg.type === "BPS_FETCH_IMAGE") {
       if (typeof msg.src !== "string" || !/^https?:\/\//i.test(msg.src)) {

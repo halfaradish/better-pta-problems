@@ -26,6 +26,10 @@
  */
 import { loadSettings } from '../shared/settings.js';
 import {
+  LLM_HEADERS_TIMEOUT_MS, LLM_IDLE_TIMEOUT_MS, LLM_KEEPALIVE_MS, LLM_PROGRESS_EVERY_MS, LLM_TOTAL_TIMEOUT_MS,
+} from '../shared/llm.js';
+import { createSseParser, sseDeltaText, sseReasoningText } from '../shared/sse.js';
+import {
   LIST_URL, NOTIFY_ID, NOTIFY_BEFORE_MINUTES, SCAN_PERIOD_MINUTES, STATE_KEY, TEST_NOTIFY_ID,
   buildNotification, computeDue, normalizeState, pruneState, setOverviewUrl, withSnapshot,
 } from '../shared/browser-notify.js';
@@ -59,13 +63,16 @@ async function post(base, token, path, body) {
   return data;
 }
 
-/* ---------- OpenCode Go 转发（BPS_LLM_CHAT） ----------
+/* ---------- OpenCode Go 转发（BPS_LLM_CHAT，端口 bps-llm） ----------
  * opencode.ai 不返回任何 CORS 头（实测预检直接 404），内容脚本所在页面的 fetch
  * 必被浏览器拦在预检阶段；service worker 有 host permission 后可发跨源请求。
  * 只转发 OpenCode Go 的 chat/completions，不做通用代理——避免变成任意 URL 出口。
  * 错误体原样交回内容脚本统一解析（两种形状 + x-opencode-log-id），本层不记 Key。
+ *
+ * 2026-10-23 起走流式：非流式要等满 120s 才知道网关没回包，也分不清「慢」和「死」；
+ * 现在 45s 没有响应头/没有数据就判卡住，每 15s 报一次已收字符数。端口消息本身是
+ * 扩展 API 调用，长生成期间顺带把 worker 的 idle 计时器顶住（降低被回收的概率）。
  */
-const LLM_TIMEOUT_MS = 120000;
 const llmControllers = new Map(); // reqId → { abort }（内容脚本中止按钮按 reqId 断在途 fetch）
 
 function opencodeChatUrl(baseUrl) {
@@ -77,7 +84,9 @@ function opencodeChatUrl(baseUrl) {
   return u.origin + u.pathname + '/chat/completions';
 }
 
-async function relayLlmChat(msg) {
+// emit 用于把「首块/生成中」进度经端口送回内容脚本；返回结构与旧版一致，
+// 流式成功时把整段文本放在 content 字段（text 字段保留给非流式 JSON 透传）。
+async function relayLlmChat(msg, emit = () => {}) {
   const url = opencodeChatUrl(msg.baseUrl);
   if (!url) return { ok: false, status: 400, reason: '仅支持转发 OpenCode Go 的 /inference/go/ 端点' };
   const apiKey = String(msg.apiKey || '').trim();
@@ -91,34 +100,132 @@ async function relayLlmChat(msg) {
   if (!/^[A-Za-z0-9._-]{1,64}$/.test(reqId)) return { ok: false, status: 400, reason: '缺少或非法的 reqId' };
 
   const ctl = new AbortController();
-  let userAborted = false;
-  llmControllers.set(reqId, { abort: () => { userAborted = true; ctl.abort(); } });
-  const timer = setTimeout(() => ctl.abort(), LLM_TIMEOUT_MS);
+  let abortReason = '';
+  const abortWith = why => {
+    if (ctl.signal.aborted) return;
+    abortReason = why;
+    ctl.abort();
+  };
+  llmControllers.set(reqId, { abort: () => abortWith('user') });
+
+  const startedAt = Date.now();
+  let text = '';
+  let reasoning = '';
+  let streamError = null;
+  let firstAt = 0;
+  let firstThinkAt = 0;
+  let streamOpen = false;
+  let lastProgressAt = 0;
+  let headersTimer = setTimeout(() => abortWith('headers'), LLM_HEADERS_TIMEOUT_MS);
+  let idleTimer = null;
+  const totalTimer = setTimeout(() => abortWith('total'), LLM_TOTAL_TIMEOUT_MS);
+  const armIdle = () => {
+    clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => abortWith('idle'), LLM_IDLE_TIMEOUT_MS);
+  };
+  const progress = (phase, chars) => {
+    const now = Date.now();
+    const throttled = phase === 'tick' || phase === 'thinking-tick';
+    if (throttled && now - lastProgressAt < LLM_PROGRESS_EVERY_MS) return;
+    if (phase !== 'waiting') lastProgressAt = now;
+    try { emit({ type: 'progress', phase, chars, elapsedMs: now - startedAt }); } catch (_) { /* 端口已断 */ }
+  };
+
+  // 端口模式下「挂起的 fetch」不会重置 worker 的 30s idle 计时器：等首块时没有任何事件，
+  // worker 会被回收、端口在 ~30s 断开（7-9/7-10 真机故障）。每 20s 调一次轻量扩展 API
+  // 顶住 idle 计时器，同时给内容脚本发一条「仍在等待」进度。
+  const keepAliveTimer = setInterval(() => {
+    try { chrome.runtime.getPlatformInfo(() => { void chrome.runtime.lastError; }); } catch (_) { /* 扩展卸载中 */ }
+    if (firstAt) return; // 已经开始出答案，不再刷等待日志
+    if (!streamOpen) progress('waiting', 0);
+    else if (!firstThinkAt) progress('stream-wait', 0);
+  }, LLM_KEEPALIVE_MS);
+
   try {
     const res = await fetch(url, {
       method: 'POST',
       // 浏览器禁止脚本设置 User-Agent（禁止头，会被静默丢弃），这里只能保留浏览器自身 UA
       headers: {
         'Content-Type': 'application/json',
+        Accept: 'text/event-stream',
         Authorization: 'Bearer ' + apiKey,
         'x-opencode-session': session,
       },
-      body: JSON.stringify({ model, temperature: 0, messages: msg.messages }),
+      body: JSON.stringify({ model, temperature: 0, stream: true, messages: msg.messages }),
       signal: ctl.signal,
     });
-    const text = await res.text().catch(() => '');
-    return { ok: res.ok, status: res.status, text, logId: res.headers.get('x-opencode-log-id') || '' };
+    clearTimeout(headersTimer);
+    headersTimer = null;
+    const logId = res.headers.get('x-opencode-log-id') || '';
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      return { ok: false, status: res.status, text: body, logId };
+    }
+
+    const ctype = res.headers.get('content-type') || '';
+    if (ctype.includes('text/event-stream') && res.body) {
+      armIdle();
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      const parser = createSseParser(ev => {
+        if (ev.done) return;
+        if (ev.data?.error) { streamError = ev.data.error; abortWith('stream'); return; }
+        const delta = sseDeltaText(ev.data);
+        if (delta) {
+          text += delta;
+          if (!firstAt) { firstAt = Date.now(); progress('first', text.length); }
+          else progress('tick', text.length);
+          return;
+        }
+        // 推理模型在出答案前会持续发 reasoning_content（部分网关叫 reasoning）；
+        // 这些字符证明连接在输出，单独记「思考中」，避免看起来像网关卡死。
+        const think = sseReasoningText(ev.data);
+        if (!think) return;
+        reasoning += think;
+        if (!firstThinkAt) { firstThinkAt = Date.now(); progress('thinking', reasoning.length); }
+        else progress('thinking-tick', reasoning.length);
+      });
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        armIdle(); // 任何字节都算活着（含 keep-alive 注释）
+        if (!streamOpen) { streamOpen = true; progress('stream', 0); }
+        parser.push(decoder.decode(value, { stream: true }));
+      }
+      parser.push(decoder.decode());
+      parser.end();
+      if (streamError) {
+        const detail = typeof streamError === 'string' ? streamError : (streamError.message || JSON.stringify(streamError).slice(0, 160));
+        return { ok: false, status: 0, reason: '网关流错误：' + detail, kind: 'protocol' };
+      }
+      if (!text.trim()) return { ok: false, status: 0, reason: '网关流结束但没有内容', kind: 'protocol' };
+      return { ok: true, status: res.status, content: text, logId };
+    }
+
+    // 网关忽略了 stream:true：退回整段 JSON（这条路径没有中途进度）
+    const body = await res.text();
+    return { ok: true, status: res.status, text: body, logId };
   } catch (err) {
-    const timeout = err?.name === 'AbortError';
-    return {
-      ok: false,
-      status: 0,
-      reason: userAborted ? '已中止'
-        : timeout ? `请求 ${Math.round(LLM_TIMEOUT_MS / 1000)}s 无响应，已按超时中断`
-          : (err?.message || String(err)),
-    };
+    const streamDetail = streamError
+      ? (typeof streamError === 'string' ? streamError : (streamError.message || ''))
+      : '';
+    const reason = abortReason === 'headers' ? `网关 ${Math.round(LLM_HEADERS_TIMEOUT_MS / 1000)}s 未返回响应头，判定卡住`
+      : abortReason === 'idle' ? `网关 ${Math.round(LLM_IDLE_TIMEOUT_MS / 1000)}s 无数据，判定卡住`
+        : abortReason === 'total' ? `生成超过 ${Math.round(LLM_TOTAL_TIMEOUT_MS / 1000)}s 总上限，已中断`
+          : abortReason === 'stream' ? ('网关流错误' + (streamDetail ? '：' + streamDetail : ''))
+            : abortReason === 'user' ? '已中止'
+              : (err?.message || String(err));
+    const kind = abortReason === 'headers' || abortReason === 'idle' ? 'idle'
+      : abortReason === 'total' ? 'total'
+        : abortReason === 'user' ? 'abort'
+          : abortReason === 'stream' ? 'protocol'
+            : 'network';
+    return { ok: false, status: 0, reason, kind };
   } finally {
-    clearTimeout(timer);
+    clearInterval(keepAliveTimer);
+    clearTimeout(headersTimer);
+    clearTimeout(idleTimer);
+    clearTimeout(totalTimer);
     llmControllers.delete(reqId);
   }
 }
@@ -301,19 +408,40 @@ async function testMail(msg) {
   return { ok: true };
 }
 
+/* 一条长请求一个端口：内容脚本用 connect 发请求，后台把首块/进度/最终结果推回去。
+ * 单条 sendMessage 等 2 分钟的模式在 worker 被回收时只会留下 message channel closed，
+ * 端口模式能显式收到断开并让内容脚本按「可重试」处理；页面关闭/用户中止时后台
+ * 通过 onDisconnect 连带取消在途生成，避免服务端空转。 */
+chrome.runtime.onConnect.addListener(port => {
+  if (!port || port.name !== 'bps-llm') return;
+  const jobs = new Set();
+  const post = obj => { try { port.postMessage(obj); } catch (_) { /* 端口已断 */ } };
+  port.onMessage.addListener(msg => {
+    if (!msg || msg.type !== 'BPS_LLM_CHAT' || jobs.size) return; // 一个端口只接一次请求
+    const reqId = String(msg.reqId || '');
+    jobs.add(reqId);
+    relayLlmChat(msg, post).then(
+      result => post({ type: 'done', ...result }),
+      err => post({ type: 'done', ok: false, status: 0, reason: err?.message || String(err) }),
+    ).finally(() => {
+      jobs.delete(reqId);
+      // 不在这里 disconnect：done 刚 post 出去，端口留给内容脚本收到结果后自己断开，
+      // 避免极端时序下最后一条消息被丢弃。
+    });
+  });
+  port.onDisconnect.addListener(() => {
+    for (const id of jobs) {
+      try { llmControllers.get(id)?.abort(); } catch (_) { /* 已完成 */ }
+    }
+  });
+});
+
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg && msg.type === 'BPS_LLM_ABORT') {
     const entry = llmControllers.get(String(msg.reqId || ''));
     if (entry) entry.abort();
     sendResponse({ ok: !!entry });
     return false;
-  }
-  if (msg && msg.type === 'BPS_LLM_CHAT') {
-    relayLlmChat(msg).then(
-      sendResponse,
-      err => sendResponse({ ok: false, status: 0, reason: err?.message || String(err) }),
-    );
-    return true; // 异步 sendResponse
   }
   if (msg && msg.type === 'BPS_FETCH_IMAGE') {
     if (typeof msg.src !== 'string' || !/^https?:\/\//i.test(msg.src)) {
