@@ -9,7 +9,7 @@
     "128": "icons/icon128.png"
   },
   "permissions": ["storage", "alarms", "notifications"],
-  "host_permissions": ["https://images.ptausercontent.com/*"],
+  "host_permissions": ["https://images.ptausercontent.com/*", "https://opencode.ai/*"],
   "background": { "service_worker": "background.js" },
   "content_scripts": [
     {

@@ -59,6 +59,70 @@ async function post(base, token, path, body) {
   return data;
 }
 
+/* ---------- OpenCode Go 转发（BPS_LLM_CHAT） ----------
+ * opencode.ai 不返回任何 CORS 头（实测预检直接 404），内容脚本所在页面的 fetch
+ * 必被浏览器拦在预检阶段；service worker 有 host permission 后可发跨源请求。
+ * 只转发 OpenCode Go 的 chat/completions，不做通用代理——避免变成任意 URL 出口。
+ * 错误体原样交回内容脚本统一解析（两种形状 + x-opencode-log-id），本层不记 Key。
+ */
+const LLM_TIMEOUT_MS = 120000;
+const llmControllers = new Map(); // reqId → { abort }（内容脚本中止按钮按 reqId 断在途 fetch）
+
+function opencodeChatUrl(baseUrl) {
+  const base = String(baseUrl || '').trim().replace(/\/+$/, '').replace(/\/chat\/completions$/i, '').replace(/\/+$/, '');
+  let u;
+  try { u = new URL(base); } catch (_) { return null; }
+  if (u.protocol !== 'https:' || u.hostname !== 'opencode.ai') return null;
+  if (!u.pathname.startsWith('/inference/go/')) return null;
+  return u.origin + u.pathname + '/chat/completions';
+}
+
+async function relayLlmChat(msg) {
+  const url = opencodeChatUrl(msg.baseUrl);
+  if (!url) return { ok: false, status: 400, reason: '仅支持转发 OpenCode Go 的 /inference/go/ 端点' };
+  const apiKey = String(msg.apiKey || '').trim();
+  if (!apiKey) return { ok: false, status: 400, reason: 'API Key 为空' };
+  const session = String(msg.session || '').trim();
+  if (!/^[A-Za-z0-9._-]{1,128}$/.test(session)) return { ok: false, status: 400, reason: '缺少或非法的 x-opencode-session' };
+  const model = String(msg.model || '').trim();
+  if (!model) return { ok: false, status: 400, reason: '模型为空' };
+  if (!Array.isArray(msg.messages) || !msg.messages.length) return { ok: false, status: 400, reason: 'messages 为空' };
+  const reqId = String(msg.reqId || '');
+  if (!/^[A-Za-z0-9._-]{1,64}$/.test(reqId)) return { ok: false, status: 400, reason: '缺少或非法的 reqId' };
+
+  const ctl = new AbortController();
+  let userAborted = false;
+  llmControllers.set(reqId, { abort: () => { userAborted = true; ctl.abort(); } });
+  const timer = setTimeout(() => ctl.abort(), LLM_TIMEOUT_MS);
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      // 浏览器禁止脚本设置 User-Agent（禁止头，会被静默丢弃），这里只能保留浏览器自身 UA
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: 'Bearer ' + apiKey,
+        'x-opencode-session': session,
+      },
+      body: JSON.stringify({ model, temperature: 0, messages: msg.messages }),
+      signal: ctl.signal,
+    });
+    const text = await res.text().catch(() => '');
+    return { ok: res.ok, status: res.status, text, logId: res.headers.get('x-opencode-log-id') || '' };
+  } catch (err) {
+    const timeout = err?.name === 'AbortError';
+    return {
+      ok: false,
+      status: 0,
+      reason: userAborted ? '已中止'
+        : timeout ? `请求 ${Math.round(LLM_TIMEOUT_MS / 1000)}s 无响应，已按超时中断`
+          : (err?.message || String(err)),
+    };
+  } finally {
+    clearTimeout(timer);
+    llmControllers.delete(reqId);
+  }
+}
+
 // 图片转 data URL：分块 btoa 避免大图 String.fromCharCode.apply 栈溢出
 async function toDataUrl(src) {
   const res = await fetch(src, { credentials: 'include' });
@@ -238,6 +302,19 @@ async function testMail(msg) {
 }
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  if (msg && msg.type === 'BPS_LLM_ABORT') {
+    const entry = llmControllers.get(String(msg.reqId || ''));
+    if (entry) entry.abort();
+    sendResponse({ ok: !!entry });
+    return false;
+  }
+  if (msg && msg.type === 'BPS_LLM_CHAT') {
+    relayLlmChat(msg).then(
+      sendResponse,
+      err => sendResponse({ ok: false, status: 0, reason: err?.message || String(err) }),
+    );
+    return true; // 异步 sendResponse
+  }
   if (msg && msg.type === 'BPS_FETCH_IMAGE') {
     if (typeof msg.src !== 'string' || !/^https?:\/\//i.test(msg.src)) {
       sendResponse({ ok: false, reason: '图片地址无效' });

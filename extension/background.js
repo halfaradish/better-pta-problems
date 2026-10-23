@@ -223,6 +223,65 @@
     if (!res.ok || data.ok === false) throw new Error(data.error || "HTTP " + res.status);
     return data;
   }
+  var LLM_TIMEOUT_MS = 12e4;
+  var llmControllers = /* @__PURE__ */ new Map();
+  function opencodeChatUrl(baseUrl) {
+    const base = String(baseUrl || "").trim().replace(/\/+$/, "").replace(/\/chat\/completions$/i, "").replace(/\/+$/, "");
+    let u;
+    try {
+      u = new URL(base);
+    } catch (_) {
+      return null;
+    }
+    if (u.protocol !== "https:" || u.hostname !== "opencode.ai") return null;
+    if (!u.pathname.startsWith("/inference/go/")) return null;
+    return u.origin + u.pathname + "/chat/completions";
+  }
+  async function relayLlmChat(msg) {
+    const url = opencodeChatUrl(msg.baseUrl);
+    if (!url) return { ok: false, status: 400, reason: "\u4EC5\u652F\u6301\u8F6C\u53D1 OpenCode Go \u7684 /inference/go/ \u7AEF\u70B9" };
+    const apiKey = String(msg.apiKey || "").trim();
+    if (!apiKey) return { ok: false, status: 400, reason: "API Key \u4E3A\u7A7A" };
+    const session = String(msg.session || "").trim();
+    if (!/^[A-Za-z0-9._-]{1,128}$/.test(session)) return { ok: false, status: 400, reason: "\u7F3A\u5C11\u6216\u975E\u6CD5\u7684 x-opencode-session" };
+    const model = String(msg.model || "").trim();
+    if (!model) return { ok: false, status: 400, reason: "\u6A21\u578B\u4E3A\u7A7A" };
+    if (!Array.isArray(msg.messages) || !msg.messages.length) return { ok: false, status: 400, reason: "messages \u4E3A\u7A7A" };
+    const reqId = String(msg.reqId || "");
+    if (!/^[A-Za-z0-9._-]{1,64}$/.test(reqId)) return { ok: false, status: 400, reason: "\u7F3A\u5C11\u6216\u975E\u6CD5\u7684 reqId" };
+    const ctl = new AbortController();
+    let userAborted = false;
+    llmControllers.set(reqId, { abort: () => {
+      userAborted = true;
+      ctl.abort();
+    } });
+    const timer = setTimeout(() => ctl.abort(), LLM_TIMEOUT_MS);
+    try {
+      const res = await fetch(url, {
+        method: "POST",
+        // 浏览器禁止脚本设置 User-Agent（禁止头，会被静默丢弃），这里只能保留浏览器自身 UA
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer " + apiKey,
+          "x-opencode-session": session
+        },
+        body: JSON.stringify({ model, temperature: 0, messages: msg.messages }),
+        signal: ctl.signal
+      });
+      const text = await res.text().catch(() => "");
+      return { ok: res.ok, status: res.status, text, logId: res.headers.get("x-opencode-log-id") || "" };
+    } catch (err) {
+      const timeout = err?.name === "AbortError";
+      return {
+        ok: false,
+        status: 0,
+        reason: userAborted ? "\u5DF2\u4E2D\u6B62" : timeout ? `\u8BF7\u6C42 ${Math.round(LLM_TIMEOUT_MS / 1e3)}s \u65E0\u54CD\u5E94\uFF0C\u5DF2\u6309\u8D85\u65F6\u4E2D\u65AD` : err?.message || String(err)
+      };
+    } finally {
+      clearTimeout(timer);
+      llmControllers.delete(reqId);
+    }
+  }
   async function toDataUrl(src) {
     const res = await fetch(src, { credentials: "include" });
     if (!res.ok) throw new Error("HTTP " + res.status);
@@ -381,6 +440,19 @@
     return { ok: true };
   }
   chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+    if (msg && msg.type === "BPS_LLM_ABORT") {
+      const entry = llmControllers.get(String(msg.reqId || ""));
+      if (entry) entry.abort();
+      sendResponse({ ok: !!entry });
+      return false;
+    }
+    if (msg && msg.type === "BPS_LLM_CHAT") {
+      relayLlmChat(msg).then(
+        sendResponse,
+        (err) => sendResponse({ ok: false, status: 0, reason: err?.message || String(err) })
+      );
+      return true;
+    }
     if (msg && msg.type === "BPS_FETCH_IMAGE") {
       if (typeof msg.src !== "string" || !/^https?:\/\//i.test(msg.src)) {
         sendResponse({ ok: false, reason: "\u56FE\u7247\u5730\u5740\u65E0\u6548" });
