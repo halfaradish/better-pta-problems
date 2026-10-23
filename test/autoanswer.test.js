@@ -6,6 +6,7 @@ import {
   assembleImgMessage, assertChatModel, buildPrompt, clearPersistedLog, COMPILER_LABELS, compilerIdFromLabel, failDetails,
   isRateLimitedText, isRetryableLlmError, nonChatProtocol, normalizeBaseUrl, normalizeTF, parseChoiceAnswer, parseCodeAnswer,
   parseFillAnswers, parseLlmErrorBody, persistLogLine, readPersistedLog, relaySummaryLine, seedCodingProblemCache, TYPE_BY_NAME,
+  normalizeLangLabel,
 } from '../src/content/autoanswer.js';
 import { PRESETS, clampBallPos, currentKey, resolveModel, withKeyFor } from '../src/content/autoanswer-panel.js';
 
@@ -131,6 +132,22 @@ test('compilerIdFromLabel：显示名反查编译器 id，未知返回 null', ()
   assert.equal(compilerIdFromLabel('Bogus (none)'), null);
   assert.equal(compilerIdFromLabel(''), null);
   assert.equal(compilerIdFromLabel(null), null);
+});
+
+test('normalizeLangLabel：去掉 single-value 里并排渲染的语言限额（7-8 实测形状）', () => {
+  // PTA 在部分题目里把「语言 + 该语言限额」放进同一个 select__single-value，textContent 直接拼接
+  assert.equal(normalizeLangLabel('C (gcc)100 ms / 64 MB'), 'C (gcc)');
+  assert.equal(normalizeLangLabel('C (gcc) 100 ms / 64 MB'), 'C (gcc)');
+  assert.equal(normalizeLangLabel('C (gcc c11)100ms/64MB'), 'C (gcc c11)');
+  assert.equal(normalizeLangLabel('Python (python3)1.5 s / 256 MB'), 'Python (python3)');
+  assert.equal(normalizeLangLabel('C# (dotnet)1000 ms / 1024 MB'), 'C# (dotnet)');
+  // 没有限额的常规形状与空值保持原样（含空白规整）
+  assert.equal(normalizeLangLabel('C (gcc)'), 'C (gcc)');
+  assert.equal(normalizeLangLabel(' Kotlin (kotlinc) '), 'Kotlin (kotlinc)');
+  assert.equal(normalizeLangLabel(''), '');
+  assert.equal(normalizeLangLabel(null), '');
+  // 规整后的语言名仍能反查编译器 id
+  assert.equal(compilerIdFromLabel(normalizeLangLabel('C (gcc)100 ms / 64 MB')), 'GCC');
 });
 
 test('resolveModel：可自填网关用输入值（trim，空回默认），固定适配无视输入', () => {
@@ -298,19 +315,20 @@ test('failDetails：失败明细逐条换行，label 缺省回退题 id 后四�
 
 test('relaySummaryLine：无失败只有汇总行；有失败追加明细（跨页续跑的失败不再无从查起）', () => {
   const clean = relaySummaryLine({
-    summary: { applied: 1, skippedAnswered: 2, skippedImage: 0, failed: [] },
+    summary: { applied: 1, skippedAnswered: 2, failed: [] },
     cfg: {},
   });
-  assert.match(clean, /作答 1 · 跳过已答 2 · 跳过含图 0 · 失败 0$/);
+  assert.match(clean, /作答 1 · 跳过已答 2 · 失败 0$/);
+  assert.doesNotMatch(clean, /跳过含图/);
   assert.doesNotMatch(clean, /明细/);
   const messy = relaySummaryLine({
-    summary: { applied: 0, skippedAnswered: 0, skippedImage: 1, failed: [{ id: '2110', label: '7-1', reason: 'LLM 调用失败：请求 120s 无响应，已按超时中断' }] },
+    summary: { applied: 0, skippedAnswered: 0, failed: [{ id: '2110', label: '7-1', reason: 'LLM 调用失败：请求 120s 无响应，已按超时中断' }] },
     cfg: {},
   });
   assert.match(messy, /失败 1/);
   assert.match(messy, /失败明细：\n7-1：LLM 调用失败：请求 120s 无响应，已按超时中断/);
   const dry = relaySummaryLine({
-    summary: { applied: 1, skippedAnswered: 0, skippedImage: 0, failed: [] },
+    summary: { applied: 1, skippedAnswered: 0, failed: [] },
     cfg: { drySave: true },
   });
   assert.match(dry, /（dry，未提交）$/);

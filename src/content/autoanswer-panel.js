@@ -602,7 +602,7 @@ function mount() {
   swImg.htmlFor = 'aa-images';
   const stxtImg = el('span', 'stxt', swImg);
   el('b', '', stxtImg).textContent = '作答含图题';
-  el('small', '', stxtImg).textContent = '需视觉模型（如 deepseek-flash），默认跳过';
+  el('small', '', stxtImg).textContent = '需视觉模型（如 deepseek-flash），默认跳过；仅客观题';
   const imgs = el('input', 'switch', swImg);
   imgs.id = 'aa-images';
   imgs.type = 'checkbox';
@@ -624,7 +624,7 @@ function mount() {
   logs.setAttribute('aria-live', 'polite');
 
   el('p', 'foot', pageAnswer).textContent = '实验功能：答题中平台不反馈对错，完成后请自行核对结果。';
-  el('p', 'foot', pageAnswer).textContent = '文本模型看不见图片：题干/选项含图的题要么跳过，要么切到视觉模型（如 deepseek-flash）并开启「作答含图题」。';
+  el('p', 'foot', pageAnswer).textContent = '文本模型看不见图片：客观题含图题要么跳过，要么切到视觉模型（如 deepseek-flash）并开启「作答含图题」；编程题不接图片输入，含图题按文字题面作答并照常提交。';
   el('p', 'foot', pageAnswer).textContent = '编程题提交即评测：作答会实时生成提交记录与作答度，成绩由评测结果决定，与客观题判分路径不同。';
 
   // —— 事件绑定 ——

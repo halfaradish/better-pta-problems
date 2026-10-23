@@ -44,7 +44,7 @@
     autoAnswerOverwrite: false,
     // 覆盖已作答的题目（默认跳过已答，避免把用户的正确答案改错）
     autoAnswerImages: false,
-    // 含图题作答（需视觉模型如 deepseek-flash：图片下载编码进 prompt；默认关闭=含图题跳过）
+    // 含图题作答（需视觉模型如 deepseek-flash：图片下载编码进 prompt；默认关闭=客观题含图跳过；编程题不受此项影响）
     autoAnswerLanguage: "",
     // 编程题固定语言（exams 接口白名单的编译器 id）；空 = 跟随各题编辑器当前语言
     settingsVersion: 0

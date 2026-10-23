@@ -167,6 +167,13 @@ export function buildPrompt(q) {
 
 /* ---------- 编程题：语言映射与代码输出解析（纯函数，单测覆盖） ---------- */
 
+// 语言下拉的 single-value 在部分题目里会把该语言的限额并排渲染进去（实测 7-8：
+// 「C (gcc)」+「100 ms / 64 MB」两段文本拼成 "C (gcc)100 ms / 64 MB"）；语言名只取限额之前。
+export function normalizeLangLabel(text) {
+  const s = String(text || '').replace(/\s+/g, ' ').trim();
+  return s.replace(/\s*\d+(?:\.\d+)?\s*(?:ms|s)\s*\/\s*\d+(?:\.\d+)?\s*[KMGTP]?i?B\s*$/i, '').trim();
+}
+
 // 编译器 id → 菜单显示名。题集白名单来自 exams 接口 problemSet.problemSetConfig.compilers，
 // 数组顺序与题目页 react-select 菜单一致（初探 §10.5，PYTHON3/KOTLIN/GCC 三点实证）；
 // 换新语言时以界面菜单为准补这张表。
@@ -261,10 +268,11 @@ function editableCm() {
 function submitButton() {
   return [...document.querySelectorAll('main button')].find(b => (b.textContent || '').trim() === '提交本题作答') || null;
 }
-// 当前语言的真实值 = react-select 单值文本（React 实时状态；draft.compiler 只是上次持久值）
+// 当前语言的真实值 = react-select 单值文本（React 实时状态；draft.compiler 只是上次持久值）。
+// 单值里可能并排带出该语言限额（见 normalizeLangLabel），取语言名本身。
 function langLabelOf() {
   const form = answerFormEl();
-  return form?.querySelector('.select__single-value')?.textContent?.replace(/\s+/g, ' ').trim() || '';
+  return normalizeLangLabel(form?.querySelector('.select__single-value')?.textContent || '');
 }
 
 // 编程题页题目收集。返回 null 表示当前不是编程题题目页（列表页没有答题表单）。
@@ -965,6 +973,7 @@ function clearRelay() {
  */
 const PAGE_LOAD_GAP_MS = 12000; // 两次整页装载的最小间隔（再叠加 0-4s 抖动）
 const RATE_LIMIT_WAITS_MS = [60000, 120000, 180000];
+const NAVIGATE_CHECK_MS = 10000; // 翻页后多久检查「是不是还停在原页」，失败重试一次再收摊
 
 export function isRateLimitedText(text) {
   const s = String(text || '').replace(/\s+/g, '');
@@ -978,6 +987,26 @@ export function isRateLimitedText(text) {
 
 function rateLimitedNow() {
   try { return isRateLimitedText((document.body?.innerText || '').slice(0, 20000)); } catch (_) { return false; }
+}
+
+// 整页导航（续跑每次翻页/重载都走这里）：成功时本文档立即销毁、定时器随之消失；
+// 若页面始终没跳走（浏览器离开确认被取消、扩展拦截等），重试一次后明确收摊——
+// 不能把续跑单悬在空中，让面板停在「待机」却再也不动。
+function navigateRelay(target, r, what) {
+  const from = location.pathname + location.search;
+  const go = () => { try { location.href = target; } catch (_) { /* 导航交浏览器 */ } };
+  const check = attempt => setTimeout(() => {
+    if (location.pathname + location.search !== from) return; // 已经离开，定时器随旧文档销毁
+    if (attempt === 0) {
+      fire({ kind: 'log', level: 'warn', text: `${what}未生效（页面没有跳转），重试一次…` });
+      go();
+      check(1);
+      return;
+    }
+    abortRelay(r, `${what}被拦下：页面始终没有跳转（浏览器离开确认或扩展拦截），请处理后重新开始，已完成的题目不会重做`);
+  }, NAVIGATE_CHECK_MS);
+  go();
+  check(0);
 }
 
 // 当前文档存活不足 gap 就补足；LLM 已经等了几十秒的页面直接放行
@@ -1003,14 +1032,13 @@ function pauseForRateLimit(r, where) {
   }
   running = false;
   runAbort = null;
-  restoreLeaveConfirm();
   fire({ kind: 'log', level: 'warn', text: `PTA 限流（${where}）：等待 ${Math.round(wait / 1000)}s 后重载本题（第 ${tries + 1}/${RATE_LIMIT_WAITS_MS.length} 次）…` });
   // 不 reload 当前地址：限流页可能已被换成错误页地址，直接回到续跑单里这一题的 URL
   const prob = r.problems?.[r.pi];
   const target = prob
     ? `/problem-sets/${r.psId}/exam/problems/type/${prob.typeId}?problemSetProblemId=${prob.id}`
     : location.href;
-  setTimeout(() => { try { location.href = target; } catch (_) { /* 交浏览器 */ } }, wait);
+  setTimeout(() => navigateRelay(target, r, '限流冷却后重载本题'), wait);
   return true;
 }
 
@@ -1028,13 +1056,13 @@ function startProgrammingRelay(psId, progTypes, cfg) {
     problems,
     pi: 0,
     phase: 'collect', // collect → verify →（advance）→ collect → …
-    summary: { applied: 0, skippedAnswered: 0, skippedImage: 0, failed: [] },
+    summary: { applied: 0, skippedAnswered: 0, failed: [] },
   };
   if (!writeRelay(relay)) throw new Error('sessionStorage 不可写，无法跨页续跑编程题');
   const first = problems[0];
   fire({ kind: 'log', level: 'info', text: `编程题 ${problems.length} 题：转「逐题整页装载」模式（日志跨页保留）` });
-  pageScript('if (!window.__BPS_CONFIRM__) { window.__BPS_CONFIRM__ = window.confirm; window.confirm = function(){ return true; }; }');
-  try { location.href = `/problem-sets/${psId}/exam/problems/type/${first.typeId}?problemSetProblemId=${first.id}`; } catch (_) { /* 导航由浏览器处理 */ }
+  suppressLeaveConfirm(); // 首次跳题也要压住离开确认（本页可能还有未保存的客观题答案）
+  navigateRelay(`/problem-sets/${psId}/exam/problems/type/${first.typeId}?problemSetProblemId=${first.id}`, relay, '进入第一题');
   return true;
 }
 
@@ -1098,7 +1126,7 @@ export function failDetails(failed) {
 
 export function relaySummaryLine(r) {
   const s = r.summary;
-  const line = `作答 ${s.applied} · 跳过已答 ${s.skippedAnswered} · 跳过含图 ${s.skippedImage} · 失败 ${s.failed.length}${r.cfg.drySave ? '（dry，未提交）' : ''}`;
+  const line = `作答 ${s.applied} · 跳过已答 ${s.skippedAnswered} · 失败 ${s.failed.length}${r.cfg.drySave ? '（dry，未提交）' : ''}`;
   if (!s.failed.length) return line;
   return `${line}\n失败明细：\n${failDetails(s.failed)}`;
 }
@@ -1166,9 +1194,8 @@ async function relayNext(r, record, text) {
   await prepNextProblemCache(next.id); // PAT 剥离在函数内会一起做；不一致缓存保留（用户代码签名）
   if (!writeRelay(r)) { abortRelay(r, 'sessionStorage 写入失败'); return; }
   running = false;
-  restoreLeaveConfirm();
   await pacePageLoad('切换下一题');
-  try { location.href = `/problem-sets/${r.psId}/exam/problems/type/${next.typeId}?problemSetProblemId=${next.id}`; } catch (_) { /* 导航交浏览器 */ }
+  navigateRelay(`/problem-sets/${r.psId}/exam/problems/type/${next.typeId}?problemSetProblemId=${next.id}`, r, '切换下一题');
 }
 
 // collect 文档：收题 → 守护 → LLM → 写草稿 → 转 verify（整页 reload）
@@ -1182,11 +1209,9 @@ async function relayCollect(r, prob) {
   r.rlTries = 0; // 真实题目页已打开：限流冷却计数清零
   const label = q.label || prob.id.slice(-4);
   if (q.answered && !r.cfg.overwrite) return relayNext(r, 'skip', `${label}：跳过，已作答`);
-  if (q.hasImg && !r.cfg.images) {
-    r.summary.skippedImage += 1;
-    fire({ kind: 'log', level: 'warn', text: `${label}：跳过，题干含图片（未开「作答含图题」）` });
-    return relayNext(r, 'fail'); // skippedImage 已计入，这里只推进
-  }
+  // 编程题的视觉链路未接（取图与带图消息组装只做在客观题上）：含图题照常按文字题面
+  // 作答并提交，只在日志写明这一局限，避免用户以为模型看过图。
+  if (q.hasImg) fire({ kind: 'log', level: 'warn', text: `${label}：题干含图片，编程题暂不支持图片输入，仅按文字题面作答` });
 
   const detail = await getDraftDetail(prob.id);
   const compilerId = r.cfg.language
@@ -1304,9 +1329,12 @@ async function relayVerify(r, prob) {
 
 /* ---------- 运行编排 ---------- */
 
-// PTA 在题目页有未保存改动时，切换题型会弹 confirm() 离开确认。真实流程每题型答完
-// 即点保存、此框少见，但部分题目 LLM 失败留下草稿时仍会触发并卡住自动化——
-// 运行期间在页面主世界临时禁用（主世界注入可行，实测 PTA 无 CSP meta），结束后恢复。
+// PTA 在题目页有未保存改动时有两种离开确认：SPA 切换题型走 confirm()，整页卸载走
+// beforeunload 监听器（它的 handler 在 props.dirty 时设置 event.returnValue，浏览器据此
+// 弹「离开此网站？」原生框）。续跑每次翻页/重载都是整页导航，两道都要在运行期间压住：
+// confirm 直接替换；beforeunload 把 BeforeUnloadEvent.prototype.returnValue 的 setter
+// 置空（监听器是 PTA 自己 addEventListener 注册的，拿不到引用删不掉，只能让触发对话框的
+// 那一步失效）。主世界注入可行，实测 PTA 无 CSP meta；运行结束后恢复。
 function pageScript(code) {
   const s = document.createElement('script');
   s.textContent = code;
@@ -1314,10 +1342,30 @@ function pageScript(code) {
   s.remove();
 }
 function suppressLeaveConfirm() {
-  pageScript('window.__BPS_CONFIRM__ = window.confirm; window.confirm = () => true;');
+  pageScript(`(function () {
+    if (!window.__BPS_CONFIRM__) { window.__BPS_CONFIRM__ = window.confirm; window.confirm = () => true; }
+    if (!window.__BPS_UNLOAD_DESC__ && typeof BeforeUnloadEvent !== 'undefined') {
+      var d = Object.getOwnPropertyDescriptor(BeforeUnloadEvent.prototype, 'returnValue');
+      try {
+        Object.defineProperty(BeforeUnloadEvent.prototype, 'returnValue', {
+          configurable: true,
+          enumerable: d ? d.enumerable : true,
+          get: function () { return ''; },
+          set: function () { /* 运行期间不触发原生离开确认 */ },
+        });
+        window.__BPS_UNLOAD_DESC__ = d;
+      } catch (_) { /* 原型被冻结时退回 confirm 兜底 */ }
+    }
+  })();`);
 }
 function restoreLeaveConfirm() {
-  pageScript('if (window.__BPS_CONFIRM__) { window.confirm = window.__BPS_CONFIRM__; delete window.__BPS_CONFIRM__; }');
+  pageScript(`(function () {
+    if (window.__BPS_CONFIRM__) { window.confirm = window.__BPS_CONFIRM__; delete window.__BPS_CONFIRM__; }
+    if (window.__BPS_UNLOAD_DESC__) {
+      try { Object.defineProperty(BeforeUnloadEvent.prototype, 'returnValue', window.__BPS_UNLOAD_DESC__); } catch (_) {}
+      delete window.__BPS_UNLOAD_DESC__;
+    }
+  })();`);
 }
 
 let running = false;
@@ -1430,7 +1478,7 @@ export async function handleRun(config = {}) {
     model: config.model || '',
     gateway: config.gateway || '',
     overwrite: !!config.overwrite,
-    images: !!config.images, // 作答含图题（需视觉模型；未开则含图题照旧跳过）
+    images: !!config.images, // 作答含图题（需视觉模型；只作用于客观题，编程题恒按文字题面作答）
     language: config.language || '', // 编程题固定语言（白名单 id）；空 = 跟随各题编辑器当前语言
     drySave: !!config.drySave,
   };
