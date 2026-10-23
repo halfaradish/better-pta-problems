@@ -966,12 +966,13 @@ function clearRelay() {
 
 /* ---------- PTA 访问频率限制 ----------
  * PTA 在请求过快时会把整页换成错误页（「您访问得太快啦，不如休息一会儿吧」）。
- * 续跑每题要整页装载两次（collect → reload verify），连续翻页很容易触发，因此：
- * 1) 两次整页装载之间至少隔 PAGE_LOAD_GAP_MS（按当前文档已存活时长补足 + 抖动）；
+ * 续跑每题要整页装载两次（collect → reload verify），连续翻页容易触发，因此：
+ * 1) 每次切题/重载前等 1–5s（PAGE_LOAD_WAIT_*，只求错开连续装载，不拖慢整体节奏）；
  * 2) 一旦识别到限流页就暂停重载本题，冷却按 60/120/180s 递增，仍不行才中止。
  * 冷却次数存进续跑单（rlTries），跨页保留；处理到真实题目页后清零。
  */
-const PAGE_LOAD_GAP_MS = 12000; // 两次整页装载的最小间隔（再叠加 0-4s 抖动）
+const PAGE_LOAD_WAIT_MIN_MS = 1000;      // 切题/重载前的基础等待
+const PAGE_LOAD_WAIT_JITTER_MS = 4000;   // 叠加 0–4s 随机抖动（合计 1–5s）
 const RATE_LIMIT_WAITS_MS = [60000, 120000, 180000];
 const NAVIGATE_CHECK_MS = 10000; // 翻页后多久检查「是不是还停在原页」，失败重试一次再收摊
 
@@ -1009,10 +1010,9 @@ function navigateRelay(target, r, what) {
   check(0);
 }
 
-// 当前文档存活不足 gap 就补足；LLM 已经等了几十秒的页面直接放行
+// 每次切题/重载前等 1–5s：只求错开连续整页装载，不再按文档存活时长补足
 async function pacePageLoad(where) {
-  const wait = Math.max(0, PAGE_LOAD_GAP_MS - performance.now() + Math.floor(Math.random() * 4000));
-  if (wait < 1200) return;
+  const wait = PAGE_LOAD_WAIT_MIN_MS + Math.floor(Math.random() * PAGE_LOAD_WAIT_JITTER_MS);
   fire({ kind: 'log', level: 'info', text: `${where}：等待 ${Math.ceil(wait / 1000)}s 再切换（避免 PTA 访问频率限制）…` });
   await sleep(wait);
 }

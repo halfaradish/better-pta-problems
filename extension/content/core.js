@@ -1113,7 +1113,8 @@
     } catch (_) {
     }
   }
-  var PAGE_LOAD_GAP_MS = 12e3;
+  var PAGE_LOAD_WAIT_MIN_MS = 1e3;
+  var PAGE_LOAD_WAIT_JITTER_MS = 4e3;
   var RATE_LIMIT_WAITS_MS = [6e4, 12e4, 18e4];
   var NAVIGATE_CHECK_MS = 1e4;
   function isRateLimitedText(text) {
@@ -1152,8 +1153,7 @@
     check(0);
   }
   async function pacePageLoad(where) {
-    const wait = Math.max(0, PAGE_LOAD_GAP_MS - performance.now() + Math.floor(Math.random() * 4e3));
-    if (wait < 1200) return;
+    const wait = PAGE_LOAD_WAIT_MIN_MS + Math.floor(Math.random() * PAGE_LOAD_WAIT_JITTER_MS);
     fire({ kind: "log", level: "info", text: `${where}\uFF1A\u7B49\u5F85 ${Math.ceil(wait / 1e3)}s \u518D\u5207\u6362\uFF08\u907F\u514D PTA \u8BBF\u95EE\u9891\u7387\u9650\u5236\uFF09\u2026` });
     await sleep(wait);
   }
