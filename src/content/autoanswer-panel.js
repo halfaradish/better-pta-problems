@@ -568,7 +568,7 @@ function mount() {
   const oFollow = el('option', '', lsel);
   oFollow.value = '';
   oFollow.textContent = '跟随编辑器当前语言';
-  el('p', 'hint', fLang).textContent = '本题集允许的语言；作答按所选语言出码并提交评测';
+  el('p', 'hint', fLang).textContent = '本题集允许的语言；作答按所选语言出码并提交评测。函数题的编译器由题目固定，此配置对函数题不生效';
 
   const fKey = el('div', 'field', pageModel);
   el('label', 'flabel', fKey).textContent = 'API Key';

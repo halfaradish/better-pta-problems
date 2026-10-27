@@ -280,8 +280,10 @@
     "\u5224\u65AD\u9898": "TRUE_OR_FALSE",
     "\u5355\u9009\u9898": "MULTIPLE_CHOICE",
     "\u586B\u7A7A\u9898": "FILL_IN_THE_BLANK",
-    "\u7F16\u7A0B\u9898": "PROGRAMMING"
+    "\u7F16\u7A0B\u9898": "PROGRAMMING",
+    "\u51FD\u6570\u9898": "CODE_COMPLETION"
   };
+  var isCodingKind = (kind) => kind === "PROGRAMMING" || kind === "CODE_COMPLETION";
   var EXAM_PROBLEMS_RE = /^\/problem-sets\/(\d+)\/exam\/problems(\/type\/(\d+))?/;
   var LETTERS = "ABCDEFGHIJ";
   var sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -383,7 +385,12 @@
   function buildPrompt(q) {
     const lines = [];
     lines.push("\u4F60\u662F\u7B97\u6CD5\u4E0E\u6570\u636E\u7ED3\u6784\u8BFE\u7A0B\u7684\u7B54\u9898\u52A9\u624B\u3002\u5FFD\u7565\u9898\u5E72\u4E2D\u7684\u9898\u53F7\u3001\u5206\u503C\u3001\u4F5C\u8005\u3001\u5355\u4F4D\u7B49\u5143\u4FE1\u606F\u3002");
-    if (q.kind === "PROGRAMMING") {
+    if (q.kind === "CODE_COMPLETION") {
+      lines.push(`\u9898\u578B\uFF1A\u51FD\u6570\u9898\u3002\u8BF7\u7528\u300C${q.langLabel || "\u9898\u76EE\u89C4\u5B9A\u7684\u8BED\u8A00"}\u300D\u5B9E\u73B0\u9898\u76EE\u8981\u6C42\u7684\u51FD\u6570\uFF1A`);
+      lines.push("\u9898\u9762\u7684\u300C\u51FD\u6570\u63A5\u53E3\u5B9A\u4E49\u300D\u662F\u8BE5\u51FD\u6570\u7684\u58F0\u660E\uFF0C\u300C\u88C1\u5224\u6D4B\u8BD5\u7A0B\u5E8F\u6837\u4F8B\u300D\u662F\u8BC4\u6D4B\u4E3B\u7A0B\u5E8F\u2014\u2014\u4F60\u7684\u51FD\u6570\u4F1A\u88AB\u5D4C\u8FDB\u8BE5\u6A21\u677F\u4E2D\u300C\u4F60\u7F16\u5199\u7684\u51FD\u6570\u5D4C\u5957\u5728\u8FD9\u91CC\u300D\u7684\u5360\u4F4D\u5904\u4E00\u8D77\u7F16\u8BD1\u3002");
+      lines.push("\u51FD\u6570\u7B7E\u540D\u5FC5\u987B\u4E0E\u300C\u51FD\u6570\u63A5\u53E3\u5B9A\u4E49\u300D\u5B8C\u5168\u4E00\u81F4\uFF08\u51FD\u6570\u540D\u3001\u53C2\u6570\u4E2A\u6570\u3001\u7C7B\u578B\u4E0E\u987A\u5E8F\u90FD\u4E0D\u80FD\u6539\uFF09\uFF1B\u53EF\u4EE5\u8865\u5145\u8F85\u52A9\u51FD\u6570\uFF1B\u9700\u8981\u989D\u5916\u6807\u51C6\u5E93\u65F6\u53EF\u5728\u6700\u524D\u9762\u8865 #include\uFF0C\u4F46\u4E0D\u8981\u5199 main\uFF0C\u4E0D\u8981\u91CD\u590D\u88C1\u5224\u7A0B\u5E8F\u6216\u63A5\u53E3\u58F0\u660E\u3002");
+      lines.push("\u8F93\u51FA\u53EA\u5305\u542B\u4E00\u4E2A\u4EE3\u7801\u56F4\u680F\u5757\uFF08``` \u5305\u88F9\uFF09\uFF0C\u56F4\u680F\u5185\u53EA\u6709\u8981\u5D4C\u5957\u7684\u51FD\u6570\u4EE3\u7801\uFF0C\u4E0D\u8981\u4EFB\u4F55\u89E3\u91CA\u6587\u5B57\u3002");
+    } else if (q.kind === "PROGRAMMING") {
       lines.push(`\u9898\u578B\uFF1A\u7F16\u7A0B\u9898\u3002\u8BF7\u7528\u300C${q.langLabel || "\u7F16\u8F91\u5668\u5F53\u524D\u8BED\u8A00"}\u300D\u5199\u4E00\u4E2A\u5B8C\u6574\u3001\u53EF\u76F4\u63A5\u63D0\u4EA4\u8BC4\u6D4B\u7684\u7A0B\u5E8F\uFF1A`);
       lines.push("\u6309\u9898\u9762\u7684\u8F93\u5165\u683C\u5F0F\u8BFB\u5165\u6570\u636E\uFF08\u4E0D\u8981\u8F93\u51FA\u4EA4\u4E92\u5F0F\u63D0\u793A\u8BED\uFF09\uFF0C\u4E25\u683C\u6309\u8F93\u51FA\u683C\u5F0F\u6253\u5370\u7ED3\u679C\u3002");
       lines.push("\u53EA\u7528\u8BE5\u8BED\u8A00\u7684\u6807\u51C6\u5E93\uFF08\u65E0\u628A\u63E1\u4E0D\u8981\u5F15\u7B2C\u4E09\u65B9\u5E93\uFF09\uFF1B\u7559\u610F\u9898\u9762\u7ED9\u51FA\u7684\u65F6\u95F4/\u5185\u5B58/\u4EE3\u7801\u957F\u5EA6\u9650\u5236\u3002");
@@ -392,7 +399,7 @@
       lines.push("\u53EA\u8F93\u51FA\u4E00\u4E2A JSON \u5BF9\u8C61\uFF0C\u4E0D\u8981\u5305\u542B\u4EFB\u4F55\u89E3\u91CA\u6587\u5B57\u6216\u4EE3\u7801\u56F4\u680F\u3002");
     }
     lines.push("");
-    if (q.kind === "PROGRAMMING") {
+    if (isCodingKind(q.kind)) {
     } else if (q.kind === "TRUE_OR_FALSE") {
       lines.push('\u9898\u578B\uFF1A\u5224\u65AD\u9898\u3002\u5224\u65AD\u9648\u8FF0\u7684\u6B63\u8BEF\uFF0Canswer \u53EA\u80FD\u662F "TRUE" \u6216 "FALSE"\u3002');
       lines.push('\u8F93\u51FA\u683C\u5F0F\uFF1A{"answer":"TRUE"}');
@@ -415,7 +422,7 @@
     return [
       {
         role: "system",
-        content: q.kind === "PROGRAMMING" ? "\u4F60\u662F\u4E25\u8C28\u7684\u7B54\u9898\u52A9\u624B\uFF0C\u53EA\u8F93\u51FA\u4E00\u4E2A\u4EE3\u7801\u56F4\u680F\u5757\uFF08``` \u5305\u88F9\u7684\u5B8C\u6574\u7A0B\u5E8F\u6E90\u7801\uFF09\uFF0C\u4E0D\u8981\u8F93\u51FA\u4EFB\u4F55\u5176\u4ED6\u6587\u5B57\u3002" : "\u4F60\u662F\u4E25\u8C28\u7684\u7B54\u9898\u52A9\u624B\uFF0C\u53EA\u8F93\u51FA\u8981\u6C42\u7684 JSON\uFF0C\u4E0D\u8981\u8F93\u51FA\u4EFB\u4F55\u5176\u4ED6\u6587\u5B57\u3002"
+        content: isCodingKind(q.kind) ? "\u4F60\u662F\u4E25\u8C28\u7684\u7B54\u9898\u52A9\u624B\uFF0C\u53EA\u8F93\u51FA\u4E00\u4E2A\u4EE3\u7801\u56F4\u680F\u5757\uFF08``` \u5305\u88F9\u7684\u5B8C\u6574\u7A0B\u5E8F\u6E90\u7801\uFF09\uFF0C\u4E0D\u8981\u8F93\u51FA\u4EFB\u4F55\u5176\u4ED6\u6587\u5B57\u3002" : "\u4F60\u662F\u4E25\u8C28\u7684\u7B54\u9898\u52A9\u624B\uFF0C\u53EA\u8F93\u51FA\u8981\u6C42\u7684 JSON\uFF0C\u4E0D\u8981\u8F93\u51FA\u4EFB\u4F55\u5176\u4ED6\u6587\u5B57\u3002"
       },
       { role: "user", content: lines.join("\n") }
     ];
@@ -508,7 +515,7 @@
     const form = answerFormEl();
     return normalizeLangLabel(form?.querySelector(".select__single-value")?.textContent || "");
   }
-  function collectProgramming() {
+  function collectCodingProblem() {
     const mainEl = document.querySelector("main");
     const form = answerFormEl();
     if (!mainEl || !form) return null;
@@ -516,6 +523,7 @@
     if (!cm) return null;
     const pspId = (location.search.match(/problemSetProblemId=(\d+)/) || [])[1];
     if (!pspId) return null;
+    const kind = [...mainEl.querySelectorAll("h1,h2,h3")].some((h) => (h.textContent || "").includes("\u51FD\u6570\u63A5\u53E3\u5B9A\u4E49")) ? "CODE_COMPLETION" : "PROGRAMMING";
     const stem = [...mainEl.querySelectorAll("img")].filter((i) => !form.contains(i)).map((i) => i.getAttribute("src") ? i.src : null).filter(Boolean);
     const imgInfo = { options: {}, stem, total: stem.length };
     const text = cleanText(mainEl, '[class*="CodingProblemAnswerForm"]');
@@ -523,7 +531,7 @@
       id: pspId,
       label: (text.match(/\d+-\d+/) || [])[0] || null,
       // 例题号形如 7-1（页面标题开头）
-      kind: "PROGRAMMING",
+      kind,
       text,
       langLabel: langLabelOf(),
       hasImg: imgInfo.total > 0,
@@ -557,8 +565,11 @@
     }).then((r) => r.json()).catch(() => null);
     return d?.answer?.detail || null;
   }
-  async function saveDraft(pspId, detail, compilerId, program) {
-    if (!compilerId) return { ok: false, status: null };
+  function draftSubmissionDetail(kind, compilerId, program) {
+    return kind === "CODE_COMPLETION" ? { codeCompletionSubmissionDetail: { program } } : { programmingSubmissionDetail: { compiler: compilerId, program } };
+  }
+  async function saveDraft(pspId, kind, detail, compilerId, program) {
+    if (kind !== "CODE_COMPLETION" && !compilerId) return { ok: false, status: null };
     const body = JSON.stringify({
       answer: {
         detail: {
@@ -566,7 +577,7 @@
           problemSetProblemId: detail?.problemSetProblemId || pspId,
           customTestData: detail?.customTestData,
           // 原样保留（可为 null）
-          programmingSubmissionDetail: { compiler: compilerId, program }
+          ...draftSubmissionDetail(kind, compilerId, program)
         }
       }
     });
@@ -1262,7 +1273,7 @@
     for (const t of progTypes) {
       for (const id of programmingIds(psId, t.typeId)) problems.push({ id, typeId: t.typeId, typeName: t.typeName });
     }
-    if (!problems.length) throw new Error("\u300C\u7F16\u7A0B\u9898\u300D\u627E\u4E0D\u5230\u9898\u76EE\u951A\u70B9\uFF08\u9898\u76EE\u603B\u89C8\u6536\u8D77\uFF1F\u70B9\u5F00\u540E\u91CD\u8BD5\uFF09");
+    if (!problems.length) throw new Error("\u300C\u7F16\u7801\u9898\u300D\u627E\u4E0D\u5230\u9898\u76EE\u951A\u70B9\uFF08\u9898\u76EE\u603B\u89C8\u6536\u8D77\uFF1F\u70B9\u5F00\u540E\u91CD\u8BD5\uFF09");
     const relay = {
       v: 1,
       cfg: { ...cfg },
@@ -1273,9 +1284,10 @@
       // collect → verify →（advance）→ collect → …
       summary: { applied: 0, skippedAnswered: 0, failed: [] }
     };
-    if (!writeRelay(relay)) throw new Error("sessionStorage \u4E0D\u53EF\u5199\uFF0C\u65E0\u6CD5\u8DE8\u9875\u7EED\u8DD1\u7F16\u7A0B\u9898");
+    if (!writeRelay(relay)) throw new Error("sessionStorage \u4E0D\u53EF\u5199\uFF0C\u65E0\u6CD5\u8DE8\u9875\u7EED\u8DD1\u7F16\u7801\u9898");
     const first = problems[0];
-    fire({ kind: "log", level: "info", text: `\u7F16\u7A0B\u9898 ${problems.length} \u9898\uFF1A\u8F6C\u300C\u9010\u9898\u6574\u9875\u88C5\u8F7D\u300D\u6A21\u5F0F\uFF08\u65E5\u5FD7\u8DE8\u9875\u4FDD\u7559\uFF09` });
+    const names = [...new Set(progTypes.map((t) => t.typeName))].join("\u3001");
+    fire({ kind: "log", level: "info", text: `${names || "\u7F16\u7801\u9898"} ${problems.length} \u9898\uFF1A\u8F6C\u300C\u9010\u9898\u6574\u9875\u88C5\u8F7D\u300D\u6A21\u5F0F\uFF08\u65E5\u5FD7\u8DE8\u9875\u4FDD\u7559\uFF09` });
     suppressLeaveConfirm();
     navigateRelay(`/problem-sets/${psId}/exam/problems/type/${first.typeId}?problemSetProblemId=${first.id}`, relay, "\u8FDB\u5165\u7B2C\u4E00\u9898");
     return true;
@@ -1285,19 +1297,19 @@
     if (!r || r.v !== 1) return;
     if (!(settings3 && settings3.autoAnswer)) {
       clearRelay();
-      fire({ kind: "log", level: "warn", text: "\u7F16\u7A0B\u9898\u7EED\u8DD1\u53D6\u6D88\uFF1A\u603B\u5F00\u5173\u672A\u5F00\u542F" });
+      fire({ kind: "log", level: "warn", text: "\u7F16\u7801\u9898\u7EED\u8DD1\u53D6\u6D88\uFF1A\u603B\u5F00\u5173\u672A\u5F00\u542F" });
       return;
     }
     if (r.aborted) {
       clearRelay();
-      fire({ kind: "log", level: "warn", text: "\u7F16\u7A0B\u9898\u7EED\u8DD1\u5DF2\u4E2D\u6B62\uFF08\u6309\u4F60\u7684\u8981\u6C42\u505C\u6B62\uFF09" });
+      fire({ kind: "log", level: "warn", text: "\u7F16\u7801\u9898\u7EED\u8DD1\u5DF2\u4E2D\u6B62\uFF08\u6309\u4F60\u7684\u8981\u6C42\u505C\u6B62\uFF09" });
       fire({ kind: "state", running: false, error: "\u5DF2\u4E2D\u6B62" });
       return;
     }
     const prob = r.problems[r.pi];
     if (!prob) {
       clearRelay();
-      fire({ kind: "log", level: "warn", text: "\u7F16\u7A0B\u9898\u7EED\u8DD1\u53D6\u6D88\uFF1A\u7EED\u8DD1\u5355\u5DF2\u8D8A\u754C" });
+      fire({ kind: "log", level: "warn", text: "\u7F16\u7801\u9898\u7EED\u8DD1\u53D6\u6D88\uFF1A\u7EED\u8DD1\u5355\u5DF2\u8D8A\u754C" });
       return;
     }
     if (rateLimitedNow()) {
@@ -1306,7 +1318,7 @@
     }
     if (!new RegExp(`problemSetProblemId=${prob.id}$`).test(location.search)) {
       clearRelay();
-      fire({ kind: "log", level: "warn", text: "\u7F16\u7A0B\u9898\u7EED\u8DD1\u53D6\u6D88\uFF1A\u9875\u9762\u4E0D\u5728 " + (prob.id || "").slice(-4) + " \u4E0A\uFF08\u5DF2\u843D\u4F4D\u9898\u76EE\u4FDD\u6301\u5404\u81EA\u72B6\u6001\uFF09" });
+      fire({ kind: "log", level: "warn", text: "\u7F16\u7801\u9898\u7EED\u8DD1\u53D6\u6D88\uFF1A\u9875\u9762\u4E0D\u5728 " + (prob.id || "").slice(-4) + " \u4E0A\uFF08\u5DF2\u843D\u4F4D\u9898\u76EE\u4FDD\u6301\u5404\u81EA\u72B6\u6001\uFF09" });
       return;
     }
     running = true;
@@ -1314,7 +1326,7 @@
     suppressLeaveConfirm();
     fire({ kind: "state", running: true });
     const hadHistory = readPersistedLog().length > 0;
-    fire({ kind: "log", level: "info", text: `\u7F16\u7A0B\u9898\u7EED\u8DD1\uFF08\u7B2C ${r.pi + 1}/${r.problems.length} \u9898\uFF0C${r.phase === "verify" ? "\u6C34\u5408\u6821\u9A8C/\u63D0\u4EA4" : "\u6536\u96C6\u4F5C\u7B54"}\u9636\u6BB5\uFF09` });
+    fire({ kind: "log", level: "info", text: `\u7F16\u7801\u9898\u7EED\u8DD1\uFF08\u7B2C ${r.pi + 1}/${r.problems.length} \u9898\uFF0C${r.phase === "verify" ? "\u6C34\u5408\u6821\u9A8C/\u63D0\u4EA4" : "\u6536\u96C6\u4F5C\u7B54"}\u9636\u6BB5\uFF09` });
     if (r.summary.failed.length && !hadHistory) {
       fire({ kind: "log", level: "warn", text: `\u6B64\u524D\u5DF2\u5931\u8D25 ${r.summary.failed.length} \u9898\uFF1A
 ${failDetails(r.summary.failed)}` });
@@ -1348,7 +1360,7 @@ ${failDetails(s.failed)}`;
   }
   function abortRelay(r, reason) {
     clearRelay();
-    fire({ kind: "log", level: "err", text: "\u7F16\u7A0B\u9898\u7EED\u8DD1\u4E2D\u6B62\uFF1A" + reason });
+    fire({ kind: "log", level: "err", text: "\u7F16\u7801\u9898\u7EED\u8DD1\u4E2D\u6B62\uFF1A" + reason });
     fire({ kind: "log", level: "info", text: relaySummaryLine(r) });
     fire({ kind: "state", running: false, error: reason });
     running = false;
@@ -1360,7 +1372,7 @@ ${failDetails(s.failed)}`;
     running = false;
     runAbort = null;
     restoreLeaveConfirm();
-    fire({ kind: "log", level: "warn", text: "\u5DF2\u4E2D\u6B62\uFF1A\u7F16\u7A0B\u9898\u7EED\u8DD1\u6309\u4F60\u7684\u8981\u6C42\u505C\u6B62" });
+    fire({ kind: "log", level: "warn", text: "\u5DF2\u4E2D\u6B62\uFF1A\u7F16\u7801\u9898\u7EED\u8DD1\u6309\u4F60\u7684\u8981\u6C42\u505C\u6B62" });
     fire({ kind: "log", level: "info", text: relaySummaryLine(r) });
     fire({ kind: "state", running: false, error: "\u5DF2\u4E2D\u6B62" });
   }
@@ -1391,7 +1403,7 @@ ${failDetails(s.failed)}`;
       runAbort = null;
       restoreLeaveConfirm();
       const lvl = r.summary.failed.length ? "warn" : "ok";
-      fire({ kind: "log", level: lvl, text: "\u7F16\u7A0B\u9898\u8DE8\u9875\u7EED\u8DD1\u7ED3\u675F\uFF1A" + line });
+      fire({ kind: "log", level: lvl, text: "\u7F16\u7801\u9898\u8DE8\u9875\u7EED\u8DD1\u7ED3\u675F\uFF1A" + line });
       fire({ kind: "state", running: false });
       return;
     }
@@ -1409,27 +1421,31 @@ ${failDetails(s.failed)}`;
     navigateRelay(`/problem-sets/${r.psId}/exam/problems/type/${next.typeId}?problemSetProblemId=${next.id}`, r, "\u5207\u6362\u4E0B\u4E00\u9898");
   }
   async function relayCollect(r, prob) {
-    const q = collectProgramming();
+    const q = collectCodingProblem();
     if (!q) {
       if (rateLimitedNow()) {
         pauseForRateLimit(r, "\u6536\u96C6\u9898\u76EE");
         return;
       }
-      relayRecordFail(r, prob, null, "\u7F16\u7A0B\u9898\u9875\u9762\u6536\u4E0D\u5230\u9898\u76EE");
+      relayRecordFail(r, prob, null, "\u7F16\u7801\u9898\u9875\u9762\u6536\u4E0D\u5230\u9898\u76EE");
       return relayNext(r, "fail");
     }
     r.rlTries = 0;
     const label = q.label || prob.id.slice(-4);
     if (q.answered && !r.cfg.overwrite) return relayNext(r, "skip", `${label}\uFF1A\u8DF3\u8FC7\uFF0C\u5DF2\u4F5C\u7B54`);
-    if (q.hasImg) fire({ kind: "log", level: "warn", text: `${label}\uFF1A\u9898\u5E72\u542B\u56FE\u7247\uFF0C\u7F16\u7A0B\u9898\u6682\u4E0D\u652F\u6301\u56FE\u7247\u8F93\u5165\uFF0C\u4EC5\u6309\u6587\u5B57\u9898\u9762\u4F5C\u7B54` });
+    if (q.hasImg) fire({ kind: "log", level: "warn", text: `${label}\uFF1A\u9898\u5E72\u542B\u56FE\u7247\uFF0C\u7F16\u7801\u9898\u6682\u4E0D\u652F\u6301\u56FE\u7247\u8F93\u5165\uFF0C\u4EC5\u6309\u6587\u5B57\u9898\u9762\u4F5C\u7B54` });
     const detail = await getDraftDetail(prob.id);
-    const compilerId = r.cfg.language ? r.cfg.language : compilerIdFromLabel(q.langLabel) || (detail?.programmingSubmissionDetail?.compiler || null);
-    if (!compilerId) {
-      relayRecordFail(r, prob, label, `\u8BFB\u4E0D\u5230\u5F53\u524D\u8BED\u8A00\u300C${q.langLabel || "\uFF08\u7A7A\uFF09"}\u300D\uFF0C\u65E0\u6CD5\u786E\u5B9A\u7F16\u8BD1\u5668`);
-      return relayNext(r, "fail");
+    let compilerId = null;
+    let wantLangLabel = "";
+    if (q.kind !== "CODE_COMPLETION") {
+      compilerId = r.cfg.language ? r.cfg.language : compilerIdFromLabel(q.langLabel) || (detail?.programmingSubmissionDetail?.compiler || null);
+      if (!compilerId) {
+        relayRecordFail(r, prob, label, `\u8BFB\u4E0D\u5230\u5F53\u524D\u8BED\u8A00\u300C${q.langLabel || "\uFF08\u7A7A\uFF09"}\u300D\uFF0C\u65E0\u6CD5\u786E\u5B9A\u7F16\u8BD1\u5668`);
+        return relayNext(r, "fail");
+      }
+      wantLangLabel = COMPILER_LABELS[compilerId] || q.langLabel || "";
     }
-    const wantLangLabel = COMPILER_LABELS[compilerId] || q.langLabel || "";
-    const messages = buildPrompt({ ...q, langLabel: wantLangLabel });
+    const messages = buildPrompt({ ...q, langLabel: wantLangLabel || q.langLabel || "" });
     let raw = null;
     fire({ kind: "log", level: "info", text: `${label}\uFF1A\u8BF7\u6C42\u6A21\u578B\u4E2D\u2026\uFF08${r.cfg.model || "\u672A\u77E5\u6A21\u578B"}\uFF09` });
     try {
@@ -1451,7 +1467,7 @@ ${failDetails(s.failed)}`;
       relayRecordFail(r, prob, label, `\u4EE3\u7801\u8D85\u957F\uFF08${code.length} \u5B57\u7B26\uFF0C\u5E73\u53F0\u9650 16KB\uFF09`);
       return relayNext(r, "fail");
     }
-    const written = await saveDraft(prob.id, detail, compilerId, code);
+    const written = await saveDraft(prob.id, q.kind, detail, compilerId, code);
     if (!written.ok) {
       if (rateLimitedNow()) {
         pauseForRateLimit(r, "\u5199\u8349\u7A3F");
@@ -1467,7 +1483,7 @@ ${failDetails(s.failed)}`;
       return relayNext(r, "fail");
     }
     r.phase = "verify";
-    r.hint = { label, compilerId, wantLangLabel, head: (code.split("\n")[0] || "").trim().slice(0, 24), detail };
+    r.hint = { label, kind: q.kind, compilerId, wantLangLabel, head: (code.split("\n")[0] || "").trim().slice(0, 24), detail };
     if (!writeRelay(r)) {
       abortRelay(r, "sessionStorage \u5199\u5165\u5931\u8D25");
       return;
@@ -1490,6 +1506,7 @@ ${failDetails(s.failed)}`;
       return;
     }
     const label = hint.label || prob.id.slice(-4);
+    const kind = hint.kind || "PROGRAMMING";
     const wantLangLabel = hint.wantLangLabel || "";
     const compilerId = hint.compilerId;
     const head = String(hint.head || "").trim();
@@ -1501,7 +1518,7 @@ ${failDetails(s.failed)}`;
         pauseForRateLimit(r, "\u6C34\u5408\u6821\u9A8C");
         return;
       }
-      const rollback = await saveDraft(prob.id, detail, compilerId, "");
+      const rollback = await saveDraft(prob.id, kind, detail, compilerId, "");
       stripDraftHttpCache(prob.id);
       clearCodingProblemCache(prob.id);
       relayRecordFail(r, prob, label, "\u6C34\u5408\u6821\u9A8C\u5931\u8D25\uFF08\u7F16\u8F91\u5668\u672A\u56DE\u5E26\u4EE3\u7801\uFF09" + (rollback.ok ? "\uFF0C\u8349\u7A3F\u5DF2\u64A4\u9500" : "\uFF0C\u8349\u7A3F\u6B8B\u7559\u9700\u4EBA\u5DE5\u6838\u5BF9"));
@@ -1509,17 +1526,19 @@ ${failDetails(s.failed)}`;
       return relayNext(r, "fail");
     }
     r.rlTries = 0;
-    const mountedLabel = langLabelOf();
-    if (mountedLabel !== wantLangLabel) {
-      const rollback = await saveDraft(prob.id, detail, compilerId, "");
-      stripDraftHttpCache(prob.id);
-      clearCodingProblemCache(prob.id);
-      relayRecordFail(r, prob, label, `\u8BED\u8A00\u4E0D\u4E00\u81F4\uFF08\u8349\u7A3F ${wantLangLabel}\uFF0C\u5B9E\u6302\u300C${mountedLabel || "\u672A\u77E5"}\u300D\uFF09\uFF0C\u5DF2\u5F03\u7B54\u9632\u9519\u914D` + (rollback.ok ? "\uFF0C\u8349\u7A3F\u5DF2\u64A4\u9500" : "\uFF0C\u8349\u7A3F\u6B8B\u7559\u9700\u4EBA\u5DE5\u6838\u5BF9"));
-      if (!rollback.ok) return abortRelay(r, "\u8349\u7A3F\u64A4\u9500\u5931\u8D25\uFF08\u6B8B\u7559\u4EE3\u7801\uFF09\uFF0C\u9700\u4EBA\u5DE5\u6838\u5BF9\u540E\u518D\u8BD5");
-      return relayNext(r, "fail");
+    if (kind !== "CODE_COMPLETION") {
+      const mountedLabel = langLabelOf();
+      if (mountedLabel !== wantLangLabel) {
+        const rollback = await saveDraft(prob.id, kind, detail, compilerId, "");
+        stripDraftHttpCache(prob.id);
+        clearCodingProblemCache(prob.id);
+        relayRecordFail(r, prob, label, `\u8BED\u8A00\u4E0D\u4E00\u81F4\uFF08\u8349\u7A3F ${wantLangLabel}\uFF0C\u5B9E\u6302\u300C${mountedLabel || "\u672A\u77E5"}\u300D\uFF09\uFF0C\u5DF2\u5F03\u7B54\u9632\u9519\u914D` + (rollback.ok ? "\uFF0C\u8349\u7A3F\u5DF2\u64A4\u9500" : "\uFF0C\u8349\u7A3F\u6B8B\u7559\u9700\u4EBA\u5DE5\u6838\u5BF9"));
+        if (!rollback.ok) return abortRelay(r, "\u8349\u7A3F\u64A4\u9500\u5931\u8D25\uFF08\u6B8B\u7559\u4EE3\u7801\uFF09\uFF0C\u9700\u4EBA\u5DE5\u6838\u5BF9\u540E\u518D\u8BD5");
+        return relayNext(r, "fail");
+      }
     }
     if (r.cfg.drySave) {
-      const rollback = await saveDraft(prob.id, detail, compilerId, "");
+      const rollback = await saveDraft(prob.id, kind, detail, compilerId, "");
       stripDraftHttpCache(prob.id);
       clearCodingProblemCache(prob.id);
       if (!rollback.ok) return abortRelay(r, "dry\uFF1A\u6C34\u5408\u6821\u9A8C\u901A\u8FC7\u540E\u64A4\u9500\u8349\u7A3F\u5931\u8D25\uFF0C\u6B8B\u7559\u9700\u4EBA\u5DE5\u6838\u5BF9");
@@ -1535,7 +1554,7 @@ ${failDetails(s.failed)}`;
         pauseForRateLimit(r, "\u63D0\u4EA4\u8BC4\u6D4B");
         return;
       }
-      const rollback = await saveDraft(prob.id, detail, compilerId, "");
+      const rollback = await saveDraft(prob.id, kind, detail, compilerId, "");
       stripDraftHttpCache(prob.id);
       clearCodingProblemCache(prob.id);
       relayRecordFail(r, prob, label, "\u63D0\u4EA4\u5931\u8D25\uFF1A" + saved.reason + (rollback.ok ? "\uFF0C\u8349\u7A3F\u5DF2\u64A4\u9500" : "\uFF0C\u8349\u7A3F\u6B8B\u7559\u542B\u672C\u6B21\u4EE3\u7801\uFF0C\u9700\u4EBA\u5DE5\u6838\u5BF9"));
@@ -1667,8 +1686,8 @@ ${failDetails(s.failed)}`;
     }
     const preRelay = readRelay();
     if (preRelay && !preRelay.aborted) {
-      fire({ kind: "log", level: "warn", text: "\u7F16\u7A0B\u9898\u8DE8\u9875\u7EED\u8DD1\u6B63\u5728\u8FDB\u884C\uFF08\u770B\u5404\u9875\u60AC\u6D6E\u7403\u72B6\u6001\uFF09\uFF1B\u672C\u9875\u82E5\u5DF2\u4E0D\u5728\u9898\u76EE\u4E0A\u5219\u7EED\u8DD1\u4F1A\u81EA\u884C\u53D6\u6D88" });
-      return { ok: false, error: "\u7F16\u7A0B\u9898\u8DE8\u9875\u7EED\u8DD1\u6B63\u5728\u8FDB\u884C" };
+      fire({ kind: "log", level: "warn", text: "\u7F16\u7801\u9898\u8DE8\u9875\u7EED\u8DD1\u6B63\u5728\u8FDB\u884C\uFF08\u770B\u5404\u9875\u60AC\u6D6E\u7403\u72B6\u6001\uFF09\uFF1B\u672C\u9875\u82E5\u5DF2\u4E0D\u5728\u9898\u76EE\u4E0A\u5219\u7EED\u8DD1\u4F1A\u81EA\u884C\u53D6\u6D88" });
+      return { ok: false, error: "\u7F16\u7801\u9898\u8DE8\u9875\u7EED\u8DD1\u6B63\u5728\u8FDB\u884C" };
     }
     if (preRelay) clearRelay();
     const m = location.pathname.match(EXAM_PROBLEMS_RE);
@@ -1686,7 +1705,7 @@ ${failDetails(s.failed)}`;
       images: !!config.images,
       // 作答含图题（需视觉模型；只作用于客观题，编程题恒按文字题面作答）
       language: config.language || "",
-      // 编程题固定语言（白名单 id）；空 = 跟随各题编辑器当前语言
+      // 编程题固定语言（白名单 id）；空 = 跟随各题编辑器当前语言；函数题忽略（编译器由题目固定）
       drySave: !!config.drySave
     };
     if (globalThis.__BPS_LLM_MOCK__ && !cfg.drySave) {
@@ -1730,7 +1749,7 @@ ${failDetails(s.failed)}`;
         }
         if (runAbort.signal.aborted) throw new Error("\u5DF2\u4E2D\u6B62");
         const type = TYPE_BY_NAME[t.typeName];
-        const isProg = type === "PROGRAMMING";
+        const isCoding = isCodingKind(type);
         if (!location.pathname.endsWith(`/type/${t.typeId}`)) {
           const link = [...document.querySelectorAll("a[href]")].find((a) => (a.getAttribute("href") || "").match(`^/problem-sets/${psId}/exam/problems/type/${t.typeId}$`));
           if (!link) throw new Error(`\u627E\u4E0D\u5230\u300C${t.typeName}\u300D\u7684\u9875\u9762\u94FE\u63A5`);
@@ -1739,12 +1758,12 @@ ${failDetails(s.failed)}`;
           for (let i = 0; i < 60 && !ready; i++) {
             if (runAbort.signal.aborted) throw new Error("\u5DF2\u4E2D\u6B62");
             await sleep(100);
-            ready = location.pathname.endsWith(`/type/${t.typeId}`) && (isProg ? programmingIds(psId, t.typeId).length > 0 || !!editableCm() : collectPage().filter((q) => q.kind === type).length >= t.total);
+            ready = location.pathname.endsWith(`/type/${t.typeId}`) && (isCoding ? programmingIds(psId, t.typeId).length > 0 || !!editableCm() : collectPage().filter((q) => q.kind === type).length >= t.total);
           }
           if (!ready) throw new Error(`\u300C${t.typeName}\u300D\u9875\u9762\u672A\u5C31\u7EEA\uFF08\u4FA7\u680F\u7EDF\u8BA1 ${t.total} \u9898\uFF09`);
         }
         await sleep(300);
-        if (isProg) {
+        if (isCoding) {
           progTypes.push(t);
           continue;
         }
@@ -1810,7 +1829,8 @@ ${failDetails(s.failed)}`;
       if (progTypes.length) {
         if (startProgrammingRelay(psId, progTypes, cfg)) {
           relayStarted = true;
-          summary.types.push({ type: "\u7F16\u7A0B\u9898", total: progTypes.reduce((n, x) => n + x.total, 0), applied: 0, skippedAnswered: 0, skippedImage: 0, failed: 0, saved: false });
+          const relayNames = [...new Set(progTypes.map((t) => t.typeName))].join("\u3001");
+          summary.types.push({ type: relayNames || "\u7F16\u7801\u9898", total: progTypes.reduce((n, x) => n + x.total, 0), applied: 0, skippedAnswered: 0, skippedImage: 0, failed: 0, saved: false });
           ret = { ok: true, relay: true, summary };
         }
       }
@@ -1822,7 +1842,7 @@ ${failDetails(s.failed)}`;
       if (!relayStarted) restoreLeaveConfirm();
       if (ret.ok) {
         const failN = ret.summary.failed.length;
-        fire({ kind: "log", level: failN ? "warn" : "ok", text: `${ret.relay ? "\u5BA2\u89C2\u9898\u5B8C\u6210\uFF08\u7F16\u7A0B\u9898\u5DF2\u8F6C\u9010\u9875\u7EED\u8DD1\uFF0C\u65E5\u5FD7\u968F\u5404\u9875\u51FA\u73B0\uFF09" : `\u5B8C\u6210\uFF1A\u4F5C\u7B54 ${ret.summary.applied} \xB7 \u8DF3\u8FC7\u5DF2\u7B54 ${ret.summary.skippedAnswered} \xB7 \u8DF3\u8FC7\u542B\u56FE ${ret.summary.skippedImage} \xB7 \u5931\u8D25 ${failN}${cfg.drySave ? "\uFF08\u672A\u4FDD\u5B58\uFF09" : ""}`}` });
+        fire({ kind: "log", level: failN ? "warn" : "ok", text: `${ret.relay ? "\u5BA2\u89C2\u9898\u5B8C\u6210\uFF08\u7F16\u7801\u9898\u5DF2\u8F6C\u9010\u9875\u7EED\u8DD1\uFF0C\u65E5\u5FD7\u968F\u5404\u9875\u51FA\u73B0\uFF09" : `\u5B8C\u6210\uFF1A\u4F5C\u7B54 ${ret.summary.applied} \xB7 \u8DF3\u8FC7\u5DF2\u7B54 ${ret.summary.skippedAnswered} \xB7 \u8DF3\u8FC7\u542B\u56FE ${ret.summary.skippedImage} \xB7 \u5931\u8D25 ${failN}${cfg.drySave ? "\uFF08\u672A\u4FDD\u5B58\uFF09" : ""}`}` });
         fire({ kind: "state", running: false });
       } else {
         fire({ kind: "log", level: "err", text: ret.error === "\u5DF2\u4E2D\u6B62" ? "\u5DF2\u4E2D\u6B62" : "\u5DF2\u4E2D\u6B62\uFF1A" + ret.error });
@@ -2326,7 +2346,7 @@ input:disabled, button:disabled { opacity: .6; cursor: not-allowed; } /* PTA \u7
     const oFollow = el("option", "", lsel);
     oFollow.value = "";
     oFollow.textContent = "\u8DDF\u968F\u7F16\u8F91\u5668\u5F53\u524D\u8BED\u8A00";
-    el("p", "hint", fLang).textContent = "\u672C\u9898\u96C6\u5141\u8BB8\u7684\u8BED\u8A00\uFF1B\u4F5C\u7B54\u6309\u6240\u9009\u8BED\u8A00\u51FA\u7801\u5E76\u63D0\u4EA4\u8BC4\u6D4B";
+    el("p", "hint", fLang).textContent = "\u672C\u9898\u96C6\u5141\u8BB8\u7684\u8BED\u8A00\uFF1B\u4F5C\u7B54\u6309\u6240\u9009\u8BED\u8A00\u51FA\u7801\u5E76\u63D0\u4EA4\u8BC4\u6D4B\u3002\u51FD\u6570\u9898\u7684\u7F16\u8BD1\u5668\u7531\u9898\u76EE\u56FA\u5B9A\uFF0C\u6B64\u914D\u7F6E\u5BF9\u51FD\u6570\u9898\u4E0D\u751F\u6548";
     const fKey = el("div", "field", pageModel);
     el("label", "flabel", fKey).textContent = "API Key";
     fKey.querySelector("label").htmlFor = "aa-key";
@@ -3580,13 +3600,13 @@ input:disabled, button:disabled { opacity: .6; cursor: not-allowed; } /* PTA \u7
     teardown,
     DEFAULTS,
     // 自动答题调试与回归入口：run 走完整流程（配合 __BPS_LLM_MOCK__ 可 mock LLM），
-    // collect 收集客观题、programming 收集编程题（一页一题形态，验证提取纯度用）；
-    // resumeRelay 手动触发编程题跨文档续跑的恢复（真机回归用）
+    // collect 收集客观题、coding 收集编码题（编程/函数，一页一题形态，验证提取纯度用）；
+    // resumeRelay 手动触发编码题跨文档续跑的恢复（真机回归用）
     autoAnswer: {
       run: (config = {}) => handleRun(config),
       collect: () => collectPage(),
       types: () => sidebarTypes(),
-      programming: () => collectProgramming()
+      coding: () => collectCodingProblem()
     },
     resumeRelay: () => resumeRelay(settings2),
     // 手动触发提醒订阅同步（真机上配置变更走 storage.onChanged 自动触发；预览页/回归用这个）

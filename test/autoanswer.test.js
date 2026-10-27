@@ -3,9 +3,9 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
-  assembleImgMessage, assertChatModel, buildPrompt, classifyLlmError, clearPersistedLog, COMPILER_LABELS, compilerIdFromLabel, failDetails,
+  assembleImgMessage, assertChatModel, buildPrompt, classifyLlmError, clearPersistedLog, COMPILER_LABELS, compilerIdFromLabel, draftSubmissionDetail, failDetails,
   isRateLimitedText, isRetryableLlmError, nonChatProtocol, normalizeBaseUrl, normalizeTF, parseChoiceAnswer, parseCodeAnswer,
-  parseFillAnswers, parseLlmErrorBody, persistLogLine, readPersistedLog, relaySummaryLine, seedCodingProblemCache, TYPE_BY_NAME,
+  parseFillAnswers, parseLlmErrorBody, persistLogLine, readPersistedLog, relaySummaryLine, saveDraft, seedCodingProblemCache, TYPE_BY_NAME,
   normalizeLangLabel,
 } from '../src/content/autoanswer.js';
 import { PRESETS, clampBallPos, currentKey, resolveModel, withKeyFor } from '../src/content/autoanswer-panel.js';
@@ -382,4 +382,61 @@ test('seedCodingProblemCache：种入 boot 水合键，形状与 PTA 自写键�
   store.delete('user-cache');
   assert.equal(seedCodingProblemCache('2110002', 'y', {}).seeded, true);
   assert.equal(JSON.parse(store.get('user-cache'))['codingProblem_2110002'].program, 'y');
+});
+
+test('TYPE_BY_NAME：函数题映射到协议层的 CODE_COMPLETION（侧栏名与协议名不同）', () => {
+  assert.equal(TYPE_BY_NAME['函数题'], 'CODE_COMPLETION');
+});
+
+test('buildPrompt：函数题——签名一致、不写 main、围栏输出、无 JSON 指令', () => {
+  const p = buildPrompt({ kind: 'CODE_COMPLETION', text: '函数接口定义：int FindPingpang ( double p[], int m );\n裁判测试程序样例：…', langLabel: 'C (gcc)', options: [], blanks: 0 });
+  const user = p[1].content;
+  assert.match(user, /题型：函数题/);
+  assert.match(user, /C \(gcc\)/);
+  assert.match(user, /函数接口定义/);
+  assert.match(user, /裁判测试程序样例/);
+  assert.match(user, /完全一致/);
+  assert.match(user, /不要写 main/);
+  assert.doesNotMatch(user, /JSON/); // 与客观题的 JSON 指令互斥，防模型输出 {"answer":…}
+  assert.match(p[0].content, /代码围栏块/);
+  // 语言标签缺省回落「题目规定的语言」
+  const p2 = buildPrompt({ kind: 'CODE_COMPLETION', text: '…', langLabel: '', options: [], blanks: 0 });
+  assert.match(p2[1].content, /题目规定的语言/);
+});
+
+test('draftSubmissionDetail：函数题草稿只有 program 无 compiler；编程题带 compiler', () => {
+  // 2026-10-28 真机实证：bundle 对 CODE_COMPLETION 只写 {program}，编译器由题目固定
+  assert.deepEqual(
+    draftSubmissionDetail('CODE_COMPLETION', null, 'int f(){}\n'),
+    { codeCompletionSubmissionDetail: { program: 'int f(){}\n' } },
+  );
+  assert.deepEqual(
+    draftSubmissionDetail('PROGRAMMING', 'GCC', 'int main(){}\n'),
+    { programmingSubmissionDetail: { compiler: 'GCC', program: 'int main(){}\n' } },
+  );
+});
+
+test('saveDraft：函数题草稿走 codeCompletionSubmissionDetail 信封；编程题缺 compiler 不发请求', async () => {
+  let captured = null;
+  globalThis.fetch = async (url, opts) => {
+    captured = { url, body: JSON.parse(opts.body) };
+    return { ok: true, status: 200 };
+  };
+  try {
+    const r = await saveDraft('2110001', 'CODE_COMPLETION', { problemId: '0', problemSetProblemId: '2110001', customTestData: null }, null, 'int f(){}\n');
+    assert.equal(r.ok, true);
+    assert.equal(captured.url, '/api/problem-sets/problems/2110001/exam-draft');
+    const detail = captured.body.answer.detail;
+    assert.deepEqual(detail.codeCompletionSubmissionDetail, { program: 'int f(){}\n' });
+    assert.equal('compiler' in detail.codeCompletionSubmissionDetail, false);
+    assert.equal(detail.problemId, '0');
+    assert.equal(detail.problemSetProblemId, '2110001');
+    // 编程题没有编译器：原地拒绝，不产生网络请求
+    captured = null;
+    const bad = await saveDraft('2110001', 'PROGRAMMING', null, null, 'x');
+    assert.deepEqual(bad, { ok: false, status: null });
+    assert.equal(captured, null);
+  } finally {
+    delete globalThis.fetch;
+  }
 });

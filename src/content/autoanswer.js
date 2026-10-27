@@ -16,13 +16,20 @@
 
 import { LLM_DIRECT_TIMEOUT_MS, LLM_MAX_ATTEMPTS, LLM_MAX_IDLE_ATTEMPTS, LLM_TOTAL_TIMEOUT_MS } from '../shared/llm.js';
 
-// 侧栏类型名 → exam-submissions 协议的 problemType
+// 侧栏类型名 → exam-submissions 协议的 problemType。
+// 「函数题」在 PTA 协议层叫 CODE_COMPLETION（2026-10-28 实测：题目集侧栏显示「函数题」，
+// problem-summaries 与页面 bundle 用的 problemType 都是 CODE_COMPLETION）；它与编程题同用
+// CodingProblemAnswerForm + 一页一题 + exam-draft 草稿，只是 detail 字段与判题模板不同。
 export const TYPE_BY_NAME = {
   '判断题': 'TRUE_OR_FALSE',
   '单选题': 'MULTIPLE_CHOICE',
   '填空题': 'FILL_IN_THE_BLANK',
   '编程题': 'PROGRAMMING',
+  '函数题': 'CODE_COMPLETION',
 };
+
+// 走「跨页续跑」的两类编码题（共用一页一题 + 整页装载水合机制）
+const isCodingKind = kind => kind === 'PROGRAMMING' || kind === 'CODE_COMPLETION';
 
 export const EXAM_PROBLEMS_RE = /^\/problem-sets\/(\d+)\/exam\/problems(\/type\/(\d+))?/;
 
@@ -139,7 +146,12 @@ export function parseFillAnswers(raw, blankCount) {
 export function buildPrompt(q) {
   const lines = [];
   lines.push('你是算法与数据结构课程的答题助手。忽略题干中的题号、分值、作者、单位等元信息。');
-  if (q.kind === 'PROGRAMMING') {
+  if (q.kind === 'CODE_COMPLETION') {
+    lines.push(`题型：函数题。请用「${q.langLabel || '题目规定的语言'}」实现题目要求的函数：`);
+    lines.push('题面的「函数接口定义」是该函数的声明，「裁判测试程序样例」是评测主程序——你的函数会被嵌进该模板中「你编写的函数嵌套在这里」的占位处一起编译。');
+    lines.push('函数签名必须与「函数接口定义」完全一致（函数名、参数个数、类型与顺序都不能改）；可以补充辅助函数；需要额外标准库时可在最前面补 #include，但不要写 main，不要重复裁判程序或接口声明。');
+    lines.push('输出只包含一个代码围栏块（``` 包裹），围栏内只有要嵌套的函数代码，不要任何解释文字。');
+  } else if (q.kind === 'PROGRAMMING') {
     lines.push(`题型：编程题。请用「${q.langLabel || '编辑器当前语言'}」写一个完整、可直接提交评测的程序：`);
     lines.push('按题面的输入格式读入数据（不要输出交互式提示语），严格按输出格式打印结果。');
     lines.push('只用该语言的标准库（无把握不要引第三方库）；留意题面给出的时间/内存/代码长度限制。');
@@ -148,7 +160,7 @@ export function buildPrompt(q) {
     lines.push('只输出一个 JSON 对象，不要包含任何解释文字或代码围栏。');
   }
   lines.push('');
-  if (q.kind === 'PROGRAMMING') {
+  if (isCodingKind(q.kind)) {
     // 题面信息已在上方说明，此处不加逐题型行，防止与「只输出 JSON」的通用指令混淆
   } else if (q.kind === 'TRUE_OR_FALSE') {
     lines.push('题型：判断题。判断陈述的正误，answer 只能是 "TRUE" 或 "FALSE"。');
@@ -172,7 +184,7 @@ export function buildPrompt(q) {
   return [
     {
       role: 'system',
-      content: q.kind === 'PROGRAMMING'
+      content: isCodingKind(q.kind)
         ? '你是严谨的答题助手，只输出一个代码围栏块（``` 包裹的完整程序源码），不要输出任何其他文字。'
         : '你是严谨的答题助手，只输出要求的 JSON，不要输出任何其他文字。',
     },
@@ -270,7 +282,7 @@ export async function fetchAllowedCompilers(psId) {
   return Array.isArray(list) && list.length ? list : null;
 }
 
-/* ---------- 页面侧：编程题（CodeMirror 6，一页一题） ---------- */
+/* ---------- 页面侧：编码题（编程/函数，CodeMirror 6，一页一题） ---------- */
 
 // 答题编辑器（题面样例展示也是 .cm-editor，但那些 contenteditable=false）
 function answerFormEl() {
@@ -290,8 +302,8 @@ function langLabelOf() {
   return normalizeLangLabel(form?.querySelector('.select__single-value')?.textContent || '');
 }
 
-// 编程题页题目收集。返回 null 表示当前不是编程题题目页（列表页没有答题表单）。
-export function collectProgramming() {
+// 编码题页题目收集（编程题与函数题同构）。返回 null 表示当前不是编码题题目页（列表页没有答题表单）。
+export function collectCodingProblem() {
   const mainEl = document.querySelector('main');
   const form = answerFormEl();
   if (!mainEl || !form) return null;
@@ -299,6 +311,9 @@ export function collectProgramming() {
   if (!cm) return null;
   const pspId = (location.search.match(/problemSetProblemId=(\d+)/) || [])[1];
   if (!pspId) return null;
+  // 题型判别：函数题有「函数接口定义」小节（2026-10-28 实测；两类题共用同一答题表单组件）
+  const kind = [...mainEl.querySelectorAll('h1,h2,h3')]
+    .some(h => (h.textContent || '').includes('函数接口定义')) ? 'CODE_COMPLETION' : 'PROGRAMMING';
   // 题干图：main 内、答题表单之外的 img（初探 §7.1 同一个数）；
   //parsed src 从活 DOM 取（绝对化），克隆节点不连树时 .src 不解析相对地址
   const stem = [...mainEl.querySelectorAll('img')].filter(i => !form.contains(i))
@@ -308,7 +323,7 @@ export function collectProgramming() {
   return {
     id: pspId,
     label: (text.match(/\d+-\d+/) || [])[0] || null, // 例题号形如 7-1（页面标题开头）
-    kind: 'PROGRAMMING',
+    kind,
     text,
     langLabel: langLabelOf(),
     hasImg: imgInfo.total > 0,
@@ -336,8 +351,6 @@ export function compilerIdFromLabel(label) {
   return null;
 }
 
-// 草稿快照与写回（answer.detail 形状来自接口 GET；exam 模式问题 problemId="0"，bundle 组包函数同构）。
-// customTestData 原样保留（用户自定义测试数据），写程序时不动它。
 export async function getDraftDetail(pspId) {
   const d = await fetch(`/api/problem-sets/problems/${pspId}/exam-draft`, {
     headers: { accept: 'application/json' },
@@ -346,15 +359,26 @@ export async function getDraftDetail(pspId) {
   return d?.answer?.detail || null;
 }
 
-export async function saveDraft(pspId, detail, compilerId, program) {
-  if (!compilerId) return { ok: false, status: null };
+// 草稿 detail 的提交子对象（纯函数，单测覆盖）。编程题带 compiler（跟随配置/编辑器语言）；
+// 函数题没有 compiler 字段——编译器由题目本身决定（2026-10-28 真机实证：bundle 只写
+// {program}，草稿写读回带一致，判题按题目固定编译器执行）。
+export function draftSubmissionDetail(kind, compilerId, program) {
+  return kind === 'CODE_COMPLETION'
+    ? { codeCompletionSubmissionDetail: { program } }
+    : { programmingSubmissionDetail: { compiler: compilerId, program } };
+}
+
+// 草稿写入（answer.detail 形状来自接口 GET；exam 模式问题 problemId="0"，bundle 组包函数同构）。
+// customTestData 原样保留（用户自定义测试数据），写程序时不动它。
+export async function saveDraft(pspId, kind, detail, compilerId, program) {
+  if (kind !== 'CODE_COMPLETION' && !compilerId) return { ok: false, status: null };
   const body = JSON.stringify({
     answer: {
       detail: {
         problemId: detail?.problemId ?? '0',
         problemSetProblemId: detail?.problemSetProblemId || pspId,
         customTestData: detail?.customTestData, // 原样保留（可为 null）
-        programmingSubmissionDetail: { compiler: compilerId, program },
+        ...draftSubmissionDetail(kind, compilerId, program),
       },
     },
   });
@@ -444,9 +468,10 @@ function clearCodingProblemCache(id) {
   } catch (_) { /* 结构异常静默 */ }
 }
 
-// 种入水合键：现行 PTA 的编程题 boot 只从 codingProblem_<id> 本地键回带编辑器内容，
+// 种入水合键：现行 PTA 的编码题 boot 只从 codingProblem_<id> 本地键回带编辑器内容，
 // 服务端 exam-draft 已不参与水合（2026-10-15 实测：服务端草稿有码的全新文档照样水合成
-// 空编辑器，且 boot 连 exam-draft 的 GET 都不发生；种键→真加载→编辑器回带+按钮解锁实证）。
+// 空编辑器，且 boot 连 exam-draft 的 GET 都不发生；种键→真加载→编辑器回带+按钮解锁实证。
+// 函数题同键同形状，2026-10-28 真机实证：种键→reload→回带+「提交本题作答」解锁）。
 // 形状照抄 PTA 自己写的键（program/testData/saveAt，saveAt 为 ISO 字符串）。collect 写完
 // 服务端草稿后立即种键再 reload，verify 文档的 boot 才有码可回带。
 export function seedCodingProblemCache(id, program, detail) {
@@ -1036,10 +1061,10 @@ async function answerOne(q, cfg) {
   }
 }
 
-/* ---------- 运行编排：编程题（跨文档续跑 relay） ---------- */
+/* ---------- 运行编排：编码题（跨文档续跑 relay） ---------- */
 // PTA 只在「整页装载」时从服务端草稿水合代码；SPA remount 会命中它的内存响应缓存拿旧值
 // （决策实验记录：写草稿→SPA 往返 = 不回带；写草稿→整页 reload = 必回带。见初探 §10.6）。
-// 因此编程题流转改为 sessionStorage 会话标志 + 逐题整页装载：
+// 因此编码题（编程/函数）流转改为 sessionStorage 会话标志 + 逐题整页装载：
 //   collect 文档（收题 → LLM → 写草稿）→ reload 到 verify 文档（水合 → 守护 → dry 撤销/真实提交）
 //   → assign 下一题文档 → … → 最后一题收尾。每个文档由内容脚本重启恢复阶段。
 // 会话标志含运行配置（含 API Key），只在当前标签页存活期内有效，关标签即清。
@@ -1132,13 +1157,13 @@ function pauseForRateLimit(r, where) {
   return true;
 }
 
-// 编程题流程入口：往 sessionStorage 里放下续跑单，然后整页跳到第一题（收集委托给 boot）
+// 编码题流程入口：往 sessionStorage 里放下续跑单，然后整页跳到第一题（收集委托给 boot）
 function startProgrammingRelay(psId, progTypes, cfg) {
   const problems = [];
   for (const t of progTypes) {
     for (const id of programmingIds(psId, t.typeId)) problems.push({ id, typeId: t.typeId, typeName: t.typeName });
   }
-  if (!problems.length) throw new Error('「编程题」找不到题目锚点（题目总览收起？点开后重试）');
+  if (!problems.length) throw new Error('「编码题」找不到题目锚点（题目总览收起？点开后重试）');
   const relay = {
     v: 1,
     cfg: { ...cfg },
@@ -1148,9 +1173,10 @@ function startProgrammingRelay(psId, progTypes, cfg) {
     phase: 'collect', // collect → verify →（advance）→ collect → …
     summary: { applied: 0, skippedAnswered: 0, failed: [] },
   };
-  if (!writeRelay(relay)) throw new Error('sessionStorage 不可写，无法跨页续跑编程题');
+  if (!writeRelay(relay)) throw new Error('sessionStorage 不可写，无法跨页续跑编码题');
   const first = problems[0];
-  fire({ kind: 'log', level: 'info', text: `编程题 ${problems.length} 题：转「逐题整页装载」模式（日志跨页保留）` });
+  const names = [...new Set(progTypes.map(t => t.typeName))].join('、');
+  fire({ kind: 'log', level: 'info', text: `${names || '编码题'} ${problems.length} 题：转「逐题整页装载」模式（日志跨页保留）` });
   suppressLeaveConfirm(); // 首次跳题也要压住离开确认（本页可能还有未保存的客观题答案）
   navigateRelay(`/problem-sets/${psId}/exam/problems/type/${first.typeId}?problemSetProblemId=${first.id}`, relay, '进入第一题');
   return true;
@@ -1162,19 +1188,19 @@ export async function resumeRelay(settings) {
   if (!r || r.v !== 1) return;
   if (!(settings && settings.autoAnswer)) {
     clearRelay();
-    fire({ kind: 'log', level: 'warn', text: '编程题续跑取消：总开关未开启' });
+    fire({ kind: 'log', level: 'warn', text: '编码题续跑取消：总开关未开启' });
     return;
   }
   if (r.aborted) { // 上一页已按用户要求中止（中止写入续跑单后才翻页的残单）：就地作废
     clearRelay();
-    fire({ kind: 'log', level: 'warn', text: '编程题续跑已中止（按你的要求停止）' });
+    fire({ kind: 'log', level: 'warn', text: '编码题续跑已中止（按你的要求停止）' });
     fire({ kind: 'state', running: false, error: '已中止' });
     return;
   }
   const prob = r.problems[r.pi];
   if (!prob) {
     clearRelay();
-    fire({ kind: 'log', level: 'warn', text: '编程题续跑取消：续跑单已越界' });
+    fire({ kind: 'log', level: 'warn', text: '编码题续跑取消：续跑单已越界' });
     return;
   }
   // 限流页可能被 PTA 换成别的地址/错误页：先识别再校验 URL，避免把限流误判成「用户导航走了」而弃单
@@ -1182,7 +1208,7 @@ export async function resumeRelay(settings) {
   if (!new RegExp(`problemSetProblemId=${prob.id}$`).test(location.search)) {
     // 用户把页面开去了别处 → 弃单（已落位的题目保持各自状态）
     clearRelay();
-    fire({ kind: 'log', level: 'warn', text: '编程题续跑取消：页面不在 ' + (prob.id || '').slice(-4) + ' 上（已落位题目保持各自状态）' });
+    fire({ kind: 'log', level: 'warn', text: '编码题续跑取消：页面不在 ' + (prob.id || '').slice(-4) + ' 上（已落位题目保持各自状态）' });
     return;
   }
   running = true;
@@ -1192,7 +1218,7 @@ export async function resumeRelay(settings) {
   // 每页的进页日志：跨页日志已持久化（见 readPersistedLog），这里只立坐标；
   // 历史日志丢了（用户手动清空）才回放失败清单兜底
   const hadHistory = readPersistedLog().length > 0;
-  fire({ kind: 'log', level: 'info', text: `编程题续跑（第 ${r.pi + 1}/${r.problems.length} 题，${r.phase === 'verify' ? '水合校验/提交' : '收集作答'}阶段）` });
+  fire({ kind: 'log', level: 'info', text: `编码题续跑（第 ${r.pi + 1}/${r.problems.length} 题，${r.phase === 'verify' ? '水合校验/提交' : '收集作答'}阶段）` });
   if (r.summary.failed.length && !hadHistory) {
     fire({ kind: 'log', level: 'warn', text: `此前已失败 ${r.summary.failed.length} 题：\n${failDetails(r.summary.failed)}` });
   }
@@ -1230,7 +1256,7 @@ function relayRecordFail(r, prob, label, reason) {
 
 function abortRelay(r, reason) {
   clearRelay();
-  fire({ kind: 'log', level: 'err', text: '编程题续跑中止：' + reason });
+  fire({ kind: 'log', level: 'err', text: '编码题续跑中止：' + reason });
   fire({ kind: 'log', level: 'info', text: relaySummaryLine(r) });
   fire({ kind: 'state', running: false, error: reason });
   running = false;
@@ -1244,7 +1270,7 @@ function stopRelayByUser(r) {
   running = false;
   runAbort = null;
   restoreLeaveConfirm();
-  fire({ kind: 'log', level: 'warn', text: '已中止：编程题续跑按你的要求停止' });
+  fire({ kind: 'log', level: 'warn', text: '已中止：编码题续跑按你的要求停止' });
   fire({ kind: 'log', level: 'info', text: relaySummaryLine(r) });
   fire({ kind: 'state', running: false, error: '已中止' });
 }
@@ -1273,7 +1299,7 @@ async function relayNext(r, record, text) {
     runAbort = null;
     restoreLeaveConfirm();
     const lvl = r.summary.failed.length ? 'warn' : 'ok';
-    fire({ kind: 'log', level: lvl, text: '编程题跨页续跑结束：' + line });
+    fire({ kind: 'log', level: lvl, text: '编码题跨页续跑结束：' + line });
     fire({ kind: 'state', running: false });
     return;
   }
@@ -1290,30 +1316,35 @@ async function relayNext(r, record, text) {
 
 // collect 文档：收题 → 守护 → LLM → 写草稿 → 转 verify（整页 reload）
 async function relayCollect(r, prob) {
-  const q = collectProgramming();
+  const q = collectCodingProblem();
   if (!q) {
     if (rateLimitedNow()) { pauseForRateLimit(r, '收集题目'); return; }
-    relayRecordFail(r, prob, null, '编程题页面收不到题目');
+    relayRecordFail(r, prob, null, '编码题页面收不到题目');
     return relayNext(r, 'fail');
   }
   r.rlTries = 0; // 真实题目页已打开：限流冷却计数清零
   const label = q.label || prob.id.slice(-4);
   if (q.answered && !r.cfg.overwrite) return relayNext(r, 'skip', `${label}：跳过，已作答`);
-  // 编程题的视觉链路未接（取图与带图消息组装只做在客观题上）：含图题照常按文字题面
+  // 编码题的视觉链路未接（取图与带图消息组装只做在客观题上）：含图题照常按文字题面
   // 作答并提交，只在日志写明这一局限，避免用户以为模型看过图。
-  if (q.hasImg) fire({ kind: 'log', level: 'warn', text: `${label}：题干含图片，编程题暂不支持图片输入，仅按文字题面作答` });
+  if (q.hasImg) fire({ kind: 'log', level: 'warn', text: `${label}：题干含图片，编码题暂不支持图片输入，仅按文字题面作答` });
 
   const detail = await getDraftDetail(prob.id);
-  const compilerId = r.cfg.language
-    ? r.cfg.language
-    : (compilerIdFromLabel(q.langLabel) || (detail?.programmingSubmissionDetail?.compiler || null));
-  if (!compilerId) {
-    relayRecordFail(r, prob, label, `读不到当前语言「${q.langLabel || '（空）'}」，无法确定编译器`);
-    return relayNext(r, 'fail');
+  let compilerId = null;
+  let wantLangLabel = '';
+  if (q.kind !== 'CODE_COMPLETION') {
+    // 编程题需要确定编译器（草稿带 compiler 字段）；函数题编译器由题目固定，草稿无此字段
+    compilerId = r.cfg.language
+      ? r.cfg.language
+      : (compilerIdFromLabel(q.langLabel) || (detail?.programmingSubmissionDetail?.compiler || null));
+    if (!compilerId) {
+      relayRecordFail(r, prob, label, `读不到当前语言「${q.langLabel || '（空）'}」，无法确定编译器`);
+      return relayNext(r, 'fail');
+    }
+    wantLangLabel = COMPILER_LABELS[compilerId] || q.langLabel || '';
   }
-  const wantLangLabel = COMPILER_LABELS[compilerId] || q.langLabel || '';
 
-  const messages = buildPrompt({ ...q, langLabel: wantLangLabel });
+  const messages = buildPrompt({ ...q, langLabel: wantLangLabel || q.langLabel || '' });
   let raw = null;
   fire({ kind: 'log', level: 'info', text: `${label}：请求模型中…（${r.cfg.model || '未知模型'}）` }); // await 期间的事件流在场日志
   try {
@@ -1335,7 +1366,7 @@ async function relayCollect(r, prob) {
     return relayNext(r, 'fail');
   }
 
-  const written = await saveDraft(prob.id, detail, compilerId, code);
+  const written = await saveDraft(prob.id, q.kind, detail, compilerId, code);
   if (!written.ok) {
     if (rateLimitedNow()) { pauseForRateLimit(r, '写草稿'); return; }
     relayRecordFail(r, prob, label, `草稿写入失败（HTTP ${written.status ?? '未知'}${written.err ? '：' + written.err : ''}）`);
@@ -1350,19 +1381,20 @@ async function relayCollect(r, prob) {
     return relayNext(r, 'fail');
   }
   r.phase = 'verify';
-  r.hint = { label, compilerId, wantLangLabel, head: (code.split('\n')[0] || '').trim().slice(0, 24), detail };
+  r.hint = { label, kind: q.kind, compilerId, wantLangLabel, head: (code.split('\n')[0] || '').trim().slice(0, 24), detail };
   if (!writeRelay(r)) { abortRelay(r, 'sessionStorage 写入失败'); return; }
   running = false; // 文档马上销毁，复位标记避免残留运行态
   await pacePageLoad('提交草稿后校验');
   try { location.reload(); } catch (_) { /* 交浏览器 */ }
 }
 
-// verify 文档：水合探测 → 语言守护 → dry 撤销 / 点「提交本题作答」→ 推进下一题（或收尾）
+// verify 文档：水合探测 → 语言守护（仅编程题） → dry 撤销 / 点「提交本题作答」→ 推进下一题（或收尾）
 async function relayVerify(r, prob) {
   const hint = r.hint;
   if (!hint || !hint.head) { abortRelay(r, 'verify 阶段缺少 hint（replay 状态错乱）'); return; }
   if (rateLimitedNow()) { pauseForRateLimit(r, '水合校验'); return; }
   const label = hint.label || prob.id.slice(-4);
+  const kind = hint.kind || 'PROGRAMMING'; // 旧续跑单没有 kind 字段：只可能是编程题
   const wantLangLabel = hint.wantLangLabel || '';
   const compilerId = hint.compilerId;
   const head = String(hint.head || '').trim();
@@ -1372,7 +1404,7 @@ async function relayVerify(r, prob) {
   const cmText = editableCm()?.textContent || '';
   if (!hyd.ok || (head && !cmText.includes(head))) {
     if (rateLimitedNow()) { pauseForRateLimit(r, '水合校验'); return; }
-    const rollback = await saveDraft(prob.id, detail, compilerId, '');
+    const rollback = await saveDraft(prob.id, kind, detail, compilerId, '');
     stripDraftHttpCache(prob.id);
     clearCodingProblemCache(prob.id);
     relayRecordFail(r, prob, label, '水合校验失败（编辑器未回带代码）' + (rollback.ok ? '，草稿已撤销' : '，草稿残留需人工核对'));
@@ -1381,20 +1413,23 @@ async function relayVerify(r, prob) {
   }
   r.rlTries = 0; // 水合通过 = 真实题目页，限流冷却计数清零
 
-  // 语言一致性守卫：实挂语言 != 代码语言时不提交（提交载荷的 compiler 由页面默认链决定，
-  // 可能不理会草稿 compiler——不能拿错配代码冒险）
-  const mountedLabel = langLabelOf();
-  if (mountedLabel !== wantLangLabel) {
-    const rollback = await saveDraft(prob.id, detail, compilerId, '');
-    stripDraftHttpCache(prob.id);
-    clearCodingProblemCache(prob.id);
-    relayRecordFail(r, prob, label, `语言不一致（草稿 ${wantLangLabel}，实挂「${mountedLabel || '未知'}」），已弃答防错配` + (rollback.ok ? '，草稿已撤销' : '，草稿残留需人工核对'));
-    if (!rollback.ok) return abortRelay(r, '草稿撤销失败（残留代码），需人工核对后再试');
-    return relayNext(r, 'fail');
+  // 语言一致性守卫（仅编程题）：实挂语言 != 代码语言时不提交（提交载荷的 compiler 由页面
+  // 默认链决定，可能不理会草稿 compiler——不能拿错配代码冒险）。函数题的编译器由题目固定、
+  // 草稿不带 compiler 字段，不存在错配，直接跳过。
+  if (kind !== 'CODE_COMPLETION') {
+    const mountedLabel = langLabelOf();
+    if (mountedLabel !== wantLangLabel) {
+      const rollback = await saveDraft(prob.id, kind, detail, compilerId, '');
+      stripDraftHttpCache(prob.id);
+      clearCodingProblemCache(prob.id);
+      relayRecordFail(r, prob, label, `语言不一致（草稿 ${wantLangLabel}，实挂「${mountedLabel || '未知'}」），已弃答防错配` + (rollback.ok ? '，草稿已撤销' : '，草稿残留需人工核对'));
+      if (!rollback.ok) return abortRelay(r, '草稿撤销失败（残留代码），需人工核对后再试');
+      return relayNext(r, 'fail');
+    }
   }
 
   if (r.cfg.drySave) {
-    const rollback = await saveDraft(prob.id, detail, compilerId, '');
+    const rollback = await saveDraft(prob.id, kind, detail, compilerId, '');
     stripDraftHttpCache(prob.id);
     clearCodingProblemCache(prob.id);
     if (!rollback.ok) return abortRelay(r, 'dry：水合校验通过后撤销草稿失败，残留需人工核对');
@@ -1407,7 +1442,7 @@ async function relayVerify(r, prob) {
   if (!saved.saved || rateLimitedNow()) {
     // 限流页可能替换在提交之后：不记账、不回滚草稿，冷却后重载本题再试
     if (rateLimitedNow()) { pauseForRateLimit(r, '提交评测'); return; }
-    const rollback = await saveDraft(prob.id, detail, compilerId, '');
+    const rollback = await saveDraft(prob.id, kind, detail, compilerId, '');
     stripDraftHttpCache(prob.id);
     clearCodingProblemCache(prob.id);
     relayRecordFail(r, prob, label, '提交失败：' + saved.reason + (rollback.ok ? '，草稿已撤销' : '，草稿残留含本次代码，需人工核对'));
@@ -1554,9 +1589,9 @@ export async function handleRun(config = {}) {
   if (running) { fire({ kind: 'log', level: 'warn', text: '已有一次答题在运行中' }); return { ok: false, error: '已有一次答题在运行中' }; }
   const preRelay = readRelay();
   if (preRelay && !preRelay.aborted) {
-    // 编程题跨页续跑滚动中（每页由 boot 的 resumeRelay 恢复阶段）；该页不在题目页时续跑已弃单
-    fire({ kind: 'log', level: 'warn', text: '编程题跨页续跑正在进行（看各页悬浮球状态）；本页若已不在题目上则续跑会自行取消' });
-    return { ok: false, error: '编程题跨页续跑正在进行' };
+    // 编码题跨页续跑滚动中（每页由 boot 的 resumeRelay 恢复阶段）；该页不在题目页时续跑已弃单
+    fire({ kind: 'log', level: 'warn', text: '编码题跨页续跑正在进行（看各页悬浮球状态）；本页若已不在题目上则续跑会自行取消' });
+    return { ok: false, error: '编码题跨页续跑正在进行' };
   }
   if (preRelay) clearRelay(); // 已中止的续跑残单：作废，不拦新运行
   const m = location.pathname.match(EXAM_PROBLEMS_RE);
@@ -1569,7 +1604,7 @@ export async function handleRun(config = {}) {
     gateway: config.gateway || '',
     overwrite: !!config.overwrite,
     images: !!config.images, // 作答含图题（需视觉模型；只作用于客观题，编程题恒按文字题面作答）
-    language: config.language || '', // 编程题固定语言（白名单 id）；空 = 跟随各题编辑器当前语言
+    language: config.language || '', // 编程题固定语言（白名单 id）；空 = 跟随各题编辑器当前语言；函数题忽略（编译器由题目固定）
     drySave: !!config.drySave,
   };
   if (globalThis.__BPS_LLM_MOCK__ && !cfg.drySave) {
@@ -1617,7 +1652,7 @@ export async function handleRun(config = {}) {
       }
       if (runAbort.signal.aborted) throw new Error('已中止');
       const type = TYPE_BY_NAME[t.typeName];
-      const isProg = type === 'PROGRAMMING';
+      const isCoding = isCodingKind(type);
       if (!location.pathname.endsWith(`/type/${t.typeId}`)) {
         const link = [...document.querySelectorAll('a[href]')]
           .find(a => (a.getAttribute('href') || '').match(`^/problem-sets/${psId}/exam/problems/type/${t.typeId}$`));
@@ -1630,16 +1665,16 @@ export async function handleRun(config = {}) {
           if (runAbort.signal.aborted) throw new Error('已中止');
           await sleep(100);
           ready = location.pathname.endsWith(`/type/${t.typeId}`)
-            && (isProg
+            && (isCoding
               ? (programmingIds(psId, t.typeId).length > 0 || !!editableCm())
               : collectPage().filter(q => q.kind === type).length >= t.total);
         }
         if (!ready) throw new Error(`「${t.typeName}」页面未就绪（侧栏统计 ${t.total} 题）`);
       }
       await sleep(300); // 渲染稳定
-      if (isProg) {
-        // 编程题只与整页装载的水合机制兼容（SPA remount 命中内存响应缓存），转跨文档续跑；
-        // 为让客观题在本文档内先处理完，编程题统一推迟到本轮所有客观题之后触发
+      if (isCoding) {
+        // 编码题只与整页装载的水合机制兼容（SPA remount 命中内存响应缓存），转跨文档续跑；
+        // 为让客观题在本文档内先处理完，编码题统一推迟到本轮所有客观题之后触发
         progTypes.push(t);
         continue;
       }
@@ -1693,10 +1728,11 @@ export async function handleRun(config = {}) {
     if (runAbort.signal.aborted) throw new Error('已中止'); // 最后一页答完才按中止也要如实报
     ret = { ok: true, summary };
     if (progTypes.length) {
-      // 编程题统一推迟到所有客观题之后；启动续跑后 ret 语义是「客观题已完成、编程题滚动中」
+      // 编码题统一推迟到所有客观题之后；启动续跑后 ret 语义是「客观题已完成、编码题滚动中」
       if (startProgrammingRelay(psId, progTypes, cfg)) {
         relayStarted = true;
-        summary.types.push({ type: '编程题', total: progTypes.reduce((n, x) => n + x.total, 0), applied: 0, skippedAnswered: 0, skippedImage: 0, failed: 0, saved: false });
+        const relayNames = [...new Set(progTypes.map(t => t.typeName))].join('、');
+        summary.types.push({ type: relayNames || '编码题', total: progTypes.reduce((n, x) => n + x.total, 0), applied: 0, skippedAnswered: 0, skippedImage: 0, failed: 0, saved: false });
         ret = { ok: true, relay: true, summary };
       }
     }
@@ -1712,7 +1748,7 @@ export async function handleRun(config = {}) {
 
     if (ret.ok) {
       const failN = ret.summary.failed.length;
-      fire({ kind: 'log', level: failN ? 'warn' : 'ok', text: `${ret.relay ? '客观题完成（编程题已转逐页续跑，日志随各页出现）' : `完成：作答 ${ret.summary.applied} · 跳过已答 ${ret.summary.skippedAnswered} · 跳过含图 ${ret.summary.skippedImage} · 失败 ${failN}${cfg.drySave ? '（未保存）' : ''}`}` });
+      fire({ kind: 'log', level: failN ? 'warn' : 'ok', text: `${ret.relay ? '客观题完成（编码题已转逐页续跑，日志随各页出现）' : `完成：作答 ${ret.summary.applied} · 跳过已答 ${ret.summary.skippedAnswered} · 跳过含图 ${ret.summary.skippedImage} · 失败 ${failN}${cfg.drySave ? '（未保存）' : ''}`}` });
       fire({ kind: 'state', running: false });
     } else {
       // 用户中止不带「原因前缀」重复（错误路径才需要「已中止：<原因>」）

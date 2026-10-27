@@ -155,13 +155,13 @@ async function init() {
 window.BPS = {
   init, sync, teardown: view.teardown, DEFAULTS,
   // 自动答题调试与回归入口：run 走完整流程（配合 __BPS_LLM_MOCK__ 可 mock LLM），
-  // collect 收集客观题、programming 收集编程题（一页一题形态，验证提取纯度用）；
-  // resumeRelay 手动触发编程题跨文档续跑的恢复（真机回归用）
+  // collect 收集客观题、coding 收集编码题（编程/函数，一页一题形态，验证提取纯度用）；
+  // resumeRelay 手动触发编码题跨文档续跑的恢复（真机回归用）
   autoAnswer: {
     run: (config = {}) => autoanswer.handleRun(config),
     collect: () => autoanswer.collectPage(),
     types: () => autoanswer.sidebarTypes(),
-    programming: () => autoanswer.collectProgramming(),
+    coding: () => autoanswer.collectCodingProblem(),
   },
   resumeRelay: () => autoanswer.resumeRelay(settings),
   // 手动触发提醒订阅同步（真机上配置变更走 storage.onChanged 自动触发；预览页/回归用这个）
