@@ -302,6 +302,15 @@ function langLabelOf() {
   return normalizeLangLabel(form?.querySelector('.select__single-value')?.textContent || '');
 }
 
+// 编码题题型判别（纯函数，单测覆盖）：两类题共用同一答题表单组件，只能靠题面小节标题区分。
+// 函数题小节——中文「函数接口定义」（2026-10-28 实测）或英文「Format of function:」（2026-10-31
+// 实测：英文题面题集没有中文小节，如算法设计与分析课堂练习2-4）。都不命中按编程题处理。
+export function codingKindFromHeadings(headings) {
+  const hit = (headings || []).some(h =>
+    String(h || '').includes('函数接口定义') || /format of function/i.test(String(h || '')));
+  return hit ? 'CODE_COMPLETION' : 'PROGRAMMING';
+}
+
 // 编码题页题目收集（编程题与函数题同构）。返回 null 表示当前不是编码题题目页（列表页没有答题表单）。
 export function collectCodingProblem() {
   const mainEl = document.querySelector('main');
@@ -311,9 +320,8 @@ export function collectCodingProblem() {
   if (!cm) return null;
   const pspId = (location.search.match(/problemSetProblemId=(\d+)/) || [])[1];
   if (!pspId) return null;
-  // 题型判别：函数题有「函数接口定义」小节（2026-10-28 实测；两类题共用同一答题表单组件）
-  const kind = [...mainEl.querySelectorAll('h1,h2,h3')]
-    .some(h => (h.textContent || '').includes('函数接口定义')) ? 'CODE_COMPLETION' : 'PROGRAMMING';
+  // 题型判别（见 codingKindFromHeadings）
+  const kind = codingKindFromHeadings([...mainEl.querySelectorAll('h1,h2,h3')].map(h => h.textContent));
   // 题干图：main 内、答题表单之外的 img（初探 §7.1 同一个数）；
   //parsed src 从活 DOM 取（绝对化），克隆节点不连树时 .src 不解析相对地址
   const stem = [...mainEl.querySelectorAll('img')].filter(i => !form.contains(i))
@@ -332,7 +340,9 @@ export function collectCodingProblem() {
   };
 }
 
-// 该题型的全部题目 id（题目总览数字锚点，href 带 problemSetProblemId；DOM 顺序 = 页面顺序）
+// 该题型的全部题目 id（题目总览数字锚点，href 带 problemSetProblemId；DOM 顺序 = 页面顺序）。
+// 注意：现行 PTA 侧栏只渲染「当前题型」的题目锚点（2026-10-31 实测，切走题型后旧锚点即从
+// DOM 消失）——必须在该题型页面就绪的当下调用；跨题型回头收会收空（见 handleRun 编码分支）。
 export function programmingIds(psId, typeId) {
   const out = [];
   const seen = new Set();
@@ -1157,11 +1167,13 @@ function pauseForRateLimit(r, where) {
   return true;
 }
 
-// 编码题流程入口：往 sessionStorage 里放下续跑单，然后整页跳到第一题（收集委托给 boot）
+// 编码题流程入口：往 sessionStorage 里放下续跑单，然后整页跳到第一题（收集委托给 boot）。
+// 题目清单用 progTypes 里现成的 ids（handleRun 在各题型页面就绪时当场收的，见彼处注释）——
+// 此处文档已不在各题型页上，不能回头再收。
 function startProgrammingRelay(psId, progTypes, cfg) {
   const problems = [];
   for (const t of progTypes) {
-    for (const id of programmingIds(psId, t.typeId)) problems.push({ id, typeId: t.typeId, typeName: t.typeName });
+    for (const id of t.ids) problems.push({ id, typeId: t.typeId, typeName: t.typeName });
   }
   if (!problems.length) throw new Error('「编码题」找不到题目锚点（题目总览收起？点开后重试）');
   const relay = {
@@ -1637,7 +1649,7 @@ export async function handleRun(config = {}) {
     fire({ kind: 'log', level: 'info', text: `开始答题（每题一次请求，${cfg.overwrite ? '覆盖已作答' : '跳过已答'}${cfg.images ? '，含图题作答' : ''}）` });
     const types = sidebarTypes().filter(t => TYPE_BY_NAME[t.typeName] || false).filter(t => t.total > 0);
     const unknown = sidebarTypes().filter(t => !(t.typeName in TYPE_BY_NAME) && t.total > 0);
-    if (!types.length) throw new Error('本页侧栏没有可作答的题型');
+    if (!types.length) throw new Error('本页侧栏没有可作答的题型（若「题目总览」收起请先展开再重试）');
     if (unknown.length) {
       summary.failed.push({ id: '-', reason: `暂不支持题型：${unknown.map(u => u.typeName).join('、')}（跳过）` });
       fire({ kind: 'log', level: 'warn', text: `暂不支持题型：${unknown.map(u => u.typeName).join('、')}，已跳过` });
@@ -1674,8 +1686,18 @@ export async function handleRun(config = {}) {
       await sleep(300); // 渲染稳定
       if (isCoding) {
         // 编码题只与整页装载的水合机制兼容（SPA remount 命中内存响应缓存），转跨文档续跑；
-        // 为让客观题在本文档内先处理完，编码题统一推迟到本轮所有客观题之后触发
-        progTypes.push(t);
+        // 为让客观题在本文档内先处理完，编码题统一推迟到本轮所有客观题之后触发。
+        // 锚点必须在本题型页面就绪的当下收：侧栏只渲染当前题型的题目锚点，循环结束后文档
+        // 已停在最后一个编码题型页，回头统一收会把先遍历的题型收空、静默漏出续跑单
+        // （2026-10-31 实测：函数题+编程题并存时函数题被整题跳过，汇总还显示成功）。
+        let ids = programmingIds(psId, t.typeId);
+        for (let i = 0; i < 30 && !ids.length; i++) { // 锚点晚到兜底 ≤3s（在题详情页开跑时侧栏可能还在渲染）
+          if (runAbort.signal.aborted) throw new Error('已中止');
+          await sleep(100);
+          ids = programmingIds(psId, t.typeId);
+        }
+        if (!ids.length) throw new Error(`「${t.typeName}」找不到题目锚点（题目总览收起？点开后重试）`);
+        progTypes.push({ ...t, ids });
         continue;
       }
       const questions = collectPage().filter(q => q.kind === type);

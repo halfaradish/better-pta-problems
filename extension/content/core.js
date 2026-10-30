@@ -515,6 +515,10 @@
     const form = answerFormEl();
     return normalizeLangLabel(form?.querySelector(".select__single-value")?.textContent || "");
   }
+  function codingKindFromHeadings(headings) {
+    const hit = (headings || []).some((h) => String(h || "").includes("\u51FD\u6570\u63A5\u53E3\u5B9A\u4E49") || /format of function/i.test(String(h || "")));
+    return hit ? "CODE_COMPLETION" : "PROGRAMMING";
+  }
   function collectCodingProblem() {
     const mainEl = document.querySelector("main");
     const form = answerFormEl();
@@ -523,7 +527,7 @@
     if (!cm) return null;
     const pspId = (location.search.match(/problemSetProblemId=(\d+)/) || [])[1];
     if (!pspId) return null;
-    const kind = [...mainEl.querySelectorAll("h1,h2,h3")].some((h) => (h.textContent || "").includes("\u51FD\u6570\u63A5\u53E3\u5B9A\u4E49")) ? "CODE_COMPLETION" : "PROGRAMMING";
+    const kind = codingKindFromHeadings([...mainEl.querySelectorAll("h1,h2,h3")].map((h) => h.textContent));
     const stem = [...mainEl.querySelectorAll("img")].filter((i) => !form.contains(i)).map((i) => i.getAttribute("src") ? i.src : null).filter(Boolean);
     const imgInfo = { options: {}, stem, total: stem.length };
     const text = cleanText(mainEl, '[class*="CodingProblemAnswerForm"]');
@@ -1271,7 +1275,7 @@
   function startProgrammingRelay(psId, progTypes, cfg) {
     const problems = [];
     for (const t of progTypes) {
-      for (const id of programmingIds(psId, t.typeId)) problems.push({ id, typeId: t.typeId, typeName: t.typeName });
+      for (const id of t.ids) problems.push({ id, typeId: t.typeId, typeName: t.typeName });
     }
     if (!problems.length) throw new Error("\u300C\u7F16\u7801\u9898\u300D\u627E\u4E0D\u5230\u9898\u76EE\u951A\u70B9\uFF08\u9898\u76EE\u603B\u89C8\u6536\u8D77\uFF1F\u70B9\u5F00\u540E\u91CD\u8BD5\uFF09");
     const relay = {
@@ -1736,7 +1740,7 @@ ${failDetails(s.failed)}`;
       fire({ kind: "log", level: "info", text: `\u5F00\u59CB\u7B54\u9898\uFF08\u6BCF\u9898\u4E00\u6B21\u8BF7\u6C42\uFF0C${cfg.overwrite ? "\u8986\u76D6\u5DF2\u4F5C\u7B54" : "\u8DF3\u8FC7\u5DF2\u7B54"}${cfg.images ? "\uFF0C\u542B\u56FE\u9898\u4F5C\u7B54" : ""}\uFF09` });
       const types = sidebarTypes().filter((t) => TYPE_BY_NAME[t.typeName] || false).filter((t) => t.total > 0);
       const unknown = sidebarTypes().filter((t) => !(t.typeName in TYPE_BY_NAME) && t.total > 0);
-      if (!types.length) throw new Error("\u672C\u9875\u4FA7\u680F\u6CA1\u6709\u53EF\u4F5C\u7B54\u7684\u9898\u578B");
+      if (!types.length) throw new Error("\u672C\u9875\u4FA7\u680F\u6CA1\u6709\u53EF\u4F5C\u7B54\u7684\u9898\u578B\uFF08\u82E5\u300C\u9898\u76EE\u603B\u89C8\u300D\u6536\u8D77\u8BF7\u5148\u5C55\u5F00\u518D\u91CD\u8BD5\uFF09");
       if (unknown.length) {
         summary.failed.push({ id: "-", reason: `\u6682\u4E0D\u652F\u6301\u9898\u578B\uFF1A${unknown.map((u) => u.typeName).join("\u3001")}\uFF08\u8DF3\u8FC7\uFF09` });
         fire({ kind: "log", level: "warn", text: `\u6682\u4E0D\u652F\u6301\u9898\u578B\uFF1A${unknown.map((u) => u.typeName).join("\u3001")}\uFF0C\u5DF2\u8DF3\u8FC7` });
@@ -1764,7 +1768,14 @@ ${failDetails(s.failed)}`;
         }
         await sleep(300);
         if (isCoding) {
-          progTypes.push(t);
+          let ids = programmingIds(psId, t.typeId);
+          for (let i = 0; i < 30 && !ids.length; i++) {
+            if (runAbort.signal.aborted) throw new Error("\u5DF2\u4E2D\u6B62");
+            await sleep(100);
+            ids = programmingIds(psId, t.typeId);
+          }
+          if (!ids.length) throw new Error(`\u300C${t.typeName}\u300D\u627E\u4E0D\u5230\u9898\u76EE\u951A\u70B9\uFF08\u9898\u76EE\u603B\u89C8\u6536\u8D77\uFF1F\u70B9\u5F00\u540E\u91CD\u8BD5\uFF09`);
+          progTypes.push({ ...t, ids });
           continue;
         }
         const questions = collectPage().filter((q) => q.kind === type);

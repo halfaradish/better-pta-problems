@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
-  assembleImgMessage, assertChatModel, buildPrompt, classifyLlmError, clearPersistedLog, COMPILER_LABELS, compilerIdFromLabel, draftSubmissionDetail, failDetails,
+  assembleImgMessage, assertChatModel, buildPrompt, classifyLlmError, codingKindFromHeadings, clearPersistedLog, COMPILER_LABELS, compilerIdFromLabel, draftSubmissionDetail, failDetails,
   isRateLimitedText, isRetryableLlmError, nonChatProtocol, normalizeBaseUrl, normalizeTF, parseChoiceAnswer, parseCodeAnswer,
   parseFillAnswers, parseLlmErrorBody, persistLogLine, readPersistedLog, relaySummaryLine, saveDraft, seedCodingProblemCache, TYPE_BY_NAME,
   normalizeLangLabel,
@@ -402,6 +402,18 @@ test('buildPrompt：函数题——签名一致、不写 main、围栏输出、�
   // 语言标签缺省回落「题目规定的语言」
   const p2 = buildPrompt({ kind: 'CODE_COMPLETION', text: '…', langLabel: '', options: [], blanks: 0 });
   assert.match(p2[1].content, /题目规定的语言/);
+});
+
+test('codingKindFromHeadings：中英文函数题小节都判 CODE_COMPLETION，其余编程题', () => {
+  // 2026-10-28 实测：中文题面函数题有「函数接口定义」小节
+  assert.equal(codingKindFromHeadings(['函数接口定义：', '裁判测试程序样例']), 'CODE_COMPLETION');
+  // 2026-10-31 实测：英文题面题集（课堂练习2-4）函数题小节是「Format of function:」，无中文标题
+  assert.equal(codingKindFromHeadings(['Format of function:', 'Sample program of judge:']), 'CODE_COMPLETION');
+  assert.equal(codingKindFromHeadings(['FORMAT OF FUNCTION']), 'CODE_COMPLETION'); // 大小写不敏感
+  // 英文编程题的常规小节（PTA 模板）不得误判
+  assert.equal(codingKindFromHeadings(['Input Specification:', 'Output Specification:']), 'PROGRAMMING');
+  assert.equal(codingKindFromHeadings([]), 'PROGRAMMING');
+  assert.equal(codingKindFromHeadings(null), 'PROGRAMMING');
 });
 
 test('draftSubmissionDetail：函数题草稿只有 program 无 compiler；编程题带 compiler', () => {
