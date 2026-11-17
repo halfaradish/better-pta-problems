@@ -348,9 +348,13 @@
       return { action: "clear", reason: "\u9875\u9762\u4E0D\u5728\u7F16\u7801\u9898\u5217\u8868\u9875\uFF08\u4F5C\u7B54\u4E2D\u65AD\uFF1B\u5DF2\u5199\u5165\u7684\u8349\u7A3F\u4FDD\u7559\uFF09" };
     }
     if (relay.phase === "verify") {
-      const cur = problems.find((p) => p.id === (relay.verifyIds || [])[relay.vi]);
+      const ids = relay.verifyIds || [];
+      const cur = problems.find((p) => p.id === ids[relay.vi]);
       if (!cur) return { action: "clear", reason: "\u7EED\u8DD1\u5355 verify \u6E38\u6807\u8D8A\u754C" };
       if (problemId && problemId === cur.id) return { action: "verify" };
+      if (problemId && ids.includes(problemId)) {
+        return { action: "verifyJump" };
+      }
       if (onKnownTypeList) return { action: "seedVerify" };
       return { action: "clear", reason: `\u9875\u9762\u4E0D\u5728\u5F85\u63D0\u4EA4\u9898\uFF08${cur.label || cur.id.slice(-4)}\uFF09\u4E0A\uFF0C\u5DF2\u63D0\u4EA4\u9898\u76EE\u4FDD\u6301\u5404\u81EA\u72B6\u6001` };
     }
@@ -790,18 +794,23 @@
       return { seeded: false, err: err ? String(err.message || err) : null };
     }
   }
-  async function waitHydrate(expectEnabled) {
+  var normCode = (s) => String(s || "").replace(/\s+/g, "");
+  var HYDRATION_PREFIX_LEN = 160;
+  async function waitEditorCode(code) {
+    const want = normCode(code).slice(0, HYDRATION_PREFIX_LEN);
     for (let i = 0; i < 200; i++) {
       await sleep(100);
+      const cm = editableCm();
       const b = submitButton();
-      if (!b) continue;
-      if (b.disabled === !expectEnabled) {
+      if (!cm || !b || b.disabled) continue;
+      if (want && normCode(cm.textContent).startsWith(want)) {
         await sleep(250);
+        const cm2 = editableCm();
         const b2 = submitButton();
-        if (b2 && b2.disabled === b.disabled) return { ok: true, disabled: b.disabled };
+        if (cm2 && b2 && !b2.disabled && normCode(cm2.textContent).startsWith(want)) return { ok: true };
       }
     }
-    return { ok: false };
+    return { ok: false, editorHead: normCode(editableCm()?.textContent).slice(0, 60) };
   }
   async function settleEditorState() {
     let prev = null;
@@ -1193,6 +1202,7 @@
         const took = ((Date.now() - t0) / 1e3).toFixed(1);
         fire({ kind: "log", level: "warn", text: `${label}\u7B2C ${attempt}/${max} \u6B21\u8BF7\u6C42\u5931\u8D25\uFF08${shortErrText(err)}\uFF0C\u7528\u65F6 ${took}s\uFF09\uFF0C${(delay / 1e3).toFixed(1)}s \u540E\u91CD\u8BD5` });
         await sleep(delay);
+        await waitOnlineIfOffline(label || "\u91CD\u8BD5");
       }
     }
     if (attempts > 1 && lastErr?.message && !lastErr.aborted) {
@@ -1334,6 +1344,7 @@
   var PAGE_LOAD_WAIT_MS = 5e3;
   var RATE_LIMIT_WAITS_MS = [6e4, 12e4, 18e4];
   var NAVIGATE_CHECK_MS = 1e4;
+  var NAVIGATE_HIDDEN_WAIT_MS = 3e4;
   function isRateLimitedText(text) {
     const s = String(text || "").replace(/\s+/g, "");
     if (s.includes("\u60A8\u8BBF\u95EE\u5F97\u592A\u5FEB\u5566")) return true;
@@ -1356,22 +1367,46 @@
       } catch (_) {
       }
     };
-    const check = (attempt) => setTimeout(() => {
+    let retried = false;
+    let hiddenWaits = 0;
+    const check = (delay) => setTimeout(() => {
       if (location.pathname + location.search !== from) return;
-      if (attempt === 0) {
+      if ((document.hidden || navigator.onLine === false) && hiddenWaits < 4) {
+        hiddenWaits += 1;
+        const why = navigator.onLine === false ? "\u5F53\u524D\u79BB\u7EBF" : "\u6807\u7B7E\u9875\u5728\u540E\u53F0";
+        fire({ kind: "log", level: "warn", text: `${what}\uFF1A${why}\uFF0C\u5BFC\u822A\u53EF\u80FD\u88AB\u62C9\u957F\uFF1B\u518D\u7B49 30s \u89C2\u5BDF\uFF08${hiddenWaits}/4\uFF09\uFF0C\u4E0D\u7ACB\u5373\u91CD\u53D1\u5BFC\u822A` });
+        check(NAVIGATE_HIDDEN_WAIT_MS);
+        return;
+      }
+      if (!retried) {
+        retried = true;
         fire({ kind: "log", level: "warn", text: `${what}\u672A\u751F\u6548\uFF08\u9875\u9762\u6CA1\u6709\u8DF3\u8F6C\uFF09\uFF0C\u91CD\u8BD5\u4E00\u6B21\u2026` });
         go();
-        check(1);
+        check(NAVIGATE_CHECK_MS);
         return;
       }
       abortRelay(r, `${what}\u88AB\u62E6\u4E0B\uFF1A\u9875\u9762\u59CB\u7EC8\u6CA1\u6709\u8DF3\u8F6C\uFF08\u6D4F\u89C8\u5668\u79BB\u5F00\u786E\u8BA4\u6216\u6269\u5C55\u62E6\u622A\uFF09\uFF0C\u8BF7\u5904\u7406\u540E\u91CD\u65B0\u5F00\u59CB\uFF0C\u5DF2\u5B8C\u6210\u7684\u9898\u76EE\u4E0D\u4F1A\u91CD\u505A`);
-    }, NAVIGATE_CHECK_MS);
+    }, delay);
     go();
-    check(0);
+    check(NAVIGATE_CHECK_MS);
   }
   async function pacePageLoad(where) {
     fire({ kind: "log", level: "info", text: `${where}\uFF1A\u7B49\u5F85 ${PAGE_LOAD_WAIT_MS / 1e3}s \u518D\u5207\u6362\uFF08\u907F\u514D PTA \u8BBF\u95EE\u9891\u7387\u9650\u5236\uFF09\u2026` });
     await sleep(PAGE_LOAD_WAIT_MS);
+    await waitOnlineIfOffline(where);
+  }
+  var OFFLINE_WAIT_MS = 12e4;
+  async function waitOnlineIfOffline(where) {
+    if (navigator.onLine !== false) return;
+    fire({ kind: "log", level: "warn", text: `${where}\uFF1A\u5F53\u524D\u79BB\u7EBF\uFF0C\u7B49\u5F85\u7F51\u7EDC\u6062\u590D\u540E\u518D\u5207\u6362\uFF08\u6700\u591A\u7B49 ${Math.round(OFFLINE_WAIT_MS / 1e3)}s\uFF09\u2026` });
+    for (let i = 0; i < OFFLINE_WAIT_MS / 1e3; i++) {
+      await sleep(1e3);
+      if (navigator.onLine !== false) {
+        fire({ kind: "log", level: "ok", text: "\u7F51\u7EDC\u5DF2\u6062\u590D\uFF0C\u7EE7\u7EED" });
+        return;
+      }
+    }
+    fire({ kind: "log", level: "warn", text: "\u7B49\u5F85\u8D85\u65F6\u4ECD\u79BB\u7EBF\uFF0C\u7167\u5E38\u5C1D\u8BD5\u5207\u6362\uFF08\u5931\u8D25\u7531\u770B\u95E8\u72D7/\u9650\u6D41\u53E3\u5F84\u515C\u5E95\uFF09" });
   }
   function pauseBatchForRateLimit(r, where) {
     const tries = Number(r.rlTries) || 0;
@@ -1471,6 +1506,9 @@
     if (!writeRelay(relay)) throw new Error("sessionStorage \u4E0D\u53EF\u5199\u6216\u7EED\u8DD1\u5355\u8D85\u9650\uFF0C\u65E0\u6CD5\u6279\u91CF\u4F5C\u7B54\u7F16\u7801\u9898");
     const names = [...new Set(progTypes.map((t) => t.typeName))].join("\u3001");
     fire({ kind: "log", level: "info", text: `${names || "\u7F16\u7801\u9898"} ${problems.length} \u9898\uFF1A\u6279\u91CF\u6A21\u5F0F\uFF08\u6536\u9898 \u2192 \u5E76\u53D1\u4F5C\u7B54 \u2192 \u9010\u9898\u63D0\u4EA4\uFF0C\u65E5\u5FD7\u8DE8\u9875\u4FDD\u7559\uFF09` });
+    if (document.hidden) {
+      fire({ kind: "log", level: "warn", text: "\u6807\u7B7E\u9875\u5728\u540E\u53F0\u8FD0\u884C\uFF1A\u6D4F\u89C8\u5668\u7684\u5B9A\u65F6/\u5BFC\u822A\u8282\u6D41\u4F1A\u62C9\u957F\u7B49\u5F85\uFF0C\u5EFA\u8BAE\u4FDD\u6301\u672C\u6807\u7B7E\u9875\u5728\u524D\u53F0" });
+    }
     suppressLeaveConfirm();
     batchPaused = false;
     batchAborted = false;
@@ -1501,6 +1539,7 @@
           pauseBatchForRateLimit(r, "\u6536\u9898");
           return;
         }
+        await waitOnlineIfOffline("\u6536\u9898");
         if (!location.search.includes(`problemSetProblemId=${p.id}`)) {
           const okList = await openTypeList(r.psId, p.typeId);
           if (!okList) {
@@ -1569,9 +1608,20 @@
       abortRelay(r, err?.message || String(err));
     }
   }
+  function acquireResumeLock() {
+    try {
+      const raw = JSON.parse(sessionStorage.getItem("__BPS_AA_RESUME_LOCK__") || "null");
+      if (raw && raw.timeOrigin === performance.timeOrigin && Date.now() - raw.at < 8e3) return false;
+      sessionStorage.setItem("__BPS_AA_RESUME_LOCK__", JSON.stringify({ at: Date.now(), timeOrigin: performance.timeOrigin }));
+      return true;
+    } catch (_) {
+      return true;
+    }
+  }
   async function resumeRelay(settings3) {
     const r = readRelay();
     if (!r) return;
+    if (!acquireResumeLock()) return;
     if (r.v !== RELAY_VERSION) {
       clearRelay();
       fire({ kind: "log", level: "warn", text: "\u68C0\u6D4B\u5230\u65E7\u7248\u7F16\u7801\u9898\u7EED\u8DD1\u5355\uFF08v1\uFF09\uFF0C\u5DF2\u4F5C\u5E9F\uFF1B\u8BF7\u91CD\u65B0\u5F00\u59CB\u7B54\u9898" });
@@ -1605,6 +1655,9 @@
     const hadHistory = readPersistedLog().length > 0;
     const phaseText = { collect: "\u6536\u9898", answer: "\u5E76\u53D1\u4F5C\u7B54", verify: "\u6C34\u5408\u63D0\u4EA4" }[r.phase] || r.phase;
     fire({ kind: "log", level: "info", text: `\u7F16\u7801\u9898\u6279\u91CF\u4F5C\u7B54\u6062\u590D\uFF08${phaseText}\u9636\u6BB5\uFF09` });
+    if (document.hidden) {
+      fire({ kind: "log", level: "warn", text: "\u6807\u7B7E\u9875\u5728\u540E\u53F0\u8FD0\u884C\uFF1A\u6D4F\u89C8\u5668\u7684\u5B9A\u65F6/\u5BFC\u822A\u8282\u6D41\u4F1A\u62C9\u957F\u7B49\u5F85\uFF0C\u5EFA\u8BAE\u4FDD\u6301\u672C\u6807\u7B7E\u9875\u5728\u524D\u53F0" });
+    }
     if (r.summary.failed.length && !hadHistory) {
       fire({ kind: "log", level: "warn", text: `\u6B64\u524D\u5DF2\u5931\u8D25 ${r.summary.failed.length} \u9898\uFF1A
 ${failDetails(r.summary.failed)}` });
@@ -1625,6 +1678,17 @@ ${failDetails(r.summary.failed)}` });
             return;
           }
           navigateRelay(verifyUrl(r, r.verifyIds[r.vi]), r, "\u6062\u590D\u5F85\u63D0\u4EA4\u9898");
+        }
+      } else if (act.action === "verifyJump") {
+        fire({ kind: "log", level: "info", text: "\u672C\u9875\u662F\u5F85\u63D0\u4EA4\u6E05\u5355\u91CC\u7684\u5176\u4ED6\u9898\uFF08\u91CD\u590D\u88C5\u8F7D\uFF09\uFF0C\u79CD\u5F53\u524D\u9898\u7684\u952E\u8DF3\u56DE\u53BB\u7EE7\u7EED" });
+        if (seedVerifyProblem(r) && writeRelay(r)) {
+          running = false;
+          await pacePageLoad("\u56DE\u5230\u5F85\u63D0\u4EA4\u9898");
+          if (userStopped(r)) {
+            stopBatchByUser(r);
+            return;
+          }
+          navigateRelay(verifyUrl(r, r.verifyIds[r.vi]), r, "\u56DE\u5230\u5F85\u63D0\u4EA4\u9898");
         }
       }
     } catch (err) {
@@ -1842,14 +1906,16 @@ ${failDetails(s.failed)}`;
       abortRelay(r, "verify \u9636\u6BB5\u627E\u4E0D\u5230\u5F85\u63D0\u4EA4\u9898\uFF08\u7EED\u8DD1\u5355\u72B6\u6001\u9519\u4E71\uFF09");
       return;
     }
+    if (p.status === "submitted") {
+      fire({ kind: "log", level: "info", text: `${p.label}\uFF1A\u672C\u9875\u91CD\u590D\u88C5\u8F7D\uFF0C\u8BE5\u9898\u5DF2\u63D0\u4EA4\u8FC7\uFF0C\u76F4\u63A5\u63A8\u8FDB\u4E0B\u4E00\u9898` });
+      return advanceVerify(r);
+    }
     if (rateLimitedNow()) {
       pauseBatchForRateLimit(r, "\u6C34\u5408\u6821\u9A8C");
       return;
     }
-    const hyd = await waitHydrate(true);
-    const cmText = editableCm()?.textContent || "";
-    const head = String(p.code.split("\n")[0] || "").trim().slice(0, 24);
-    if (!hyd.ok || head && !cmText.includes(head)) {
+    const hyd = await waitEditorCode(p.code);
+    if (!hyd.ok) {
       if (rateLimitedNow()) {
         pauseBatchForRateLimit(r, "\u6C34\u5408\u6821\u9A8C");
         return;
@@ -1857,7 +1923,7 @@ ${failDetails(s.failed)}`;
       const rollback = await saveDraftQueued(p.id, p.kind, p.detail, p.compilerId, "");
       stripDraftHttpCache(p.id);
       clearCodingProblemCache(p.id);
-      relayRecordFail(r, p, p.label, "\u6C34\u5408\u6821\u9A8C\u5931\u8D25\uFF08\u7F16\u8F91\u5668\u672A\u56DE\u5E26\u4EE3\u7801\uFF09" + (rollback.ok ? "\uFF0C\u8349\u7A3F\u5DF2\u64A4\u9500" : "\uFF0C\u8349\u7A3F\u6B8B\u7559\u9700\u4EBA\u5DE5\u6838\u5BF9"));
+      relayRecordFail(r, p, p.label, `\u6C34\u5408\u6821\u9A8C\u5931\u8D25\uFF08\u7F16\u8F91\u5668\u672A\u56DE\u5E26\u672C\u9898\u4EE3\u7801${hyd.editorHead ? `\uFF0C\u5B9E\u9645\u5F00\u5934\u300C${hyd.editorHead}\u300D` : ""}\uFF09` + (rollback.ok ? "\uFF0C\u8349\u7A3F\u5DF2\u64A4\u9500" : "\uFF0C\u8349\u7A3F\u6B8B\u7559\u9700\u4EBA\u5DE5\u6838\u5BF9"));
       if (!rollback.ok) {
         abortRelay(r, "\u8349\u7A3F\u64A4\u9500\u5931\u8D25\uFF08\u6B8B\u7559\u4EE3\u7801\uFF09\uFF0C\u9700\u4EBA\u5DE5\u6838\u5BF9\u540E\u518D\u8BD5");
         return;
@@ -1865,6 +1931,7 @@ ${failDetails(s.failed)}`;
       p.status = "failed";
       return advanceVerify(r);
     }
+    const head = normCode(p.code).slice(0, 24);
     r.rlTries = 0;
     if (p.kind !== "CODE_COMPLETION") {
       const mountedLabel = langLabelOf();

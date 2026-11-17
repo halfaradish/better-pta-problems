@@ -507,20 +507,30 @@ export function seedCodingProblemCache(id, program, detail) {
   }
 }
 
-// 水合探测：新文档挂载后按钮禁用态应在预期位（空草稿=禁用、有码=解锁），两次读数一致才采信。
-// 注意条件方向：expectEnabled=true 时期望 disabled===false（按钮解锁）。
-async function waitHydrate(expectEnabled) {
+// 水合探测（批量版）：等到编辑器文本以「本题代码」开头才采信（≤20s）。
+// 旧的「按钮解锁 = 已水合」会抢跑——按钮解锁只说明草稿态非空，不代表是本题新代码
+// （首轮真机 7-2：恢复后 2s 按钮即解锁、内容却是别的代码 → 水合校验失败）；且旧头部校验用
+// includes("#include <stdio.h>")，用户旧 C 代码也含这个串，分不清新旧。比对改用规范化前缀：
+// CodeMirror 的 textContent 不带换行、只渲染可视区行，规范化（去全部空白）后取模型代码前
+// 160 字符做 startsWith，既避开虚拟化截断，也避开「新旧代码同开头」的弱头部误判。
+const normCode = s => String(s || '').replace(/\s+/g, '');
+const HYDRATION_PREFIX_LEN = 160;
+
+async function waitEditorCode(code) {
+  const want = normCode(code).slice(0, HYDRATION_PREFIX_LEN);
   for (let i = 0; i < 200; i++) { // ≤20s
     await sleep(100);
+    const cm = editableCm();
     const b = submitButton();
-    if (!b) continue;
-    if (b.disabled === !expectEnabled) {
+    if (!cm || !b || b.disabled) continue; // 按钮解锁 = 草稿态非空
+    if (want && normCode(cm.textContent).startsWith(want)) {
       await sleep(250); // 二次确认防抖动
+      const cm2 = editableCm();
       const b2 = submitButton();
-      if (b2 && b2.disabled === b.disabled) return { ok: true, disabled: b.disabled };
+      if (cm2 && b2 && !b2.disabled && normCode(cm2.textContent).startsWith(want)) return { ok: true };
     }
   }
-  return { ok: false };
+  return { ok: false, editorHead: normCode(editableCm()?.textContent).slice(0, 60) };
 }
 
 // 挂载状态稳定探测（collect 前用）：编辑器文本 + 按钮态连续两次读数一致才算就绪
@@ -954,6 +964,7 @@ async function chatWithRetry(cfg, messages, opts = {}) {
       const took = ((Date.now() - t0) / 1000).toFixed(1);
       fire({ kind: 'log', level: 'warn', text: `${label}第 ${attempt}/${max} 次请求失败（${shortErrText(err)}，用时 ${took}s），${(delay / 1000).toFixed(1)}s 后重试` });
       await sleep(delay);
+      await waitOnlineIfOffline(label || '重试'); // 断网期间不空烧重试（首轮真机 7-4：Failed to fetch ×2）
     }
   }
   // 最终失败也带上次数与总耗时，避免「4 分钟静默 + 一句报错」看不出发生过重试
@@ -1119,6 +1130,7 @@ function clearRelay() {
 const PAGE_LOAD_WAIT_MS = 5000; // 切题/重载前的固定等待（1–5s 随机实测仍会撞限流）
 const RATE_LIMIT_WAITS_MS = [60000, 120000, 180000];
 const NAVIGATE_CHECK_MS = 10000; // 翻页后多久检查「是不是还停在原页」，失败重试一次再收摊
+const NAVIGATE_HIDDEN_WAIT_MS = 30000; // 后台标签页下导航观察的加长间隔（定时/导航都会被浏览器拉长）
 
 export function isRateLimitedText(text) {
   const s = String(text || '').replace(/\s+/g, '');
@@ -1140,18 +1152,30 @@ function rateLimitedNow() {
 function navigateRelay(target, r, what) {
   const from = location.pathname + location.search;
   const go = () => { try { location.href = target; } catch (_) { /* 导航交浏览器 */ } };
-  const check = attempt => setTimeout(() => {
+  let retried = false;
+  let hiddenWaits = 0;
+  const check = delay => setTimeout(() => {
     if (location.pathname + location.search !== from) return; // 已经离开，定时器随旧文档销毁
-    if (attempt === 0) {
+    // 后台标签页 / 断网：定时与导航都会被拉长（首轮真机：5s 等待拖到 ~1 分钟、watchdog 晚 39s、
+    // 断网期间导航挂起被误判「未生效」重发导致重复装载）。先多等观察，不立即重发导航。
+    if ((document.hidden || navigator.onLine === false) && hiddenWaits < 4) {
+      hiddenWaits += 1;
+      const why = navigator.onLine === false ? '当前离线' : '标签页在后台';
+      fire({ kind: 'log', level: 'warn', text: `${what}：${why}，导航可能被拉长；再等 30s 观察（${hiddenWaits}/4），不立即重发导航` });
+      check(NAVIGATE_HIDDEN_WAIT_MS);
+      return;
+    }
+    if (!retried) {
+      retried = true;
       fire({ kind: 'log', level: 'warn', text: `${what}未生效（页面没有跳转），重试一次…` });
       go();
-      check(1);
+      check(NAVIGATE_CHECK_MS);
       return;
     }
     abortRelay(r, `${what}被拦下：页面始终没有跳转（浏览器离开确认或扩展拦截），请处理后重新开始，已完成的题目不会重做`);
-  }, NAVIGATE_CHECK_MS);
+  }, delay);
   go();
-  check(0);
+  check(NAVIGATE_CHECK_MS);
 }
 
 // 每次切题/重载前固定等 5s：随机 1–5s 实测仍会触发限流（用户真机反馈），
@@ -1159,6 +1183,20 @@ function navigateRelay(target, r, what) {
 async function pacePageLoad(where) {
   fire({ kind: 'log', level: 'info', text: `${where}：等待 ${PAGE_LOAD_WAIT_MS / 1000}s 再切换（避免 PTA 访问频率限制）…` });
   await sleep(PAGE_LOAD_WAIT_MS);
+  await waitOnlineIfOffline(where);
+}
+
+// 断网守候：离线状态下发导航会挂在 TCP 超时上（老文档存活、watchdog 误判「未生效」重发、
+// 网络恢复后重复装载——首轮真机 00:35–00:38 的空白即此）。切题前先等网络恢复。
+const OFFLINE_WAIT_MS = 120000;
+async function waitOnlineIfOffline(where) {
+  if (navigator.onLine !== false) return;
+  fire({ kind: 'log', level: 'warn', text: `${where}：当前离线，等待网络恢复后再切换（最多等 ${Math.round(OFFLINE_WAIT_MS / 1000)}s）…` });
+  for (let i = 0; i < OFFLINE_WAIT_MS / 1000; i++) {
+    await sleep(1000);
+    if (navigator.onLine !== false) { fire({ kind: 'log', level: 'ok', text: '网络已恢复，继续' }); return; }
+  }
+  fire({ kind: 'log', level: 'warn', text: '等待超时仍离线，照常尝试切换（失败由看门狗/限流口径兜底）' });
 }
 
 // 返回 true 表示已接管（暂停或中止），调用方不要再推进批量流程。
@@ -1278,6 +1316,9 @@ async function startCodingBatch(psId, progTypes, cfg) {
   if (!writeRelay(relay)) throw new Error('sessionStorage 不可写或续跑单超限，无法批量作答编码题');
   const names = [...new Set(progTypes.map(t => t.typeName))].join('、');
   fire({ kind: 'log', level: 'info', text: `${names || '编码题'} ${problems.length} 题：批量模式（收题 → 并发作答 → 逐题提交，日志跨页保留）` });
+  if (document.hidden) {
+    fire({ kind: 'log', level: 'warn', text: '标签页在后台运行：浏览器的定时/导航节流会拉长等待，建议保持本标签页在前台' });
+  }
   suppressLeaveConfirm(); // 收题期间的 SPA 切换也要压住离开确认（本页可能还有未保存的客观题答案）
   batchPaused = false;
   batchAborted = false;
@@ -1310,6 +1351,7 @@ async function runCollectPhase(r) {
       if (userStopped(r)) { stopBatchByUser(r); return; }
       const p = r.problems[r.ci];
       if (rateLimitedNow()) { pauseBatchForRateLimit(r, '收题'); return; }
+      await waitOnlineIfOffline('收题'); // 离线时 SPA 切题会失败，先等网络恢复
       // 不在目标题上：先回该题型列表页（限流页可能顶掉了列表页，识别先于报错）
       if (!location.search.includes(`problemSetProblemId=${p.id}`)) {
         const okList = await openTypeList(r.psId, p.typeId);
@@ -1366,11 +1408,24 @@ async function runCollectPhase(r) {
   }
 }
 
+// 同文档恢复锁：同一文档的第二个内容脚本实例（扩展重注入/重复装载）不得再跑一次恢复，
+// 否则两份 verifyCurrent 会并发推进同一续跑单。锁按 performance.timeOrigin 绑定文档——
+// 合法的整页刷新是新文档（timeOrigin 变了），锁自动失效。
+function acquireResumeLock() {
+  try {
+    const raw = JSON.parse(sessionStorage.getItem('__BPS_AA_RESUME_LOCK__') || 'null');
+    if (raw && raw.timeOrigin === performance.timeOrigin && Date.now() - raw.at < 8000) return false;
+    sessionStorage.setItem('__BPS_AA_RESUME_LOCK__', JSON.stringify({ at: Date.now(), timeOrigin: performance.timeOrigin }));
+    return true;
+  } catch (_) { return true; }
+}
+
 // boot 后由 init 调用：存在批量续跑单就按阶段恢复（总开关仍要开着）。
 // 限流页可能被 PTA 换成别的地址/错误页：先识别再校验 URL，避免把限流误判成「用户导航走了」而弃单。
 export async function resumeRelay(settings) {
   const r = readRelay();
   if (!r) return;
+  if (!acquireResumeLock()) return; // 同文档第二实例：前一实例已在推进，不能双份推进续跑单
   if (r.v !== RELAY_VERSION) { // v1 旧单（每题两文档 relay）：协议已退役，就地作废
     clearRelay();
     fire({ kind: 'log', level: 'warn', text: '检测到旧版编码题续跑单（v1），已作废；请重新开始答题' });
@@ -1403,6 +1458,11 @@ export async function resumeRelay(settings) {
   const hadHistory = readPersistedLog().length > 0;
   const phaseText = { collect: '收题', answer: '并发作答', verify: '水合提交' }[r.phase] || r.phase;
   fire({ kind: 'log', level: 'info', text: `编码题批量作答恢复（${phaseText}阶段）` });
+  if (document.hidden) {
+    // 首轮真机实测：后台标签页的定时器/导航会被浏览器拉长（5s 等待拖到 ~1 分钟、watchdog 晚 39s），
+    // 引擎仍能走完但节奏失控，提示用户把标签页放前台
+    fire({ kind: 'log', level: 'warn', text: '标签页在后台运行：浏览器的定时/导航节流会拉长等待，建议保持本标签页在前台' });
+  }
   if (r.summary.failed.length && !hadHistory) {
     fire({ kind: 'log', level: 'warn', text: `此前已失败 ${r.summary.failed.length} 题：\n${failDetails(r.summary.failed)}` });
   }
@@ -1419,6 +1479,14 @@ export async function resumeRelay(settings) {
         await pacePageLoad('恢复待提交题');
         if (userStopped(r)) { stopBatchByUser(r); return; }
         navigateRelay(verifyUrl(r, r.verifyIds[r.vi]), r, '恢复待提交题');
+      }
+    } else if (act.action === 'verifyJump') { // 重复装载落在 verify 清单的其他题页：种当前题的键跳回去（自愈，不弃单）
+      fire({ kind: 'log', level: 'info', text: '本页是待提交清单里的其他题（重复装载），种当前题的键跳回去继续' });
+      if (seedVerifyProblem(r) && writeRelay(r)) {
+        running = false;
+        await pacePageLoad('回到待提交题');
+        if (userStopped(r)) { stopBatchByUser(r); return; }
+        navigateRelay(verifyUrl(r, r.verifyIds[r.vi]), r, '回到待提交题');
       }
     }
   } catch (err) {
@@ -1632,20 +1700,23 @@ async function verifyCurrent(r) {
   const id = (r.verifyIds || [])[r.vi];
   const p = r.problems.find(x => x.id === id);
   if (!p || !p.code) { abortRelay(r, 'verify 阶段找不到待提交题（续跑单状态错乱）'); return; }
+  if (p.status === 'submitted') { // 重复装载（导航重发/扩展重注入落回旧题页）：该题已提交，直接推进
+    fire({ kind: 'log', level: 'info', text: `${p.label}：本页重复装载，该题已提交过，直接推进下一题` });
+    return advanceVerify(r);
+  }
   if (rateLimitedNow()) { pauseBatchForRateLimit(r, '水合校验'); return; }
-  const hyd = await waitHydrate(true);
-  const cmText = editableCm()?.textContent || '';
-  const head = String(p.code.split('\n')[0] || '').trim().slice(0, 24);
-  if (!hyd.ok || (head && !cmText.includes(head))) {
+  const hyd = await waitEditorCode(p.code);
+  if (!hyd.ok) {
     if (rateLimitedNow()) { pauseBatchForRateLimit(r, '水合校验'); return; }
     const rollback = await saveDraftQueued(p.id, p.kind, p.detail, p.compilerId, '');
     stripDraftHttpCache(p.id);
     clearCodingProblemCache(p.id);
-    relayRecordFail(r, p, p.label, '水合校验失败（编辑器未回带代码）' + (rollback.ok ? '，草稿已撤销' : '，草稿残留需人工核对'));
+    relayRecordFail(r, p, p.label, `水合校验失败（编辑器未回带本题代码${hyd.editorHead ? `，实际开头「${hyd.editorHead}」` : ''}）` + (rollback.ok ? '，草稿已撤销' : '，草稿残留需人工核对'));
     if (!rollback.ok) { abortRelay(r, '草稿撤销失败（残留代码），需人工核对后再试'); return; }
     p.status = 'failed';
     return advanceVerify(r);
   }
+  const head = normCode(p.code).slice(0, 24);
   r.rlTries = 0; // 水合通过 = 真实题目页，限流冷却计数清零
 
   // 语言一致性守卫（仅编程题）：实挂语言 != 代码语言时不提交（提交载荷的 compiler 由页面

@@ -105,9 +105,14 @@ export function resumeAction(relay, url) {
     return { action: 'clear', reason: '页面不在编码题列表页（作答中断；已写入的草稿保留）' };
   }
   if (relay.phase === 'verify') {
-    const cur = problems.find(p => p.id === (relay.verifyIds || [])[relay.vi]);
+    const ids = relay.verifyIds || [];
+    const cur = problems.find(p => p.id === ids[relay.vi]);
     if (!cur) return { action: 'clear', reason: '续跑单 verify 游标越界' };
     if (problemId && problemId === cur.id) return { action: 'verify' };
+    if (problemId && ids.includes(problemId)) {
+      // verify 清单里的其他题页（导航重发/重复装载落回旧题）：重新种当前题的键跳回去，不弃单
+      return { action: 'verifyJump' };
+    }
     if (onKnownTypeList) return { action: 'seedVerify' };
     return { action: 'clear', reason: `页面不在待提交题（${cur.label || cur.id.slice(-4)}）上，已提交题目保持各自状态` };
   }

@@ -147,7 +147,7 @@ test('resumeAction：answer 阶段只在已知题型列表页恢复', () => {
   assert.equal(resumeAction(relay, { pathname: `${base}/type/6`, search: '?problemSetProblemId=3003' }).action, 'clear');
 });
 
-test('resumeAction：verify 阶段按 verifyIds[vi] 恢复；列表页 → seedVerify', () => {
+test('resumeAction：verify 阶段按 verifyIds[vi] 恢复；列表页 → seedVerify；落在清单其他题页 → verifyJump', () => {
   const relay = {
     v: RELAY_VERSION,
     phase: 'verify',
@@ -162,8 +162,8 @@ test('resumeAction：verify 阶段按 verifyIds[vi] 恢复；列表页 → seedV
   const base = '/problem-sets/1/exam/problems';
   assert.deepEqual(resumeAction(relay, { pathname: `${base}/type/6`, search: '?problemSetProblemId=3003' }), { action: 'verify' });
   assert.deepEqual(resumeAction(relay, { pathname: `${base}/type/6`, search: '' }), { action: 'seedVerify' });
-  // 已提交完的题（vi 之前的）→ 弃单
-  assert.equal(resumeAction(relay, { pathname: `${base}/type/7`, search: '?problemSetProblemId=3001' }).action, 'clear');
+  // 落在 verify 清单的其他题页（导航重发/重复装载回到已提交题）→ 自愈跳回当前题，不弃单
+  assert.deepEqual(resumeAction(relay, { pathname: `${base}/type/7`, search: '?problemSetProblemId=3001' }), { action: 'verifyJump' });
   // 游标越界 → 弃单
   const broken = { ...relay, vi: 5 };
   assert.equal(resumeAction(broken, { pathname: `${base}/type/6`, search: '' }).action, 'clear');
