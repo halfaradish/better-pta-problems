@@ -9,6 +9,7 @@
  * 运行本体在 autoanswer.js：面板只是入口与事件流的展示层（setEventSink），
  * 关掉面板 / 翻到别的页面都不打断运行；运行中悬浮球常驻并显示整体进度环。
  */
+import { clampConcurrency } from '../shared/coding-batch.js';
 import { loadSettings, saveSettings } from '../shared/settings.js';
 import {
   abortRun, clearPersistedLog, COMPILER_LABELS, EXAM_PROBLEMS_RE, fetchAllowedCompilers,
@@ -570,6 +571,20 @@ function mount() {
   oFollow.textContent = '跟随编辑器当前语言';
   el('p', 'hint', fLang).textContent = '本题集允许的语言；作答按所选语言出码并提交评测。函数题的编译器由题目固定，此配置对函数题不生效';
 
+  // 编码题并发数：同时向模型发起的请求数（批量作答 v0.12.0）。收题/提交仍是串行页面操作，
+  // 并发只加速「等模型」这段；网关限流时请求会按引擎口径自动退避重试。
+  const fConc = el('div', 'field', pageAnswer);
+  el('label', 'flabel', fConc).textContent = '并发数（编码题）';
+  fConc.querySelector('label').htmlFor = 'aa-concurrency';
+  const csel = el('select', '', fConc);
+  csel.id = 'aa-concurrency';
+  for (const n of [1, 2, 3, 4, 5, 6]) {
+    const o = el('option', '', csel);
+    o.value = String(n);
+    o.textContent = `${n} 路`;
+  }
+  el('p', 'hint', fConc).textContent = '编码题同时请求模型的路数，越高越快；实测 OpenCode Go 6 路无 429，慢模型/限流严格的服务建议 1–3';
+
   const fKey = el('div', 'field', pageModel);
   el('label', 'flabel', fKey).textContent = 'API Key';
   fKey.querySelector('label').htmlFor = 'aa-key';
@@ -705,6 +720,7 @@ function mount() {
   key.value = currentKey(settings, sel.value); // 按当前服务的映射取回上文 Key
   ovw.checked = !!((settings || {}).autoAnswerOverwrite);
   imgs.checked = !!((settings || {}).autoAnswerImages);
+  csel.value = String(clampConcurrency((settings || {}).autoAnswerConcurrency, 6));
   // 语言选项异步填充（拉本题集白名单后再恢复上次固定值）
   refreshLangOptions();
   applyPreset();
@@ -724,6 +740,7 @@ function mount() {
   lsel.addEventListener('change', persist);
   ovw.addEventListener('change', persist);
   imgs.addEventListener('change', persist);
+  csel.addEventListener('change', persist);
   clear.addEventListener('click', () => {
     clearPersistedLog(); // 清空要跨页生效，否则下一页又把历史回放回来
     logLines.length = 0;
@@ -876,10 +893,11 @@ async function persist() {
   const model = (shadow.getElementById('aa-model-name')?.value || '').trim();
   const lang = shadow.getElementById('aa-lang');
   const language = lang ? lang.value.trim() : '';
+  const concurrency = clampConcurrency(shadow.getElementById('aa-concurrency')?.value, 6);
   try {
     const fresh = await loadSettings();
     // Key 归档进当前服务的名下（withKeyFor 只动这一个键，其他服务的 Key 原样保留）
-    await saveSettings({ ...withKeyFor(fresh, gateway, apiKey), autoAnswerOverwrite: overwrite, autoAnswerImages: withImages, autoAnswerGateway: gateway, autoAnswerBaseUrl: baseUrl, autoAnswerModel: model, autoAnswerLanguage: language });
+    await saveSettings({ ...withKeyFor(fresh, gateway, apiKey), autoAnswerOverwrite: overwrite, autoAnswerImages: withImages, autoAnswerGateway: gateway, autoAnswerBaseUrl: baseUrl, autoAnswerModel: model, autoAnswerLanguage: language, autoAnswerConcurrency: concurrency });
   } catch (_) { /* 存储失败不阻断 UI */ }
 }
 
@@ -916,6 +934,7 @@ async function startRun() {
   const overwrite = shadow.getElementById('aa-overwrite').checked;
   const withImages = shadow.getElementById('aa-images').checked;
   const language = (shadow.getElementById('aa-lang')?.value || '').trim();
+  const concurrency = clampConcurrency(shadow.getElementById('aa-concurrency')?.value, 6);
   await persist();
   const result = await handleRun({
     baseUrl,
@@ -925,6 +944,7 @@ async function startRun() {
     images: withImages,
     gateway: preset.gateway,
     language,
+    concurrency,
   });
   if (!result.ok && result.error === '已有一次答题在运行中') appendLog('warn', '已有一次答题在运行中');
 }

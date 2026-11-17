@@ -47,6 +47,8 @@
     // 含图题作答（需视觉模型如 deepseek-flash：图片下载编码进 prompt；默认关闭=客观题含图跳过；编程题不受此项影响）
     autoAnswerLanguage: "",
     // 编程题固定语言（exams 接口白名单的编译器 id）；空 = 跟随各题编辑器当前语言
+    autoAnswerConcurrency: 3,
+    // 编码题并发作答路数（1–6，默认 3）：同时向模型发起的请求数；收题/提交仍是串行页面操作
     settingsVersion: 0
     // 0 = 旧版设置；v4 起「列表/分组」不再持久化（改为按路由的会话内状态）
   };
@@ -274,6 +276,117 @@
   var LLM_DIRECT_TIMEOUT_MS = 12e4;
   var LLM_MAX_ATTEMPTS = 3;
   var LLM_MAX_IDLE_ATTEMPTS = 2;
+
+  // src/shared/coding-batch.js
+  var RELAY_VERSION = 2;
+  var RELAY_SIZE_LIMIT = 2 * 1024 * 1024;
+  var SPA_SWITCH_WAIT_MS = 1800;
+  function flattenCodingTypes(progTypes) {
+    const problems = [];
+    let order = 0;
+    for (const t of progTypes || []) {
+      for (const id of t.ids || []) {
+        problems.push({ id: String(id), typeId: String(t.typeId), typeName: t.typeName || "", order: order++ });
+      }
+    }
+    return problems;
+  }
+  function classifyProblem(q, cfg) {
+    if (q && q.answered && !(cfg && cfg.overwrite)) return { status: "skipped" };
+    return { status: "pending" };
+  }
+  function slimDraftDetail(detail, pspId) {
+    const d = detail && typeof detail === "object" ? detail : null;
+    const prog = d && d.programmingSubmissionDetail && typeof d.programmingSubmissionDetail === "object" ? d.programmingSubmissionDetail : null;
+    return {
+      problemId: (d && d.problemId != null ? String(d.problemId) : null) || "0",
+      problemSetProblemId: (d && d.problemSetProblemId != null ? String(d.problemSetProblemId) : null) || String(pspId || ""),
+      customTestData: d ? d.customTestData ?? null : null,
+      compiler: prog ? prog.compiler ?? null : null
+    };
+  }
+  function pickCompiler(p, detail, cfg, helpers = {}) {
+    const kind = p.kind || "PROGRAMMING";
+    if (kind === "CODE_COMPLETION") {
+      return { ok: true, compilerId: null, wantLangLabel: String(p.langLabel || "") };
+    }
+    const labelFor = helpers.labelFor || (() => "");
+    const fromLabel = helpers.compilerIdFromLabel || (() => null);
+    const fixed = String(cfg && cfg.language || "").trim();
+    const compilerId = fixed || fromLabel(p.langLabel) || detail && detail.compiler || null;
+    if (!compilerId) {
+      return { ok: false, reason: `\u8BFB\u4E0D\u5230\u5F53\u524D\u8BED\u8A00\u300C${p.langLabel || "\uFF08\u7A7A\uFF09"}\u300D\uFF0C\u65E0\u6CD5\u786E\u5B9A\u7F16\u8BD1\u5668` };
+    }
+    return { ok: true, compilerId, wantLangLabel: labelFor(compilerId) || String(p.langLabel || "") };
+  }
+  function buildVerifyPlan(problems) {
+    return (problems || []).filter((p) => p.status === "answered").map((p) => p.id);
+  }
+  function isFreshStatement(prevText, q, targetId) {
+    if (!q || String(q.id || "") !== String(targetId || "")) return { ok: false, reason: "\u9875\u9762\u9898\u76EE\u4E0E\u76EE\u6807\u4E0D\u7B26" };
+    const text = String(q.text || "");
+    if (text.length < 20) return { ok: false, reason: "\u9898\u5E72\u4E3A\u7A7A\u6216\u8FC7\u77ED" };
+    const prev = String(prevText || "");
+    if (prev && text === prev) return { ok: false, reason: "\u9898\u5E72\u4E0E\u4E0A\u4E00\u9898\u76F8\u540C\uFF08\u7591\u4F3C\u9875\u9762\u672A\u5207\u6362\uFF09" };
+    return { ok: true };
+  }
+  function resumeAction(relay, url) {
+    const problems = relay.problems || [];
+    const path = String(url?.pathname || "");
+    const problemId = (String(url?.search || "").match(/[?&]problemSetProblemId=(\d+)/) || [])[1] || null;
+    const typeId = (path.match(/\/exam\/problems\/type\/(\d+)/) || [])[1] || null;
+    const onKnownTypeList = !!(typeId && !problemId && problems.some((p) => p.typeId === typeId));
+    if (relay.phase === "collect") {
+      const cur = problems[relay.ci];
+      if (!cur) return { action: "clear", reason: "\u7EED\u8DD1\u5355 collect \u6E38\u6807\u8D8A\u754C" };
+      if (problemId && problemId === cur.id) return { action: "collect" };
+      if (!problemId && typeId && typeId === cur.typeId) return { action: "collect" };
+      return { action: "clear", reason: `\u9875\u9762\u4E0D\u5728\u5F85\u6536\u9898\uFF08${cur.label || cur.id.slice(-4)}\uFF09\u4E0A\uFF0C\u5DF2\u843D\u4F4D\u9898\u76EE\u4FDD\u6301\u5404\u81EA\u72B6\u6001` };
+    }
+    if (relay.phase === "answer") {
+      if (onKnownTypeList) return { action: "answer" };
+      return { action: "clear", reason: "\u9875\u9762\u4E0D\u5728\u7F16\u7801\u9898\u5217\u8868\u9875\uFF08\u4F5C\u7B54\u4E2D\u65AD\uFF1B\u5DF2\u5199\u5165\u7684\u8349\u7A3F\u4FDD\u7559\uFF09" };
+    }
+    if (relay.phase === "verify") {
+      const cur = problems.find((p) => p.id === (relay.verifyIds || [])[relay.vi]);
+      if (!cur) return { action: "clear", reason: "\u7EED\u8DD1\u5355 verify \u6E38\u6807\u8D8A\u754C" };
+      if (problemId && problemId === cur.id) return { action: "verify" };
+      if (onKnownTypeList) return { action: "seedVerify" };
+      return { action: "clear", reason: `\u9875\u9762\u4E0D\u5728\u5F85\u63D0\u4EA4\u9898\uFF08${cur.label || cur.id.slice(-4)}\uFF09\u4E0A\uFF0C\u5DF2\u63D0\u4EA4\u9898\u76EE\u4FDD\u6301\u5404\u81EA\u72B6\u6001` };
+    }
+    return { action: "clear", reason: `\u672A\u77E5\u9636\u6BB5\u300C${relay.phase}\u300D` };
+  }
+  function clampConcurrency(value, pending) {
+    let k = Number(value);
+    if (!Number.isFinite(k) || k <= 0) k = 3;
+    k = Math.min(6, Math.max(1, Math.floor(k)));
+    if (Number.isFinite(pending) && pending >= 1) k = Math.min(k, Math.floor(pending));
+    return k;
+  }
+  async function runPool(items, width, worker, shouldStop = () => false) {
+    const list = items || [];
+    const n = Math.max(1, Math.min(Math.floor(Number(width)) || 1, list.length));
+    let cursor = 0;
+    let firstErr = null;
+    const runners = Array.from({ length: n }, async () => {
+      while (cursor < list.length && !shouldStop()) {
+        const idx = cursor;
+        cursor += 1;
+        try {
+          await worker(list[idx], idx);
+        } catch (err) {
+          if (!firstErr) firstErr = err;
+          return;
+        }
+      }
+    });
+    await Promise.all(runners);
+    if (firstErr) throw firstErr;
+    return cursor;
+  }
+  function failDetails(failed) {
+    return (failed || []).map((f) => `${f.label || (f.id || "").slice(-4)}\uFF1A${f.reason}`).join("\n");
+  }
 
   // src/content/autoanswer.js
   var TYPE_BY_NAME = {
@@ -562,12 +675,24 @@
     for (const [id, name] of Object.entries(COMPILER_LABELS)) if (name === l) return id;
     return null;
   }
-  async function getDraftDetail(pspId) {
-    const d = await fetch(`/api/problem-sets/problems/${pspId}/exam-draft`, {
-      headers: { accept: "application/json" },
-      credentials: "include"
-    }).then((r) => r.json()).catch(() => null);
-    return d?.answer?.detail || null;
+  async function getDraftDetailStrict(pspId) {
+    let res;
+    try {
+      res = await fetch(`/api/problem-sets/problems/${pspId}/exam-draft`, {
+        headers: { accept: "application/json" },
+        credentials: "include"
+      });
+    } catch (err) {
+      return { ok: false, error: String(err?.message || err) };
+    }
+    if (!res.ok) return { ok: false, error: `HTTP ${res.status}` };
+    let data = null;
+    try {
+      data = await res.json();
+    } catch (_) {
+      return { ok: false, error: "\u54CD\u5E94\u4E0D\u662F\u5408\u6CD5 JSON" };
+    }
+    return { ok: true, detail: data?.answer?.detail || null };
   }
   function draftSubmissionDetail(kind, compilerId, program) {
     return kind === "CODE_COMPLETION" ? { codeCompletionSubmissionDetail: { program } } : { programmingSubmissionDetail: { compiler: compilerId, program } };
@@ -630,27 +755,6 @@
     } catch (_) {
     }
   }
-  async function prepNextProblemCache(nextId) {
-    try {
-      const raw = JSON.parse(localStorage.getItem("user-cache") || "{}");
-      const key = `codingProblem_${nextId}`;
-      const entry = raw[key] || null;
-      const cacheProgram = String(entry?.program ?? "");
-      let detailProgram = null;
-      if (cacheProgram) {
-        const detail = await getDraftDetail(nextId);
-        detailProgram = detail?.programmingSubmissionDetail?.program ?? "";
-      }
-      if (!cacheProgram || cacheProgram === detailProgram) {
-        delete raw[key];
-        localStorage.setItem("user-cache", JSON.stringify(raw));
-        return { cleaned: true };
-      }
-      return { cleaned: false, staleUserInput: true };
-    } catch (_) {
-      return { cleaned: false };
-    }
-  }
   function clearCodingProblemCache(id) {
     try {
       const raw = JSON.parse(localStorage.getItem("user-cache") || "{}");
@@ -658,6 +762,18 @@
       delete raw["codingProblem_" + id];
       localStorage.setItem("user-cache", JSON.stringify(raw));
     } catch (_) {
+    }
+  }
+  function localInputDiffers(id, rawDetail) {
+    try {
+      const raw = JSON.parse(localStorage.getItem("user-cache") || "{}");
+      const entry = raw["codingProblem_" + id];
+      const cacheProgram = String(entry?.program ?? "");
+      if (!cacheProgram) return false;
+      const prog = rawDetail?.programmingSubmissionDetail?.program ?? rawDetail?.codeCompletionSubmissionDetail?.program ?? "";
+      return cacheProgram !== String(prog ?? "");
+    } catch (_) {
+      return false;
     }
   }
   function seedCodingProblemCache(id, program, detail) {
@@ -1198,7 +1314,12 @@
   }
   function writeRelay(r) {
     try {
-      sessionStorage.setItem(RELAY_KEY, JSON.stringify(r));
+      const json = JSON.stringify(r);
+      if (json.length > RELAY_SIZE_LIMIT) {
+        fire({ kind: "log", level: "err", text: "\u7EED\u8DD1\u5355\u4F53\u79EF\u8D85\u51FA\u4E0A\u9650\uFF08\u9898\u9762/\u4EE3\u7801\u8FC7\u5927\uFF09\uFF0C\u6279\u91CF\u4F5C\u7B54\u4E2D\u6B62\uFF1B\u4E0D\u4F1A\u9759\u9ED8\u622A\u65AD\u9898\u9762" });
+        return false;
+      }
+      sessionStorage.setItem(RELAY_KEY, json);
       return true;
     } catch (_) {
       return false;
@@ -1252,7 +1373,7 @@
     fire({ kind: "log", level: "info", text: `${where}\uFF1A\u7B49\u5F85 ${PAGE_LOAD_WAIT_MS / 1e3}s \u518D\u5207\u6362\uFF08\u907F\u514D PTA \u8BBF\u95EE\u9891\u7387\u9650\u5236\uFF09\u2026` });
     await sleep(PAGE_LOAD_WAIT_MS);
   }
-  function pauseForRateLimit(r, where) {
+  function pauseBatchForRateLimit(r, where) {
     const tries = Number(r.rlTries) || 0;
     if (tries >= RATE_LIMIT_WAITS_MS.length) {
       abortRelay(r, `\u8FDE\u7EED\u89E6\u53D1 PTA \u8BBF\u95EE\u9891\u7387\u9650\u5236\uFF08${where}\uFF09\uFF0C\u5DF2\u51B7\u5374 ${RATE_LIMIT_WAITS_MS.map((ms) => Math.round(ms / 1e3)).join(" / ")}s \u4ECD\u88AB\u62D2\u7EDD\uFF1B\u8BF7\u4F11\u606F\u51E0\u5206\u949F\u540E\u91CD\u65B0\u5F00\u59CB\uFF0C\u5DF2\u5B8C\u6210\u7684\u9898\u76EE\u4E0D\u4F1A\u91CD\u505A`);
@@ -1264,65 +1385,217 @@
       abortRelay(r, "sessionStorage \u5199\u5165\u5931\u8D25\uFF0C\u65E0\u6CD5\u8BB0\u5F55\u9650\u6D41\u51B7\u5374");
       return true;
     }
+    batchPaused = true;
     running = false;
     runAbort = null;
-    fire({ kind: "log", level: "warn", text: `PTA \u9650\u6D41\uFF08${where}\uFF09\uFF1A\u7B49\u5F85 ${Math.round(wait / 1e3)}s \u540E\u91CD\u8F7D\u672C\u9898\uFF08\u7B2C ${tries + 1}/${RATE_LIMIT_WAITS_MS.length} \u6B21\uFF09\u2026` });
-    const prob = r.problems?.[r.pi];
-    const target = prob ? `/problem-sets/${r.psId}/exam/problems/type/${prob.typeId}?problemSetProblemId=${prob.id}` : location.href;
-    setTimeout(() => navigateRelay(target, r, "\u9650\u6D41\u51B7\u5374\u540E\u91CD\u8F7D\u672C\u9898"), wait);
+    fire({ kind: "log", level: "warn", text: `PTA \u9650\u6D41\uFF08${where}\uFF09\uFF1A\u7B49\u5F85 ${Math.round(wait / 1e3)}s \u540E\u91CD\u8F7D\uFF08\u7B2C ${tries + 1}/${RATE_LIMIT_WAITS_MS.length} \u6B21\uFF09\u2026` });
+    let target = location.href;
+    if (r.phase === "collect") {
+      const p = r.problems[r.ci];
+      if (p) target = `/problem-sets/${r.psId}/exam/problems/type/${p.typeId}?problemSetProblemId=${p.id}`;
+    } else if (r.phase === "verify") {
+      const p = r.problems.find((x) => x.id === (r.verifyIds || [])[r.vi]);
+      if (p) target = `/problem-sets/${r.psId}/exam/problems/type/${p.typeId}?problemSetProblemId=${p.id}`;
+    }
+    setTimeout(() => navigateRelay(target, r, "\u9650\u6D41\u51B7\u5374\u540E\u91CD\u8F7D"), wait);
     return true;
   }
-  function startProgrammingRelay(psId, progTypes, cfg) {
-    const problems = [];
-    for (const t of progTypes) {
-      for (const id of t.ids) problems.push({ id, typeId: t.typeId, typeName: t.typeName });
+  async function openTypeList(psId, typeId) {
+    const target = `/problem-sets/${psId}/exam/problems/type/${typeId}`;
+    if (!(location.pathname === target && !location.search.includes("problemSetProblemId"))) {
+      const link = [...document.querySelectorAll("a[href]")].find((a) => (a.getAttribute("href") || "") === target);
+      if (!link) return false;
+      link.click();
     }
+    for (let i = 0; i < 60; i++) {
+      await sleep(100);
+      if (location.pathname === target && !location.search.includes("problemSetProblemId") && programmingIds(psId, typeId).length > 0) return true;
+    }
+    return false;
+  }
+  function clickProblemAnchor(id) {
+    const a = [...document.querySelectorAll("a[href]")].find((x) => (x.getAttribute("href") || "").endsWith(`problemSetProblemId=${id}`));
+    if (!a) return false;
+    a.click();
+    return true;
+  }
+  var STATEMENT_READY_RE = /(输入格式|输出格式|输入样例|输出样例|函数接口定义|裁判测试程序|Format|Input|Output|Sample)/i;
+  async function settleProblemReady(id) {
+    let mounted = false;
+    for (let i = 0; i < 50; i++) {
+      await sleep(100);
+      if (location.search.includes(`problemSetProblemId=${id}`) && answerFormEl()) {
+        mounted = true;
+        break;
+      }
+    }
+    if (!mounted) return false;
+    if (!await settleEditorState()) return false;
+    const mainEl = document.querySelector("main");
+    let prev = null;
+    for (let i = 0; i < 30; i++) {
+      await sleep(100);
+      const text = mainEl ? mainEl.innerText || "" : "";
+      if (text && text === prev && STATEMENT_READY_RE.test(text)) return true;
+      prev = text;
+    }
+    return false;
+  }
+  async function switchToProblem(id) {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      if (attempt > 0) await sleep(300);
+      if (!location.search.includes(`problemSetProblemId=${id}`) && !clickProblemAnchor(id)) return false;
+      if (await settleProblemReady(id)) return true;
+    }
+    return false;
+  }
+  async function paceSpaSwitch(where) {
+    fire({ kind: "log", level: "info", text: `${where}\uFF1A\u7B49\u5F85 ${SPA_SWITCH_WAIT_MS / 1e3}s \u518D\u5207\u4E0B\u4E00\u9898\uFF08SPA \u5207\u9898\u6BCF\u6B21 4 \u4E2A API\uFF0C\u8282\u594F\u7559\u4F59\u91CF\uFF09\u2026` });
+    await sleep(SPA_SWITCH_WAIT_MS);
+  }
+  async function startCodingBatch(psId, progTypes, cfg) {
+    const problems = flattenCodingTypes(progTypes);
     if (!problems.length) throw new Error("\u300C\u7F16\u7801\u9898\u300D\u627E\u4E0D\u5230\u9898\u76EE\u951A\u70B9\uFF08\u9898\u76EE\u603B\u89C8\u6536\u8D77\uFF1F\u70B9\u5F00\u540E\u91CD\u8BD5\uFF09");
     const relay = {
-      v: 1,
+      v: RELAY_VERSION,
       cfg: { ...cfg },
       psId,
-      problems,
-      pi: 0,
+      problems: problems.map((p) => ({ ...p, status: void 0 })),
+      ci: 0,
       phase: "collect",
-      // collect → verify →（advance）→ collect → …
-      summary: { applied: 0, skippedAnswered: 0, failed: [] }
+      verifyIds: [],
+      vi: 0,
+      summary: { applied: 0, skippedAnswered: 0, failed: [] },
+      rlTries: 0
     };
-    if (!writeRelay(relay)) throw new Error("sessionStorage \u4E0D\u53EF\u5199\uFF0C\u65E0\u6CD5\u8DE8\u9875\u7EED\u8DD1\u7F16\u7801\u9898");
-    const first = problems[0];
+    if (!writeRelay(relay)) throw new Error("sessionStorage \u4E0D\u53EF\u5199\u6216\u7EED\u8DD1\u5355\u8D85\u9650\uFF0C\u65E0\u6CD5\u6279\u91CF\u4F5C\u7B54\u7F16\u7801\u9898");
     const names = [...new Set(progTypes.map((t) => t.typeName))].join("\u3001");
-    fire({ kind: "log", level: "info", text: `${names || "\u7F16\u7801\u9898"} ${problems.length} \u9898\uFF1A\u8F6C\u300C\u9010\u9898\u6574\u9875\u88C5\u8F7D\u300D\u6A21\u5F0F\uFF08\u65E5\u5FD7\u8DE8\u9875\u4FDD\u7559\uFF09` });
+    fire({ kind: "log", level: "info", text: `${names || "\u7F16\u7801\u9898"} ${problems.length} \u9898\uFF1A\u6279\u91CF\u6A21\u5F0F\uFF08\u6536\u9898 \u2192 \u5E76\u53D1\u4F5C\u7B54 \u2192 \u9010\u9898\u63D0\u4EA4\uFF0C\u65E5\u5FD7\u8DE8\u9875\u4FDD\u7559\uFF09` });
     suppressLeaveConfirm();
-    navigateRelay(`/problem-sets/${psId}/exam/problems/type/${first.typeId}?problemSetProblemId=${first.id}`, relay, "\u8FDB\u5165\u7B2C\u4E00\u9898");
-    return true;
+    batchPaused = false;
+    batchAborted = false;
+    batchFatal = null;
+    batchPrevText = "";
+    await runCollectPhase(relay);
+    const rr = readRelay();
+    return {
+      handedOff: !!(rr && rr.phase === "verify"),
+      paused: batchPaused,
+      aborted: batchAborted,
+      error: batchFatal
+    };
+  }
+  var batchPrevText = "";
+  var batchPaused = false;
+  var batchAborted = false;
+  var batchFatal = null;
+  async function runCollectPhase(r) {
+    try {
+      while (r.ci < r.problems.length) {
+        if (userStopped(r)) {
+          stopBatchByUser(r);
+          return;
+        }
+        const p = r.problems[r.ci];
+        if (rateLimitedNow()) {
+          pauseBatchForRateLimit(r, "\u6536\u9898");
+          return;
+        }
+        if (!location.search.includes(`problemSetProblemId=${p.id}`)) {
+          const okList = await openTypeList(r.psId, p.typeId);
+          if (!okList) {
+            if (rateLimitedNow()) {
+              pauseBatchForRateLimit(r, "\u6536\u9898");
+              return;
+            }
+            relayRecordFail(r, p, null, `\u56DE\u4E0D\u5230\u300C${p.typeName}\u300D\u5217\u8868\u9875\uFF08\u9898\u76EE\u603B\u89C8\u6536\u8D77\u6216\u9875\u9762\u5F02\u5E38\uFF09`);
+            r.ci += 1;
+            continue;
+          }
+          await paceSpaSwitch("\u5207\u6362\u9898\u578B");
+        }
+        const switched = await switchToProblem(p.id);
+        const q = switched ? collectCodingProblem() : null;
+        const fresh = q ? isFreshStatement(batchPrevText, q, p.id) : { ok: false, reason: "\u9875\u9762\u672A\u5C31\u7EEA" };
+        if (!switched || !q || !fresh.ok) {
+          if (rateLimitedNow()) {
+            pauseBatchForRateLimit(r, "\u6536\u9898");
+            return;
+          }
+          relayRecordFail(r, p, null, `\u6536\u9898\u5931\u8D25\uFF1A${q ? fresh.reason : "\u9875\u9762\u672A\u5C31\u7EEA\uFF08\u5207\u9898\u672A\u751F\u6548\u6216\u7F16\u8F91\u5668\u672A\u6302\u8F7D\uFF09"}`);
+          r.ci += 1;
+          continue;
+        }
+        const cls = classifyProblem(q, r.cfg);
+        Object.assign(p, {
+          label: q.label || p.id.slice(-4),
+          kind: q.kind,
+          text: q.text,
+          langLabel: q.langLabel,
+          hasImg: q.hasImg,
+          status: cls.status
+        });
+        if (q.hasImg) fire({ kind: "log", level: "warn", text: `${p.label}\uFF1A\u9898\u5E72\u542B\u56FE\u7247\uFF0C\u7F16\u7801\u9898\u6682\u4E0D\u652F\u6301\u56FE\u7247\u8F93\u5165\uFF0C\u4EC5\u6309\u6587\u5B57\u9898\u9762\u4F5C\u7B54` });
+        if (cls.status === "skipped") {
+          r.summary.skippedAnswered += 1;
+          fire({ kind: "log", level: "info", text: `${p.label}\uFF1A\u8DF3\u8FC7\uFF0C\u5DF2\u4F5C\u7B54` });
+        } else {
+          fire({ kind: "log", level: "info", text: `\u6536\u9898 ${r.ci + 1}/${r.problems.length}\uFF1A${p.label}\uFF08${p.typeName}\uFF09` });
+        }
+        batchPrevText = q.text;
+        r.ci += 1;
+        if (!writeRelay(r)) {
+          abortRelay(r, "sessionStorage \u5199\u5165\u5931\u8D25");
+          return;
+        }
+        if (r.ci < r.problems.length) await paceSpaSwitch("\u6536\u9898");
+      }
+      const lastType = r.problems[r.problems.length - 1].typeId;
+      if (!await openTypeList(r.psId, lastType)) {
+        if (rateLimitedNow()) {
+          pauseBatchForRateLimit(r, "\u6536\u9898\u6536\u5C3E");
+          return;
+        }
+        abortRelay(r, "\u6536\u9898\u540E\u56DE\u4E0D\u5230\u9898\u76EE\u5217\u8868\u9875\uFF08SPA \u672A\u54CD\u5E94\uFF09\uFF0C\u8BF7\u91CD\u8BD5");
+        return;
+      }
+      r.phase = "answer";
+      if (!writeRelay(r)) {
+        abortRelay(r, "sessionStorage \u5199\u5165\u5931\u8D25");
+        return;
+      }
+      await runAnswerPhase(r);
+    } catch (err) {
+      abortRelay(r, err?.message || String(err));
+    }
   }
   async function resumeRelay(settings3) {
     const r = readRelay();
-    if (!r || r.v !== 1) return;
+    if (!r) return;
+    if (r.v !== RELAY_VERSION) {
+      clearRelay();
+      fire({ kind: "log", level: "warn", text: "\u68C0\u6D4B\u5230\u65E7\u7248\u7F16\u7801\u9898\u7EED\u8DD1\u5355\uFF08v1\uFF09\uFF0C\u5DF2\u4F5C\u5E9F\uFF1B\u8BF7\u91CD\u65B0\u5F00\u59CB\u7B54\u9898" });
+      return;
+    }
     if (!(settings3 && settings3.autoAnswer)) {
       clearRelay();
-      fire({ kind: "log", level: "warn", text: "\u7F16\u7801\u9898\u7EED\u8DD1\u53D6\u6D88\uFF1A\u603B\u5F00\u5173\u672A\u5F00\u542F" });
+      fire({ kind: "log", level: "warn", text: "\u7F16\u7801\u9898\u6279\u91CF\u4F5C\u7B54\u53D6\u6D88\uFF1A\u603B\u5F00\u5173\u672A\u5F00\u542F" });
       return;
     }
     if (r.aborted) {
       clearRelay();
-      fire({ kind: "log", level: "warn", text: "\u7F16\u7801\u9898\u7EED\u8DD1\u5DF2\u4E2D\u6B62\uFF08\u6309\u4F60\u7684\u8981\u6C42\u505C\u6B62\uFF09" });
+      fire({ kind: "log", level: "warn", text: "\u7F16\u7801\u9898\u6279\u91CF\u4F5C\u7B54\u5DF2\u4E2D\u6B62\uFF08\u6309\u4F60\u7684\u8981\u6C42\u505C\u6B62\uFF09" });
       fire({ kind: "state", running: false, error: "\u5DF2\u4E2D\u6B62" });
       return;
     }
-    const prob = r.problems[r.pi];
-    if (!prob) {
-      clearRelay();
-      fire({ kind: "log", level: "warn", text: "\u7F16\u7801\u9898\u7EED\u8DD1\u53D6\u6D88\uFF1A\u7EED\u8DD1\u5355\u5DF2\u8D8A\u754C" });
-      return;
-    }
     if (rateLimitedNow()) {
-      pauseForRateLimit(r, "\u9875\u9762\u52A0\u8F7D");
+      pauseBatchForRateLimit(r, "\u9875\u9762\u52A0\u8F7D");
       return;
     }
-    if (!new RegExp(`problemSetProblemId=${prob.id}$`).test(location.search)) {
+    const act = resumeAction(r, { pathname: location.pathname, search: location.search });
+    if (act.action === "clear") {
       clearRelay();
-      fire({ kind: "log", level: "warn", text: "\u7F16\u7801\u9898\u7EED\u8DD1\u53D6\u6D88\uFF1A\u9875\u9762\u4E0D\u5728 " + (prob.id || "").slice(-4) + " \u4E0A\uFF08\u5DF2\u843D\u4F4D\u9898\u76EE\u4FDD\u6301\u5404\u81EA\u72B6\u6001\uFF09" });
+      fire({ kind: "log", level: "warn", text: "\u7F16\u7801\u9898\u6279\u91CF\u4F5C\u7B54\u53D6\u6D88\uFF1A" + act.reason });
       return;
     }
     running = true;
@@ -1330,25 +1603,33 @@
     suppressLeaveConfirm();
     fire({ kind: "state", running: true });
     const hadHistory = readPersistedLog().length > 0;
-    fire({ kind: "log", level: "info", text: `\u7F16\u7801\u9898\u7EED\u8DD1\uFF08\u7B2C ${r.pi + 1}/${r.problems.length} \u9898\uFF0C${r.phase === "verify" ? "\u6C34\u5408\u6821\u9A8C/\u63D0\u4EA4" : "\u6536\u96C6\u4F5C\u7B54"}\u9636\u6BB5\uFF09` });
+    const phaseText = { collect: "\u6536\u9898", answer: "\u5E76\u53D1\u4F5C\u7B54", verify: "\u6C34\u5408\u63D0\u4EA4" }[r.phase] || r.phase;
+    fire({ kind: "log", level: "info", text: `\u7F16\u7801\u9898\u6279\u91CF\u4F5C\u7B54\u6062\u590D\uFF08${phaseText}\u9636\u6BB5\uFF09` });
     if (r.summary.failed.length && !hadHistory) {
       fire({ kind: "log", level: "warn", text: `\u6B64\u524D\u5DF2\u5931\u8D25 ${r.summary.failed.length} \u9898\uFF1A
 ${failDetails(r.summary.failed)}` });
     }
     try {
-      stripDraftHttpCache(prob.id);
-      if (r.phase === "verify") {
-        await relayVerify(r, prob);
-      } else {
-        await settleEditorState();
-        await relayCollect(r, prob);
+      if (act.action === "collect") {
+        await runCollectPhase(r);
+      } else if (act.action === "answer") {
+        await runAnswerPhase(r);
+      } else if (act.action === "verify") {
+        await verifyCurrent(r);
+      } else if (act.action === "seedVerify") {
+        if (seedVerifyProblem(r) && writeRelay(r)) {
+          running = false;
+          await pacePageLoad("\u6062\u590D\u5F85\u63D0\u4EA4\u9898");
+          if (userStopped(r)) {
+            stopBatchByUser(r);
+            return;
+          }
+          navigateRelay(verifyUrl(r, r.verifyIds[r.vi]), r, "\u6062\u590D\u5F85\u63D0\u4EA4\u9898");
+        }
       }
     } catch (err) {
       abortRelay(r, err?.message || String(err));
     }
-  }
-  function failDetails(failed) {
-    return (failed || []).map((f) => `${f.label || (f.id || "").slice(-4)}\uFF1A${f.reason}`).join("\n");
   }
   function relaySummaryLine(r) {
     const s = r.summary;
@@ -1363,209 +1644,281 @@ ${failDetails(s.failed)}`;
     fire({ kind: "log", level: "err", text: `${label || prob.id.slice(-4)}\uFF1A${reason}` });
   }
   function abortRelay(r, reason) {
+    batchFatal = reason;
     clearRelay();
-    fire({ kind: "log", level: "err", text: "\u7F16\u7801\u9898\u7EED\u8DD1\u4E2D\u6B62\uFF1A" + reason });
+    fire({ kind: "log", level: "err", text: "\u7F16\u7801\u9898\u6279\u91CF\u4F5C\u7B54\u4E2D\u6B62\uFF1A" + reason });
     fire({ kind: "log", level: "info", text: relaySummaryLine(r) });
     fire({ kind: "state", running: false, error: reason });
     running = false;
     runAbort = null;
     restoreLeaveConfirm();
   }
-  function stopRelayByUser(r) {
+  var draftTail = Promise.resolve();
+  function saveDraftQueued(pspId, kind, detail, compilerId, program) {
+    const run = draftTail.then(
+      () => saveDraft(pspId, kind, detail, compilerId, program),
+      () => saveDraft(pspId, kind, detail, compilerId, program)
+    );
+    draftTail = run.then(() => void 0, () => void 0);
+    return run;
+  }
+  async function runAnswerPhase(r) {
+    try {
+      const pending = r.problems.filter((p) => p.status === "pending" || p.status === "answering");
+      for (const p of pending) p.status = "pending";
+      if (!pending.length) {
+        await startVerifyPhase(r);
+        return;
+      }
+      const k = clampConcurrency(r.cfg.concurrency, pending.length);
+      fire({ kind: "log", level: "info", text: `\u5E76\u53D1\u4F5C\u7B54 ${pending.length} \u9898\uFF08${k} \u8DEF\u540C\u65F6\u8BF7\u6C42\uFF0C${r.cfg.model || "\u672A\u77E5\u6A21\u578B"}\uFF09` });
+      await runPool(pending, k, async (p) => {
+        if (userStopped(r)) return;
+        p.status = "answering";
+        fire({ kind: "log", level: "info", text: `${p.label}\uFF1A\u8BF7\u6C42\u6A21\u578B\u4E2D\u2026\uFF08${r.cfg.model || "\u672A\u77E5\u6A21\u578B"}\uFF09` });
+        const snap = await getDraftDetailStrict(p.id);
+        if (!snap.ok) {
+          relayRecordFail(r, p, p.label, `\u8349\u7A3F\u5FEB\u7167\u8BFB\u53D6\u5931\u8D25\uFF08${snap.error}\uFF09\uFF0C\u4E3A\u4FDD\u62A4\u81EA\u5B9A\u4E49\u6D4B\u8BD5\u6570\u636E\u4E0D\u5199\u5165`);
+          p.status = "failed";
+          return;
+        }
+        p.detail = slimDraftDetail(snap.detail, p.id);
+        if (!r.cfg.overwrite && localInputDiffers(p.id, snap.detail)) {
+          r.summary.skippedAnswered += 1;
+          p.status = "skipped";
+          fire({ kind: "log", level: "warn", text: `${p.label}\uFF1A\u672C\u5730\u5B58\u5728\u672A\u4FDD\u5B58\u7684\u624B\u6572\u4EE3\u7801\uFF08\u4E0E\u670D\u52A1\u7AEF\u8349\u7A3F\u4E0D\u4E00\u81F4\uFF09\uFF0C\u5DF2\u4FDD\u5B88\u8DF3\u8FC7\u4E0D\u8986\u76D6` });
+          return;
+        }
+        const picked = pickCompiler(p, p.detail, r.cfg, {
+          labelFor: (id) => COMPILER_LABELS[id] || "",
+          compilerIdFromLabel
+        });
+        if (!picked.ok) {
+          relayRecordFail(r, p, p.label, picked.reason);
+          p.status = "failed";
+          return;
+        }
+        p.compilerId = picked.compilerId;
+        p.wantLangLabel = picked.wantLangLabel;
+        const messages = buildPrompt({ ...p, langLabel: p.wantLangLabel || p.langLabel || "" });
+        let raw = null;
+        try {
+          raw = globalThis.__BPS_LLM_MOCK__ ? await globalThis.__BPS_LLM_MOCK__(messages) : await chatWithRetry(r.cfg, messages, { label: p.label });
+        } catch (err) {
+          if (userStopped(r)) return;
+          relayRecordFail(r, p, p.label, "LLM \u8C03\u7528\u5931\u8D25\uFF1A" + (err?.message || err));
+          p.status = "failed";
+          return;
+        }
+        const code = parseCodeAnswer(raw);
+        if (!code) {
+          relayRecordFail(r, p, p.label, "LLM \u8F93\u51FA\u89E3\u6790\u4E0D\u51FA\u4EE3\u7801\uFF1A" + String(raw).slice(0, 60));
+          p.status = "failed";
+          return;
+        }
+        if (code.length > 16384) {
+          relayRecordFail(r, p, p.label, `\u4EE3\u7801\u8D85\u957F\uFF08${code.length} \u5B57\u7B26\uFF0C\u5E73\u53F0\u9650 16KB\uFF09`);
+          p.status = "failed";
+          return;
+        }
+        const written = await saveDraftQueued(p.id, p.kind, p.detail, p.compilerId, code);
+        if (!written.ok) {
+          relayRecordFail(r, p, p.label, `\u8349\u7A3F\u5199\u5165\u5931\u8D25\uFF08HTTP ${written.status ?? "\u672A\u77E5"}${written.err ? "\uFF1A" + written.err : ""}\uFF09`);
+          p.status = "failed";
+          return;
+        }
+        stripDraftHttpCache(p.id);
+        p.code = code;
+        p.status = "answered";
+        fire({ kind: "log", level: "ok", text: `${p.label}\uFF1A\u8349\u7A3F\u5DF2\u5199\u5165\uFF08${code.length} \u5B57\u7B26\uFF09\uFF0C\u5F85\u9010\u9898\u6C34\u5408\u63D0\u4EA4` });
+      }, () => userStopped(r));
+      if (userStopped(r)) {
+        stopBatchByUser(r);
+        return;
+      }
+      if (!writeRelay(r)) {
+        abortRelay(r, "sessionStorage \u5199\u5165\u5931\u8D25");
+        return;
+      }
+      await startVerifyPhase(r);
+    } catch (err) {
+      abortRelay(r, err?.message || String(err));
+    }
+  }
+  function verifyUrl(r, id) {
+    const p = r.problems.find((x) => x.id === id);
+    return p ? `/problem-sets/${r.psId}/exam/problems/type/${p.typeId}?problemSetProblemId=${p.id}` : location.href;
+  }
+  function seedVerifyProblem(r) {
+    for (; ; ) {
+      const id = (r.verifyIds || [])[r.vi];
+      if (!id) {
+        finishBatch(r);
+        return false;
+      }
+      const p = r.problems.find((x) => x.id === id);
+      const seeded = seedCodingProblemCache(id, p.code, p.detail);
+      if (seeded.seeded) return true;
+      relayRecordFail(r, p, p.label, "\u6C34\u5408\u952E\u5199\u5165\u5931\u8D25" + (seeded.err ? "\uFF1A" + seeded.err : ""));
+      p.status = "failed";
+      r.vi += 1;
+    }
+  }
+  async function startVerifyPhase(r) {
+    r.verifyIds = buildVerifyPlan(r.problems);
+    r.vi = 0;
+    if (!r.verifyIds.length) {
+      finishBatch(r);
+      return;
+    }
+    r.phase = "verify";
+    fire({ kind: "log", level: "info", text: `\u4F5C\u7B54\u5B8C\u6210\uFF1A${r.verifyIds.length} \u9898\u5F85\u63D0\u4EA4\uFF08\u9010\u9898\u79CD\u952E + \u6574\u9875\u6C34\u5408\uFF09` });
+    if (!seedVerifyProblem(r)) return;
+    if (!writeRelay(r)) {
+      abortRelay(r, "sessionStorage \u5199\u5165\u5931\u8D25");
+      return;
+    }
+    running = false;
+    await pacePageLoad("\u5207\u5230\u7B2C\u4E00\u9053\u5F85\u63D0\u4EA4\u9898");
+    if (userStopped(r)) {
+      stopBatchByUser(r);
+      return;
+    }
+    navigateRelay(verifyUrl(r, r.verifyIds[r.vi]), r, "\u8FDB\u5165\u7B2C\u4E00\u9053\u5F85\u63D0\u4EA4\u9898");
+  }
+  async function advanceVerify(r) {
+    r.rlTries = 0;
+    fire({ kind: "progress", done: r.vi + 1, total: r.verifyIds.length });
+    if (userStopped(r)) {
+      stopBatchByUser(r);
+      return;
+    }
+    r.vi += 1;
+    if (r.vi >= r.verifyIds.length) {
+      finishBatch(r);
+      return;
+    }
+    if (!seedVerifyProblem(r)) return;
+    if (!writeRelay(r)) {
+      abortRelay(r, "sessionStorage \u5199\u5165\u5931\u8D25");
+      return;
+    }
+    running = false;
+    await pacePageLoad("\u5207\u5230\u4E0B\u4E00\u9053\u5F85\u63D0\u4EA4\u9898");
+    if (userStopped(r)) {
+      stopBatchByUser(r);
+      return;
+    }
+    navigateRelay(verifyUrl(r, r.verifyIds[r.vi]), r, "\u5207\u5230\u4E0B\u4E00\u9053\u5F85\u63D0\u4EA4\u9898");
+  }
+  function finishBatch(r) {
+    const line = relaySummaryLine(r);
+    try {
+      sessionStorage.setItem("__BPS_AA_SUMMARY_DONE__", JSON.stringify({ ok: !r.summary.failed.length, line, failed: r.summary.failed }));
+    } catch (_) {
+    }
     clearRelay();
     running = false;
     runAbort = null;
     restoreLeaveConfirm();
-    fire({ kind: "log", level: "warn", text: "\u5DF2\u4E2D\u6B62\uFF1A\u7F16\u7801\u9898\u7EED\u8DD1\u6309\u4F60\u7684\u8981\u6C42\u505C\u6B62" });
+    const lvl = r.summary.failed.length ? "warn" : "ok";
+    fire({ kind: "log", level: lvl, text: "\u7F16\u7801\u9898\u6279\u91CF\u4F5C\u7B54\u7ED3\u675F\uFF1A" + line });
+    fire({ kind: "state", running: false });
+  }
+  function stopBatchByUser(r) {
+    batchAborted = true;
+    clearRelay();
+    running = false;
+    runAbort = null;
+    restoreLeaveConfirm();
+    fire({ kind: "log", level: "warn", text: "\u5DF2\u4E2D\u6B62\uFF1A\u7F16\u7801\u9898\u6279\u91CF\u4F5C\u7B54\u6309\u4F60\u7684\u8981\u6C42\u505C\u6B62" });
     fire({ kind: "log", level: "info", text: relaySummaryLine(r) });
     fire({ kind: "state", running: false, error: "\u5DF2\u4E2D\u6B62" });
   }
-  async function relayNext(r, record, text) {
-    r.rlTries = 0;
-    if (record === "ok") {
-      r.summary.applied += 1;
-      if (text) fire({ kind: "log", level: "ok", text });
-    }
-    if (record === "skip") {
-      r.summary.skippedAnswered += 1;
-      if (text) fire({ kind: "log", level: "info", text });
-    }
-    fire({ kind: "progress", done: r.pi + 1, total: r.problems.length });
-    if (userStopped(r)) {
-      stopRelayByUser(r);
-      return;
-    }
-    const nextIdx = r.pi + 1;
-    if (nextIdx >= r.problems.length) {
-      const line = relaySummaryLine(r);
-      try {
-        sessionStorage.setItem("__BPS_AA_SUMMARY_DONE__", JSON.stringify({ ok: !r.summary.failed.length, line, failed: r.summary.failed }));
-      } catch (_) {
-      }
-      clearRelay();
-      running = false;
-      runAbort = null;
-      restoreLeaveConfirm();
-      const lvl = r.summary.failed.length ? "warn" : "ok";
-      fire({ kind: "log", level: lvl, text: "\u7F16\u7801\u9898\u8DE8\u9875\u7EED\u8DD1\u7ED3\u675F\uFF1A" + line });
-      fire({ kind: "state", running: false });
-      return;
-    }
-    r.pi = nextIdx;
-    r.phase = "collect";
-    r.hint = null;
-    const next = r.problems[r.pi];
-    await prepNextProblemCache(next.id);
-    if (!writeRelay(r)) {
-      abortRelay(r, "sessionStorage \u5199\u5165\u5931\u8D25");
-      return;
-    }
-    running = false;
-    await pacePageLoad("\u5207\u6362\u4E0B\u4E00\u9898");
-    navigateRelay(`/problem-sets/${r.psId}/exam/problems/type/${next.typeId}?problemSetProblemId=${next.id}`, r, "\u5207\u6362\u4E0B\u4E00\u9898");
-  }
-  async function relayCollect(r, prob) {
-    const q = collectCodingProblem();
-    if (!q) {
-      if (rateLimitedNow()) {
-        pauseForRateLimit(r, "\u6536\u96C6\u9898\u76EE");
-        return;
-      }
-      relayRecordFail(r, prob, null, "\u7F16\u7801\u9898\u9875\u9762\u6536\u4E0D\u5230\u9898\u76EE");
-      return relayNext(r, "fail");
-    }
-    r.rlTries = 0;
-    const label = q.label || prob.id.slice(-4);
-    if (q.answered && !r.cfg.overwrite) return relayNext(r, "skip", `${label}\uFF1A\u8DF3\u8FC7\uFF0C\u5DF2\u4F5C\u7B54`);
-    if (q.hasImg) fire({ kind: "log", level: "warn", text: `${label}\uFF1A\u9898\u5E72\u542B\u56FE\u7247\uFF0C\u7F16\u7801\u9898\u6682\u4E0D\u652F\u6301\u56FE\u7247\u8F93\u5165\uFF0C\u4EC5\u6309\u6587\u5B57\u9898\u9762\u4F5C\u7B54` });
-    const detail = await getDraftDetail(prob.id);
-    let compilerId = null;
-    let wantLangLabel = "";
-    if (q.kind !== "CODE_COMPLETION") {
-      compilerId = r.cfg.language ? r.cfg.language : compilerIdFromLabel(q.langLabel) || (detail?.programmingSubmissionDetail?.compiler || null);
-      if (!compilerId) {
-        relayRecordFail(r, prob, label, `\u8BFB\u4E0D\u5230\u5F53\u524D\u8BED\u8A00\u300C${q.langLabel || "\uFF08\u7A7A\uFF09"}\u300D\uFF0C\u65E0\u6CD5\u786E\u5B9A\u7F16\u8BD1\u5668`);
-        return relayNext(r, "fail");
-      }
-      wantLangLabel = COMPILER_LABELS[compilerId] || q.langLabel || "";
-    }
-    const messages = buildPrompt({ ...q, langLabel: wantLangLabel || q.langLabel || "" });
-    let raw = null;
-    fire({ kind: "log", level: "info", text: `${label}\uFF1A\u8BF7\u6C42\u6A21\u578B\u4E2D\u2026\uFF08${r.cfg.model || "\u672A\u77E5\u6A21\u578B"}\uFF09` });
-    try {
-      raw = globalThis.__BPS_LLM_MOCK__ ? await globalThis.__BPS_LLM_MOCK__(messages) : await chatWithRetry(r.cfg, messages, { label });
-    } catch (err) {
-      if (userStopped(r)) {
-        stopRelayByUser(r);
-        return;
-      }
-      relayRecordFail(r, prob, label, "LLM \u8C03\u7528\u5931\u8D25\uFF1A" + (err?.message || err));
-      return relayNext(r, "fail");
-    }
-    const code = parseCodeAnswer(raw);
-    if (!code) {
-      relayRecordFail(r, prob, label, "LLM \u8F93\u51FA\u89E3\u6790\u4E0D\u51FA\u4EE3\u7801\uFF1A" + String(raw).slice(0, 60));
-      return relayNext(r, "fail");
-    }
-    if (code.length > 16384) {
-      relayRecordFail(r, prob, label, `\u4EE3\u7801\u8D85\u957F\uFF08${code.length} \u5B57\u7B26\uFF0C\u5E73\u53F0\u9650 16KB\uFF09`);
-      return relayNext(r, "fail");
-    }
-    const written = await saveDraft(prob.id, q.kind, detail, compilerId, code);
-    if (!written.ok) {
-      if (rateLimitedNow()) {
-        pauseForRateLimit(r, "\u5199\u8349\u7A3F");
-        return;
-      }
-      relayRecordFail(r, prob, label, `\u8349\u7A3F\u5199\u5165\u5931\u8D25\uFF08HTTP ${written.status ?? "\u672A\u77E5"}${written.err ? "\uFF1A" + written.err : ""}\uFF09`);
-      return relayNext(r, "fail");
-    }
-    stripDraftHttpCache(prob.id);
-    const seeded = seedCodingProblemCache(prob.id, code, detail);
-    if (!seeded.seeded) {
-      relayRecordFail(r, prob, label, "\u6C34\u5408\u952E\u5199\u5165\u5931\u8D25" + (seeded.err ? "\uFF1A" + seeded.err : ""));
-      return relayNext(r, "fail");
-    }
-    r.phase = "verify";
-    r.hint = { label, kind: q.kind, compilerId, wantLangLabel, head: (code.split("\n")[0] || "").trim().slice(0, 24), detail };
-    if (!writeRelay(r)) {
-      abortRelay(r, "sessionStorage \u5199\u5165\u5931\u8D25");
-      return;
-    }
-    running = false;
-    await pacePageLoad("\u63D0\u4EA4\u8349\u7A3F\u540E\u6821\u9A8C");
-    try {
-      location.reload();
-    } catch (_) {
-    }
-  }
-  async function relayVerify(r, prob) {
-    const hint = r.hint;
-    if (!hint || !hint.head) {
-      abortRelay(r, "verify \u9636\u6BB5\u7F3A\u5C11 hint\uFF08replay \u72B6\u6001\u9519\u4E71\uFF09");
+  async function verifyCurrent(r) {
+    const id = (r.verifyIds || [])[r.vi];
+    const p = r.problems.find((x) => x.id === id);
+    if (!p || !p.code) {
+      abortRelay(r, "verify \u9636\u6BB5\u627E\u4E0D\u5230\u5F85\u63D0\u4EA4\u9898\uFF08\u7EED\u8DD1\u5355\u72B6\u6001\u9519\u4E71\uFF09");
       return;
     }
     if (rateLimitedNow()) {
-      pauseForRateLimit(r, "\u6C34\u5408\u6821\u9A8C");
+      pauseBatchForRateLimit(r, "\u6C34\u5408\u6821\u9A8C");
       return;
     }
-    const label = hint.label || prob.id.slice(-4);
-    const kind = hint.kind || "PROGRAMMING";
-    const wantLangLabel = hint.wantLangLabel || "";
-    const compilerId = hint.compilerId;
-    const head = String(hint.head || "").trim();
-    const detail = hint.detail || null;
     const hyd = await waitHydrate(true);
     const cmText = editableCm()?.textContent || "";
+    const head = String(p.code.split("\n")[0] || "").trim().slice(0, 24);
     if (!hyd.ok || head && !cmText.includes(head)) {
       if (rateLimitedNow()) {
-        pauseForRateLimit(r, "\u6C34\u5408\u6821\u9A8C");
+        pauseBatchForRateLimit(r, "\u6C34\u5408\u6821\u9A8C");
         return;
       }
-      const rollback = await saveDraft(prob.id, kind, detail, compilerId, "");
-      stripDraftHttpCache(prob.id);
-      clearCodingProblemCache(prob.id);
-      relayRecordFail(r, prob, label, "\u6C34\u5408\u6821\u9A8C\u5931\u8D25\uFF08\u7F16\u8F91\u5668\u672A\u56DE\u5E26\u4EE3\u7801\uFF09" + (rollback.ok ? "\uFF0C\u8349\u7A3F\u5DF2\u64A4\u9500" : "\uFF0C\u8349\u7A3F\u6B8B\u7559\u9700\u4EBA\u5DE5\u6838\u5BF9"));
-      if (!rollback.ok) return abortRelay(r, "\u8349\u7A3F\u64A4\u9500\u5931\u8D25\uFF08\u6B8B\u7559\u4EE3\u7801\uFF09\uFF0C\u9700\u4EBA\u5DE5\u6838\u5BF9\u540E\u518D\u8BD5");
-      return relayNext(r, "fail");
+      const rollback = await saveDraftQueued(p.id, p.kind, p.detail, p.compilerId, "");
+      stripDraftHttpCache(p.id);
+      clearCodingProblemCache(p.id);
+      relayRecordFail(r, p, p.label, "\u6C34\u5408\u6821\u9A8C\u5931\u8D25\uFF08\u7F16\u8F91\u5668\u672A\u56DE\u5E26\u4EE3\u7801\uFF09" + (rollback.ok ? "\uFF0C\u8349\u7A3F\u5DF2\u64A4\u9500" : "\uFF0C\u8349\u7A3F\u6B8B\u7559\u9700\u4EBA\u5DE5\u6838\u5BF9"));
+      if (!rollback.ok) {
+        abortRelay(r, "\u8349\u7A3F\u64A4\u9500\u5931\u8D25\uFF08\u6B8B\u7559\u4EE3\u7801\uFF09\uFF0C\u9700\u4EBA\u5DE5\u6838\u5BF9\u540E\u518D\u8BD5");
+        return;
+      }
+      p.status = "failed";
+      return advanceVerify(r);
     }
     r.rlTries = 0;
-    if (kind !== "CODE_COMPLETION") {
+    if (p.kind !== "CODE_COMPLETION") {
       const mountedLabel = langLabelOf();
-      if (mountedLabel !== wantLangLabel) {
-        const rollback = await saveDraft(prob.id, kind, detail, compilerId, "");
-        stripDraftHttpCache(prob.id);
-        clearCodingProblemCache(prob.id);
-        relayRecordFail(r, prob, label, `\u8BED\u8A00\u4E0D\u4E00\u81F4\uFF08\u8349\u7A3F ${wantLangLabel}\uFF0C\u5B9E\u6302\u300C${mountedLabel || "\u672A\u77E5"}\u300D\uFF09\uFF0C\u5DF2\u5F03\u7B54\u9632\u9519\u914D` + (rollback.ok ? "\uFF0C\u8349\u7A3F\u5DF2\u64A4\u9500" : "\uFF0C\u8349\u7A3F\u6B8B\u7559\u9700\u4EBA\u5DE5\u6838\u5BF9"));
-        if (!rollback.ok) return abortRelay(r, "\u8349\u7A3F\u64A4\u9500\u5931\u8D25\uFF08\u6B8B\u7559\u4EE3\u7801\uFF09\uFF0C\u9700\u4EBA\u5DE5\u6838\u5BF9\u540E\u518D\u8BD5");
-        return relayNext(r, "fail");
+      if (mountedLabel !== p.wantLangLabel) {
+        const rollback = await saveDraftQueued(p.id, p.kind, p.detail, p.compilerId, "");
+        stripDraftHttpCache(p.id);
+        clearCodingProblemCache(p.id);
+        relayRecordFail(r, p, p.label, `\u8BED\u8A00\u4E0D\u4E00\u81F4\uFF08\u8349\u7A3F ${p.wantLangLabel}\uFF0C\u5B9E\u6302\u300C${mountedLabel || "\u672A\u77E5"}\u300D\uFF09\uFF0C\u5DF2\u5F03\u7B54\u9632\u9519\u914D` + (rollback.ok ? "\uFF0C\u8349\u7A3F\u5DF2\u64A4\u9500" : "\uFF0C\u8349\u7A3F\u6B8B\u7559\u9700\u4EBA\u5DE5\u6838\u5BF9"));
+        if (!rollback.ok) {
+          abortRelay(r, "\u8349\u7A3F\u64A4\u9500\u5931\u8D25\uFF08\u6B8B\u7559\u4EE3\u7801\uFF09\uFF0C\u9700\u4EBA\u5DE5\u6838\u5BF9\u540E\u518D\u8BD5");
+          return;
+        }
+        p.status = "failed";
+        return advanceVerify(r);
       }
     }
     if (r.cfg.drySave) {
-      const rollback = await saveDraft(prob.id, kind, detail, compilerId, "");
-      stripDraftHttpCache(prob.id);
-      clearCodingProblemCache(prob.id);
-      if (!rollback.ok) return abortRelay(r, "dry\uFF1A\u6C34\u5408\u6821\u9A8C\u901A\u8FC7\u540E\u64A4\u9500\u8349\u7A3F\u5931\u8D25\uFF0C\u6B8B\u7559\u9700\u4EBA\u5DE5\u6838\u5BF9");
-      return relayNext(r, "ok", `${label} \u2192 ${head}\u2026\uFF08dry\uFF1A\u8349\u7A3F\u6C34\u5408\u6821\u9A8C\u901A\u8FC7\u540E\u5DF2\u64A4\u9500\uFF0C\u672A\u63D0\u4EA4\uFF09`);
+      const rollback = await saveDraftQueued(p.id, p.kind, p.detail, p.compilerId, "");
+      stripDraftHttpCache(p.id);
+      clearCodingProblemCache(p.id);
+      if (!rollback.ok) {
+        abortRelay(r, "dry\uFF1A\u6C34\u5408\u6821\u9A8C\u901A\u8FC7\u540E\u64A4\u9500\u8349\u7A3F\u5931\u8D25\uFF0C\u6B8B\u7559\u9700\u4EBA\u5DE5\u6838\u5BF9");
+        return;
+      }
+      p.status = "submitted";
+      r.summary.applied += 1;
+      fire({ kind: "log", level: "ok", text: `${p.label} \u2192 ${head}\u2026\uFF08dry\uFF1A\u8349\u7A3F\u6C34\u5408\u6821\u9A8C\u901A\u8FC7\u540E\u5DF2\u64A4\u9500\uFF0C\u672A\u63D0\u4EA4\uFF09` });
+      return advanceVerify(r);
     }
     if (userStopped(r)) {
-      stopRelayByUser(r);
+      stopBatchByUser(r);
       return;
     }
     const saved = await submitProgramming();
     if (!saved.saved || rateLimitedNow()) {
       if (rateLimitedNow()) {
-        pauseForRateLimit(r, "\u63D0\u4EA4\u8BC4\u6D4B");
+        pauseBatchForRateLimit(r, "\u63D0\u4EA4\u8BC4\u6D4B");
         return;
       }
-      const rollback = await saveDraft(prob.id, kind, detail, compilerId, "");
-      stripDraftHttpCache(prob.id);
-      clearCodingProblemCache(prob.id);
-      relayRecordFail(r, prob, label, "\u63D0\u4EA4\u5931\u8D25\uFF1A" + saved.reason + (rollback.ok ? "\uFF0C\u8349\u7A3F\u5DF2\u64A4\u9500" : "\uFF0C\u8349\u7A3F\u6B8B\u7559\u542B\u672C\u6B21\u4EE3\u7801\uFF0C\u9700\u4EBA\u5DE5\u6838\u5BF9"));
-      if (!rollback.ok) return abortRelay(r, "\u8349\u7A3F\u64A4\u9500\u5931\u8D25\uFF08\u6B8B\u7559\u4EE3\u7801\uFF09\uFF0C\u9700\u4EBA\u5DE5\u6838\u5BF9\u540E\u518D\u8BD5");
-      return relayNext(r, "fail");
+      const rollback = await saveDraftQueued(p.id, p.kind, p.detail, p.compilerId, "");
+      stripDraftHttpCache(p.id);
+      clearCodingProblemCache(p.id);
+      relayRecordFail(r, p, p.label, "\u63D0\u4EA4\u5931\u8D25\uFF1A" + saved.reason + (rollback.ok ? "\uFF0C\u8349\u7A3F\u5DF2\u64A4\u9500" : "\uFF0C\u8349\u7A3F\u6B8B\u7559\u542B\u672C\u6B21\u4EE3\u7801\uFF0C\u9700\u4EBA\u5DE5\u6838\u5BF9"));
+      if (!rollback.ok) {
+        abortRelay(r, "\u8349\u7A3F\u64A4\u9500\u5931\u8D25\uFF08\u6B8B\u7559\u4EE3\u7801\uFF09\uFF0C\u9700\u4EBA\u5DE5\u6838\u5BF9\u540E\u518D\u8BD5");
+        return;
+      }
+      p.status = "failed";
+      return advanceVerify(r);
     }
-    return relayNext(r, "ok", `${label} \u2192 ${head}\u2026\uFF08\u5DF2\u63D0\u4EA4\u8BC4\u6D4B\uFF09`);
+    p.status = "submitted";
+    r.summary.applied += 1;
+    fire({ kind: "log", level: "ok", text: `${p.label} \u2192 ${head}\u2026\uFF08\u5DF2\u63D0\u4EA4\u8BC4\u6D4B\uFF09` });
+    return advanceVerify(r);
   }
   function pageScript(code) {
     const s = document.createElement("script");
@@ -1690,8 +2043,8 @@ ${failDetails(s.failed)}`;
     }
     const preRelay = readRelay();
     if (preRelay && !preRelay.aborted) {
-      fire({ kind: "log", level: "warn", text: "\u7F16\u7801\u9898\u8DE8\u9875\u7EED\u8DD1\u6B63\u5728\u8FDB\u884C\uFF08\u770B\u5404\u9875\u60AC\u6D6E\u7403\u72B6\u6001\uFF09\uFF1B\u672C\u9875\u82E5\u5DF2\u4E0D\u5728\u9898\u76EE\u4E0A\u5219\u7EED\u8DD1\u4F1A\u81EA\u884C\u53D6\u6D88" });
-      return { ok: false, error: "\u7F16\u7801\u9898\u8DE8\u9875\u7EED\u8DD1\u6B63\u5728\u8FDB\u884C" };
+      fire({ kind: "log", level: "warn", text: "\u7F16\u7801\u9898\u6279\u91CF\u4F5C\u7B54\u6B63\u5728\u8FDB\u884C\uFF08\u770B\u60AC\u6D6E\u7403/\u65E5\u5FD7\u72B6\u6001\uFF09\uFF1B\u672C\u9875\u82E5\u5DF2\u4E0D\u5728\u9898\u76EE\u4E0A\u5219\u7EED\u8DD1\u4F1A\u81EA\u884C\u53D6\u6D88" });
+      return { ok: false, error: "\u7F16\u7801\u9898\u6279\u91CF\u4F5C\u7B54\u6B63\u5728\u8FDB\u884C" };
     }
     if (preRelay) clearRelay();
     const m = location.pathname.match(EXAM_PROBLEMS_RE);
@@ -1710,6 +2063,8 @@ ${failDetails(s.failed)}`;
       // 作答含图题（需视觉模型；只作用于客观题，编程题恒按文字题面作答）
       language: config.language || "",
       // 编程题固定语言（白名单 id）；空 = 跟随各题编辑器当前语言；函数题忽略（编译器由题目固定）
+      concurrency: clampConcurrency(config.concurrency, 6),
+      // 编码题并发作答路数（1–6）；收题/提交仍是串行页面操作
       drySave: !!config.drySave
     };
     if (globalThis.__BPS_LLM_MOCK__ && !cfg.drySave) {
@@ -1733,6 +2088,7 @@ ${failDetails(s.failed)}`;
     const progTypes = [];
     let ret = null;
     let relayStarted = false;
+    let batchOutcome = null;
     try {
       clearPersistedLog();
       fire({ kind: "log-clear" });
@@ -1838,12 +2194,11 @@ ${failDetails(s.failed)}`;
       if (runAbort.signal.aborted) throw new Error("\u5DF2\u4E2D\u6B62");
       ret = { ok: true, summary };
       if (progTypes.length) {
-        if (startProgrammingRelay(psId, progTypes, cfg)) {
-          relayStarted = true;
-          const relayNames = [...new Set(progTypes.map((t) => t.typeName))].join("\u3001");
-          summary.types.push({ type: relayNames || "\u7F16\u7801\u9898", total: progTypes.reduce((n, x) => n + x.total, 0), applied: 0, skippedAnswered: 0, skippedImage: 0, failed: 0, saved: false });
-          ret = { ok: true, relay: true, summary };
-        }
+        batchOutcome = await startCodingBatch(psId, progTypes, cfg);
+        relayStarted = batchOutcome.handedOff || batchOutcome.paused;
+        const relayNames = [...new Set(progTypes.map((t) => t.typeName))].join("\u3001");
+        summary.types.push({ type: relayNames || "\u7F16\u7801\u9898", total: progTypes.reduce((n, x) => n + x.total, 0), applied: 0, skippedAnswered: 0, skippedImage: 0, failed: 0, saved: false });
+        ret = batchOutcome.aborted ? { ok: false, error: "\u5DF2\u4E2D\u6B62", summary, relay: true } : batchOutcome.error ? { ok: false, error: batchOutcome.error, summary, relay: true } : { ok: true, relay: true, summary };
       }
     } catch (err) {
       ret = { ok: false, error: err?.message || String(err), summary };
@@ -1851,9 +2206,15 @@ ${failDetails(s.failed)}`;
       running = false;
       runAbort = null;
       if (!relayStarted) restoreLeaveConfirm();
-      if (ret.ok) {
+      if (ret.relay && batchOutcome) {
+        if (batchOutcome.handedOff || batchOutcome.paused) {
+          const failN = ret.summary.failed.length;
+          fire({ kind: "log", level: failN ? "warn" : "ok", text: "\u5BA2\u89C2\u9898\u5B8C\u6210\uFF1B\u7F16\u7801\u9898\u6279\u91CF\u4F5C\u7B54\u5DF2\u63A8\u8FDB\uFF08\u6536\u9898 \u2192 \u5E76\u53D1\u4F5C\u7B54 \u2192 \u9010\u9898\u63D0\u4EA4\uFF0C\u65E5\u5FD7\u968F\u5404\u9875\u51FA\u73B0\uFF09" });
+        }
+        fire(ret.ok ? { kind: "state", running: false } : { kind: "state", running: false, error: ret.error });
+      } else if (ret.ok) {
         const failN = ret.summary.failed.length;
-        fire({ kind: "log", level: failN ? "warn" : "ok", text: `${ret.relay ? "\u5BA2\u89C2\u9898\u5B8C\u6210\uFF08\u7F16\u7801\u9898\u5DF2\u8F6C\u9010\u9875\u7EED\u8DD1\uFF0C\u65E5\u5FD7\u968F\u5404\u9875\u51FA\u73B0\uFF09" : `\u5B8C\u6210\uFF1A\u4F5C\u7B54 ${ret.summary.applied} \xB7 \u8DF3\u8FC7\u5DF2\u7B54 ${ret.summary.skippedAnswered} \xB7 \u8DF3\u8FC7\u542B\u56FE ${ret.summary.skippedImage} \xB7 \u5931\u8D25 ${failN}${cfg.drySave ? "\uFF08\u672A\u4FDD\u5B58\uFF09" : ""}`}` });
+        fire({ kind: "log", level: failN ? "warn" : "ok", text: `\u5B8C\u6210\uFF1A\u4F5C\u7B54 ${ret.summary.applied} \xB7 \u8DF3\u8FC7\u5DF2\u7B54 ${ret.summary.skippedAnswered} \xB7 \u8DF3\u8FC7\u542B\u56FE ${ret.summary.skippedImage} \xB7 \u5931\u8D25 ${failN}${cfg.drySave ? "\uFF08\u672A\u4FDD\u5B58\uFF09" : ""}` });
         fire({ kind: "state", running: false });
       } else {
         fire({ kind: "log", level: "err", text: ret.error === "\u5DF2\u4E2D\u6B62" ? "\u5DF2\u4E2D\u6B62" : "\u5DF2\u4E2D\u6B62\uFF1A" + ret.error });
@@ -2358,6 +2719,17 @@ input:disabled, button:disabled { opacity: .6; cursor: not-allowed; } /* PTA \u7
     oFollow.value = "";
     oFollow.textContent = "\u8DDF\u968F\u7F16\u8F91\u5668\u5F53\u524D\u8BED\u8A00";
     el("p", "hint", fLang).textContent = "\u672C\u9898\u96C6\u5141\u8BB8\u7684\u8BED\u8A00\uFF1B\u4F5C\u7B54\u6309\u6240\u9009\u8BED\u8A00\u51FA\u7801\u5E76\u63D0\u4EA4\u8BC4\u6D4B\u3002\u51FD\u6570\u9898\u7684\u7F16\u8BD1\u5668\u7531\u9898\u76EE\u56FA\u5B9A\uFF0C\u6B64\u914D\u7F6E\u5BF9\u51FD\u6570\u9898\u4E0D\u751F\u6548";
+    const fConc = el("div", "field", pageAnswer);
+    el("label", "flabel", fConc).textContent = "\u5E76\u53D1\u6570\uFF08\u7F16\u7801\u9898\uFF09";
+    fConc.querySelector("label").htmlFor = "aa-concurrency";
+    const csel = el("select", "", fConc);
+    csel.id = "aa-concurrency";
+    for (const n of [1, 2, 3, 4, 5, 6]) {
+      const o = el("option", "", csel);
+      o.value = String(n);
+      o.textContent = `${n} \u8DEF`;
+    }
+    el("p", "hint", fConc).textContent = "\u7F16\u7801\u9898\u540C\u65F6\u8BF7\u6C42\u6A21\u578B\u7684\u8DEF\u6570\uFF0C\u8D8A\u9AD8\u8D8A\u5FEB\uFF1B\u5B9E\u6D4B OpenCode Go 6 \u8DEF\u65E0 429\uFF0C\u6162\u6A21\u578B/\u9650\u6D41\u4E25\u683C\u7684\u670D\u52A1\u5EFA\u8BAE 1\u20133";
     const fKey = el("div", "field", pageModel);
     el("label", "flabel", fKey).textContent = "API Key";
     fKey.querySelector("label").htmlFor = "aa-key";
@@ -2490,6 +2862,7 @@ input:disabled, button:disabled { opacity: .6; cursor: not-allowed; } /* PTA \u7
     key.value = currentKey(settings, sel.value);
     ovw.checked = !!(settings || {}).autoAnswerOverwrite;
     imgs.checked = !!(settings || {}).autoAnswerImages;
+    csel.value = String(clampConcurrency((settings || {}).autoAnswerConcurrency, 6));
     refreshLangOptions();
     applyPreset();
     let keyOwner = sel.value;
@@ -2507,6 +2880,7 @@ input:disabled, button:disabled { opacity: .6; cursor: not-allowed; } /* PTA \u7
     lsel.addEventListener("change", persist);
     ovw.addEventListener("change", persist);
     imgs.addEventListener("change", persist);
+    csel.addEventListener("change", persist);
     clear.addEventListener("click", () => {
       clearPersistedLog();
       logLines.length = 0;
@@ -2646,9 +3020,10 @@ input:disabled, button:disabled { opacity: .6; cursor: not-allowed; } /* PTA \u7
     const model = (shadow.getElementById("aa-model-name")?.value || "").trim();
     const lang = shadow.getElementById("aa-lang");
     const language = lang ? lang.value.trim() : "";
+    const concurrency = clampConcurrency(shadow.getElementById("aa-concurrency")?.value, 6);
     try {
       const fresh = await loadSettings();
-      await saveSettings({ ...withKeyFor(fresh, gateway, apiKey), autoAnswerOverwrite: overwrite, autoAnswerImages: withImages, autoAnswerGateway: gateway, autoAnswerBaseUrl: baseUrl, autoAnswerModel: model, autoAnswerLanguage: language });
+      await saveSettings({ ...withKeyFor(fresh, gateway, apiKey), autoAnswerOverwrite: overwrite, autoAnswerImages: withImages, autoAnswerGateway: gateway, autoAnswerBaseUrl: baseUrl, autoAnswerModel: model, autoAnswerLanguage: language, autoAnswerConcurrency: concurrency });
     } catch (_) {
     }
   }
@@ -2686,6 +3061,7 @@ input:disabled, button:disabled { opacity: .6; cursor: not-allowed; } /* PTA \u7
     const overwrite = shadow.getElementById("aa-overwrite").checked;
     const withImages = shadow.getElementById("aa-images").checked;
     const language = (shadow.getElementById("aa-lang")?.value || "").trim();
+    const concurrency = clampConcurrency(shadow.getElementById("aa-concurrency")?.value, 6);
     await persist();
     const result = await handleRun({
       baseUrl,
@@ -2694,7 +3070,8 @@ input:disabled, button:disabled { opacity: .6; cursor: not-allowed; } /* PTA \u7
       overwrite,
       images: withImages,
       gateway: preset.gateway,
-      language
+      language,
+      concurrency
     });
     if (!result.ok && result.error === "\u5DF2\u6709\u4E00\u6B21\u7B54\u9898\u5728\u8FD0\u884C\u4E2D") appendLog("warn", "\u5DF2\u6709\u4E00\u6B21\u7B54\u9898\u5728\u8FD0\u884C\u4E2D");
   }

@@ -15,6 +15,14 @@
  */
 
 import { LLM_DIRECT_TIMEOUT_MS, LLM_MAX_ATTEMPTS, LLM_MAX_IDLE_ATTEMPTS, LLM_TOTAL_TIMEOUT_MS } from '../shared/llm.js';
+import {
+  RELAY_SIZE_LIMIT, RELAY_VERSION, SPA_SWITCH_WAIT_MS,
+  buildVerifyPlan, classifyProblem, clampConcurrency, failDetails, flattenCodingTypes,
+  isFreshStatement, pickCompiler, resumeAction, runPool, slimDraftDetail,
+} from '../shared/coding-batch.js';
+
+// 失败明细的实现下沉到 shared/coding-batch（批量流程与客观题汇总共用）；导出位置保持不变
+export { failDetails };
 
 // 侧栏类型名 → exam-submissions 协议的 problemType。
 // 「函数题」在 PTA 协议层叫 CODE_COMPLETION（2026-10-28 实测：题目集侧栏显示「函数题」，
@@ -361,12 +369,23 @@ export function compilerIdFromLabel(label) {
   return null;
 }
 
-export async function getDraftDetail(pspId) {
-  const d = await fetch(`/api/problem-sets/problems/${pspId}/exam-draft`, {
-    headers: { accept: 'application/json' },
-    credentials: 'include',
-  }).then(r => r.json()).catch(() => null);
-  return d?.answer?.detail || null;
+// 草稿快照（严格版）：GET 非 2xx / 解析失败时如实报错，而不是当「没有草稿」——
+// 批量流程用它决定是否写草稿：快照拿不到就不写，防止 customTestData 被空值覆盖掉
+// 用户的自定义测试数据（v0.12.0 口径，见 pickCompiler/saveDraft 的调用方）。
+export async function getDraftDetailStrict(pspId) {
+  let res;
+  try {
+    res = await fetch(`/api/problem-sets/problems/${pspId}/exam-draft`, {
+      headers: { accept: 'application/json' },
+      credentials: 'include',
+    });
+  } catch (err) {
+    return { ok: false, error: String(err?.message || err) };
+  }
+  if (!res.ok) return { ok: false, error: `HTTP ${res.status}` };
+  let data = null;
+  try { data = await res.json(); } catch (_) { return { ok: false, error: '响应不是合法 JSON' }; }
+  return { ok: true, detail: data?.answer?.detail || null };
 }
 
 // 草稿 detail 的提交子对象（纯函数，单测覆盖）。编程题带 compiler（跟随配置/编辑器语言）；
@@ -440,35 +459,9 @@ export function stripDraftHttpCache(pspId) {
   } catch (_) { /* 结构变化时静默跳过 */ }
 }
 
-// 每题编辑器还有 localStorage 级缓存（user-cache 的 codingProblem_<id>：program/saveAt/testData），
-// boot 时 PTA 会把它自动存回服务端草稿——旧值会伪造「已答」。跳转前清理：只在「缓存为空」或
-// 「缓存程序与服务端草稿一致（auto-save 已同步）」时删缓存键；不一致时保留——那是用户未保存的
-// 输入，boot 会原样同步，作答态照旧保守跳过，不能替用户丢数据。
-export async function prepNextProblemCache(nextId) {
-  try {
-    const raw = JSON.parse(localStorage.getItem('user-cache') || '{}');
-    const key = `codingProblem_${nextId}`;
-    const entry = raw[key] || null;
-    const cacheProgram = String(entry?.program ?? '');
-    let detailProgram = null;
-    if (cacheProgram) {
-      const detail = await getDraftDetail(nextId);
-      detailProgram = detail?.programmingSubmissionDetail?.program ?? '';
-    }
-    if (!cacheProgram || cacheProgram === detailProgram) {
-      delete raw[key];
-      localStorage.setItem('user-cache', JSON.stringify(raw));
-      return { cleaned: true };
-    }
-    return { cleaned: false, staleUserInput: true }; // 与草稿不一致：保留（boot 会原样同步）
-  } catch (_) {
-    return { cleaned: false };
-  }
-}
-
 // 无条件删某题的 codingProblem 缓存键（仅限 verify 撤销/提交失败回滚的时机——此时代码已从
-// 服务端草稿撤下，本地键不能留着，否则 collect 会把空编辑器误判成已答/下次 boot 回带旧代码）。
-// 注意 collect 写完代码后不再删键（见 seedCodingProblemCache）。
+// 服务端草稿撤下，本地键不能留着，否则重跑时会把空编辑器/旧代码当成本题答案）。
+// 批量流程只在回滚时删键；正常路径的键由 startVerifyPhase/advanceVerify 在跳转前现种（见下）。
 function clearCodingProblemCache(id) {
   try {
     const raw = JSON.parse(localStorage.getItem('user-cache') || '{}');
@@ -478,12 +471,27 @@ function clearCodingProblemCache(id) {
   } catch (_) { /* 结构异常静默 */ }
 }
 
-// 种入水合键：现行 PTA 的编码题 boot 只从 codingProblem_<id> 本地键回带编辑器内容，
-// 服务端 exam-draft 已不参与水合（2026-10-15 实测：服务端草稿有码的全新文档照样水合成
-// 空编辑器，且 boot 连 exam-draft 的 GET 都不发生；种键→真加载→编辑器回带+按钮解锁实证。
-// 函数题同键同形状，2026-10-28 真机实证：种键→reload→回带+「提交本题作答」解锁）。
-// 形状照抄 PTA 自己写的键（program/testData/saveAt，saveAt 为 ISO 字符串）。collect 写完
-// 服务端草稿后立即种键再 reload，verify 文档的 boot 才有码可回带。
+// 本地 codingProblem_<id> 缓存里的 program 是否与服务端草稿不一致（= 用户未保存的手敲输入）。
+// 批量收题走 SPA 挂载，编辑器水合源在本地键/服务端草稿之间不完全确定，保守起见在写草稿前
+// 显式比对一次（旧逐题 relay 的 prepNextProblemCache 同口径：不能替用户丢未保存输入）。
+function localInputDiffers(id, rawDetail) {
+  try {
+    const raw = JSON.parse(localStorage.getItem('user-cache') || '{}');
+    const entry = raw['codingProblem_' + id];
+    const cacheProgram = String(entry?.program ?? '');
+    if (!cacheProgram) return false;
+    const prog = rawDetail?.programmingSubmissionDetail?.program
+      ?? rawDetail?.codeCompletionSubmissionDetail?.program ?? '';
+    return cacheProgram !== String(prog ?? '');
+  } catch (_) { return false; }
+}
+
+// 种入水合键：PTA 编辑器的可靠水合源是 codingProblem_<id> 本地键（2026-10-15 实测种键→reload→
+// 回带+按钮解锁；2026-11-17 复测仍成立）。boot 现在虽会 GET exam-draft，但拿到的是陈旧缓存值
+// （刚 POST 的新草稿不回带，SPA 挂载同样如此）——本地键是唯一可靠路径，见初探 §10.10。
+// 函数题同键同形状（2026-10-28 真机实证）。形状照抄 PTA 自己写的键（program/testData/saveAt，
+// saveAt 为 ISO 字符串）。批量流程在跳转前现种（startVerifyPhase/advanceVerify），键只提前一个
+// 5s 等待窗口，避免批量种键被 PTA 后续写 user-cache 覆盖。
 export function seedCodingProblemCache(id, program, detail) {
   try {
     const raw = JSON.parse(localStorage.getItem('user-cache') || '{}');
@@ -1071,20 +1079,31 @@ async function answerOne(q, cfg) {
   }
 }
 
-/* ---------- 运行编排：编码题（跨文档续跑 relay） ---------- */
-// PTA 只在「整页装载」时从服务端草稿水合代码；SPA remount 会命中它的内存响应缓存拿旧值
-// （决策实验记录：写草稿→SPA 往返 = 不回带；写草稿→整页 reload = 必回带。见初探 §10.6）。
-// 因此编码题（编程/函数）流转改为 sessionStorage 会话标志 + 逐题整页装载：
-//   collect 文档（收题 → LLM → 写草稿）→ reload 到 verify 文档（水合 → 守护 → dry 撤销/真实提交）
-//   → assign 下一题文档 → … → 最后一题收尾。每个文档由内容脚本重启恢复阶段。
-// 会话标志含运行配置（含 API Key），只在当前标签页存活期内有效，关标签即清。
+/* ---------- 运行编排：编码题（批量作答 v0.12.0） ----------
+ * 三段式：SPA 收题（题型页逐题切，1.8s/题）→ 列表页 k 路并发作答（草稿串行队列）→
+ * 逐题「种本地键 + 整页 reload」水合提交。2026-11-17 真机实验（初探 §10.10）敲定三条铁律：
+ * ① SPA 挂载不回带刚 POST 的草稿（陈旧缓存，stripDraftHttpCache 清不掉）→ 验证必须种本地键 + 整页 reload；
+ * ② SPA 卸载会把当前编辑器内容自动写回服务端草稿 → 作答阶段必须停在无编辑器的列表页，
+ *    任何草稿 POST 都不能发生在「题目挂载中且随后 SPA 切走」的窗口里；
+ * ③ 整页卸载不回写服务端 → verify 页之间的整页导航安全。
+ * 旧「每题两文档 relay」退役；续跑单升到 v2，旧 v1 单 boot 时作废。
+ * 会话单含运行配置（含 API Key），只在当前标签页存活期内有效，关标签即清。
+ */
 
 const RELAY_KEY = '__BPS_AA_PROG_RELAY__';
 function readRelay() {
   try { return JSON.parse(sessionStorage.getItem(RELAY_KEY)) || null; } catch (_) { return null; }
 }
 function writeRelay(r) {
-  try { sessionStorage.setItem(RELAY_KEY, JSON.stringify(r)); return true; } catch (_) { return false; }
+  try {
+    const json = JSON.stringify(r);
+    if (json.length > RELAY_SIZE_LIMIT) {
+      fire({ kind: 'log', level: 'err', text: '续跑单体积超出上限（题面/代码过大），批量作答中止；不会静默截断题面' });
+      return false;
+    }
+    sessionStorage.setItem(RELAY_KEY, json);
+    return true;
+  } catch (_) { return false; }
 }
 function clearRelay() {
   try { sessionStorage.removeItem(RELAY_KEY); } catch (_) {}
@@ -1142,8 +1161,10 @@ async function pacePageLoad(where) {
   await sleep(PAGE_LOAD_WAIT_MS);
 }
 
-// 返回 true 表示已接管（暂停或中止），调用方不要再推进续跑
-function pauseForRateLimit(r, where) {
+// 返回 true 表示已接管（暂停或中止），调用方不要再推进批量流程。
+// 冷却后的重载目标按 phase 决定：collect 回到当前待收题、verify 回到当前待提交题
+// （都是整页导航，boot 后 resumeRelay 按 phase/ci/vi 恢复）；answer 停在列表页原地重载。
+function pauseBatchForRateLimit(r, where) {
   const tries = Number(r.rlTries) || 0;
   if (tries >= RATE_LIMIT_WAITS_MS.length) {
     abortRelay(r, `连续触发 PTA 访问频率限制（${where}），已冷却 ${RATE_LIMIT_WAITS_MS.map(ms => Math.round(ms / 1000)).join(' / ')}s 仍被拒绝；请休息几分钟后重新开始，已完成的题目不会重做`);
@@ -1155,101 +1176,254 @@ function pauseForRateLimit(r, where) {
     abortRelay(r, 'sessionStorage 写入失败，无法记录限流冷却');
     return true;
   }
+  batchPaused = true;
   running = false;
   runAbort = null;
-  fire({ kind: 'log', level: 'warn', text: `PTA 限流（${where}）：等待 ${Math.round(wait / 1000)}s 后重载本题（第 ${tries + 1}/${RATE_LIMIT_WAITS_MS.length} 次）…` });
-  // 不 reload 当前地址：限流页可能已被换成错误页地址，直接回到续跑单里这一题的 URL
-  const prob = r.problems?.[r.pi];
-  const target = prob
-    ? `/problem-sets/${r.psId}/exam/problems/type/${prob.typeId}?problemSetProblemId=${prob.id}`
-    : location.href;
-  setTimeout(() => navigateRelay(target, r, '限流冷却后重载本题'), wait);
+  fire({ kind: 'log', level: 'warn', text: `PTA 限流（${where}）：等待 ${Math.round(wait / 1000)}s 后重载（第 ${tries + 1}/${RATE_LIMIT_WAITS_MS.length} 次）…` });
+  let target = location.href;
+  if (r.phase === 'collect') {
+    const p = r.problems[r.ci];
+    if (p) target = `/problem-sets/${r.psId}/exam/problems/type/${p.typeId}?problemSetProblemId=${p.id}`;
+  } else if (r.phase === 'verify') {
+    const p = r.problems.find(x => x.id === (r.verifyIds || [])[r.vi]);
+    if (p) target = `/problem-sets/${r.psId}/exam/problems/type/${p.typeId}?problemSetProblemId=${p.id}`;
+  }
+  setTimeout(() => navigateRelay(target, r, '限流冷却后重载'), wait);
   return true;
 }
 
-// 编码题流程入口：往 sessionStorage 里放下续跑单，然后整页跳到第一题（收集委托给 boot）。
-// 题目清单用 progTypes 里现成的 ids（handleRun 在各题型页面就绪时当场收的，见彼处注释）——
-// 此处文档已不在各题型页上，不能回头再收。
-function startProgrammingRelay(psId, progTypes, cfg) {
-  const problems = [];
-  for (const t of progTypes) {
-    for (const id of t.ids) problems.push({ id, typeId: t.typeId, typeName: t.typeName });
+/* ---------- 批量·收题（SPA 逐题切，1.8s/题） ---------- */
+
+// 点侧栏「题目总览」的题型链接回到该题型列表页（无编辑器）。收题/收尾阶段在这里卸载编辑器
+// 是安全的：此时尚未写任何新草稿，SPA 卸载回写只会覆盖用户的旧内容（初探 §10.10 铁律②）。
+async function openTypeList(psId, typeId) {
+  const target = `/problem-sets/${psId}/exam/problems/type/${typeId}`;
+  if (!(location.pathname === target && !location.search.includes('problemSetProblemId'))) {
+    const link = [...document.querySelectorAll('a[href]')].find(a => (a.getAttribute('href') || '') === target);
+    if (!link) return false;
+    link.click();
   }
+  for (let i = 0; i < 60; i++) { // ≤6s：等 SPA 渲染出该题型的题目锚点
+    await sleep(100);
+    if (location.pathname === target && !location.search.includes('problemSetProblemId')
+      && programmingIds(psId, typeId).length > 0) return true;
+  }
+  return false;
+}
+
+function clickProblemAnchor(id) {
+  const a = [...document.querySelectorAll('a[href]')]
+    .find(x => (x.getAttribute('href') || '').endsWith(`problemSetProblemId=${id}`));
+  if (!a) return false;
+  a.click();
+  return true;
+}
+
+// 题面就绪特征：常规小节标题，或题号 N-M（英文题面/特殊小节兜底；与 collectCodingProblem 的 label 同源）
+const STATEMENT_READY_RE = /(输入格式|输出格式|输入样例|输出样例|函数接口定义|裁判测试程序|Format|Input|Output|Sample)/i;
+
+// SPA 切题就绪判定：URL 命中 + 答题表单挂载 + 编辑器/按钮读数稳定（沿用 settleEditorState 口径）
+// + 题干文本稳定且含小节特征/题号——防把渲染到一半的题面当完整题干（答错题比漏答严重）。
+async function settleProblemReady(id) {
+  let mounted = false;
+  for (let i = 0; i < 50; i++) { // ≤5s：路由先变、内容后到
+    await sleep(100);
+    if (location.search.includes(`problemSetProblemId=${id}`) && answerFormEl()) { mounted = true; break; }
+  }
+  if (!mounted) return false;
+  if (!(await settleEditorState())) return false;
+  const mainEl = document.querySelector('main');
+  let prev = null;
+  for (let i = 0; i < 30; i++) { // ≤3s：题干两次读数一致才采信
+    await sleep(100);
+    const text = mainEl ? (mainEl.innerText || '') : '';
+    if (text && text === prev && STATEMENT_READY_RE.test(text)) return true;
+    prev = text;
+  }
+  return false;
+}
+
+// SPA 切到题目并等待就绪；已在目标题上（限流冷却/刷新恢复）就不再点锚点。一次未生效重试一次。
+async function switchToProblem(id) {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    if (attempt > 0) await sleep(300);
+    if (!location.search.includes(`problemSetProblemId=${id}`) && !clickProblemAnchor(id)) return false;
+    if (await settleProblemReady(id)) return true;
+  }
+  return false;
+}
+
+async function paceSpaSwitch(where) {
+  fire({ kind: 'log', level: 'info', text: `${where}：等待 ${SPA_SWITCH_WAIT_MS / 1000}s 再切下一题（SPA 切题每次 4 个 API，节奏留余量）…` });
+  await sleep(SPA_SWITCH_WAIT_MS);
+}
+
+// 批量入口：放下 v2 续跑单，然后在本文档内跑完「收题 → 并发作答」，最后跳去第一张 verify 页。
+// handleRun 必须 await 本函数：并发 LLM 的中止信号挂在本次运行的 runAbort 上。
+async function startCodingBatch(psId, progTypes, cfg) {
+  const problems = flattenCodingTypes(progTypes);
   if (!problems.length) throw new Error('「编码题」找不到题目锚点（题目总览收起？点开后重试）');
   const relay = {
-    v: 1,
+    v: RELAY_VERSION,
     cfg: { ...cfg },
     psId,
-    problems,
-    pi: 0,
-    phase: 'collect', // collect → verify →（advance）→ collect → …
+    problems: problems.map(p => ({ ...p, status: undefined })),
+    ci: 0,
+    phase: 'collect',
+    verifyIds: [],
+    vi: 0,
     summary: { applied: 0, skippedAnswered: 0, failed: [] },
+    rlTries: 0,
   };
-  if (!writeRelay(relay)) throw new Error('sessionStorage 不可写，无法跨页续跑编码题');
-  const first = problems[0];
+  if (!writeRelay(relay)) throw new Error('sessionStorage 不可写或续跑单超限，无法批量作答编码题');
   const names = [...new Set(progTypes.map(t => t.typeName))].join('、');
-  fire({ kind: 'log', level: 'info', text: `${names || '编码题'} ${problems.length} 题：转「逐题整页装载」模式（日志跨页保留）` });
-  suppressLeaveConfirm(); // 首次跳题也要压住离开确认（本页可能还有未保存的客观题答案）
-  navigateRelay(`/problem-sets/${psId}/exam/problems/type/${first.typeId}?problemSetProblemId=${first.id}`, relay, '进入第一题');
-  return true;
+  fire({ kind: 'log', level: 'info', text: `${names || '编码题'} ${problems.length} 题：批量模式（收题 → 并发作答 → 逐题提交，日志跨页保留）` });
+  suppressLeaveConfirm(); // 收题期间的 SPA 切换也要压住离开确认（本页可能还有未保存的客观题答案）
+  batchPaused = false;
+  batchAborted = false;
+  batchFatal = null;
+  batchPrevText = ''; // 新一轮从空比对基准开始（沿用上一轮的文本会误判「与上一题相同」）
+  await runCollectPhase(relay);
+  // runCollectPhase 返回时：要么已跳去 verify（续跑单 phase=verify，文档即将卸载），要么
+  // 在本文档内结束/中止/失败/限流挂起——结果事件都由引擎自己发过，这里只交回结果标志。
+  const rr = readRelay();
+  return {
+    handedOff: !!(rr && rr.phase === 'verify'),
+    paused: batchPaused,
+    aborted: batchAborted,
+    error: batchFatal,
+  };
 }
 
-// boot 后由 init 调用：存在续跑单就按阶段恢复（总开关仍要开着）
-export async function resumeRelay(settings) {
-  const r = readRelay();
-  if (!r || r.v !== 1) return;
-  if (!(settings && settings.autoAnswer)) {
-    clearRelay();
-    fire({ kind: 'log', level: 'warn', text: '编码题续跑取消：总开关未开启' });
-    return;
-  }
-  if (r.aborted) { // 上一页已按用户要求中止（中止写入续跑单后才翻页的残单）：就地作废
-    clearRelay();
-    fire({ kind: 'log', level: 'warn', text: '编码题续跑已中止（按你的要求停止）' });
-    fire({ kind: 'state', running: false, error: '已中止' });
-    return;
-  }
-  const prob = r.problems[r.pi];
-  if (!prob) {
-    clearRelay();
-    fire({ kind: 'log', level: 'warn', text: '编码题续跑取消：续跑单已越界' });
-    return;
-  }
-  // 限流页可能被 PTA 换成别的地址/错误页：先识别再校验 URL，避免把限流误判成「用户导航走了」而弃单
-  if (rateLimitedNow()) { pauseForRateLimit(r, '页面加载'); return; }
-  if (!new RegExp(`problemSetProblemId=${prob.id}$`).test(location.search)) {
-    // 用户把页面开去了别处 → 弃单（已落位的题目保持各自状态）
-    clearRelay();
-    fire({ kind: 'log', level: 'warn', text: '编码题续跑取消：页面不在 ' + (prob.id || '').slice(-4) + ' 上（已落位题目保持各自状态）' });
-    return;
-  }
-  running = true;
-  runAbort = new AbortController(); // 续跑页也挂终止信号，面板的中止按钮每页都有效
-  suppressLeaveConfirm();
-  fire({ kind: 'state', running: true });
-  // 每页的进页日志：跨页日志已持久化（见 readPersistedLog），这里只立坐标；
-  // 历史日志丢了（用户手动清空）才回放失败清单兜底
-  const hadHistory = readPersistedLog().length > 0;
-  fire({ kind: 'log', level: 'info', text: `编码题续跑（第 ${r.pi + 1}/${r.problems.length} 题，${r.phase === 'verify' ? '水合校验/提交' : '收集作答'}阶段）` });
-  if (r.summary.failed.length && !hadHistory) {
-    fire({ kind: 'log', level: 'warn', text: `此前已失败 ${r.summary.failed.length} 题：\n${failDetails(r.summary.failed)}` });
-  }
+// 上一题的题干文本（收题新鲜度比对用）；跨页恢复后为空（URL id 校验兜底）
+let batchPrevText = '';
+// 批量结果标志（handleRun 据此决定是否重复发结果事件 / 是否恢复离开确认）：
+// 引擎自己会发终止/结束事件，handleRun 只补「跨页推进」的坐标行。
+let batchPaused = false;   // 限流冷却挂起：稍后由 setTimeout 导航恢复
+let batchAborted = false;  // 用户中止（stopBatchByUser）
+let batchFatal = null;     // 致命错误原因（abortRelay）
+
+// 收题阶段：SPA 逐题切 → 收题面/语言/已答态 → 分类入单。任何草稿 POST 都不发生在这里。
+async function runCollectPhase(r) {
   try {
-    stripDraftHttpCache(prob.id); // PAT 旧响应会伪造「已答」/旧代码，挂载读值前先剥
-    if (r.phase === 'verify') {
-      await relayVerify(r, prob);
-    } else {
-      await settleEditorState();
-      await relayCollect(r, prob);
+    while (r.ci < r.problems.length) {
+      if (userStopped(r)) { stopBatchByUser(r); return; }
+      const p = r.problems[r.ci];
+      if (rateLimitedNow()) { pauseBatchForRateLimit(r, '收题'); return; }
+      // 不在目标题上：先回该题型列表页（限流页可能顶掉了列表页，识别先于报错）
+      if (!location.search.includes(`problemSetProblemId=${p.id}`)) {
+        const okList = await openTypeList(r.psId, p.typeId);
+        if (!okList) {
+          if (rateLimitedNow()) { pauseBatchForRateLimit(r, '收题'); return; }
+          relayRecordFail(r, p, null, `回不到「${p.typeName}」列表页（题目总览收起或页面异常）`);
+          r.ci += 1;
+          continue;
+        }
+        await paceSpaSwitch('切换题型');
+      }
+      const switched = await switchToProblem(p.id);
+      const q = switched ? collectCodingProblem() : null;
+      const fresh = q ? isFreshStatement(batchPrevText, q, p.id) : { ok: false, reason: '页面未就绪' };
+      if (!switched || !q || !fresh.ok) {
+        if (rateLimitedNow()) { pauseBatchForRateLimit(r, '收题'); return; }
+        relayRecordFail(r, p, null, `收题失败：${q ? fresh.reason : '页面未就绪（切题未生效或编辑器未挂载）'}`);
+        r.ci += 1;
+        continue;
+      }
+      const cls = classifyProblem(q, r.cfg);
+      Object.assign(p, {
+        label: q.label || p.id.slice(-4),
+        kind: q.kind,
+        text: q.text,
+        langLabel: q.langLabel,
+        hasImg: q.hasImg,
+        status: cls.status,
+      });
+      if (q.hasImg) fire({ kind: 'log', level: 'warn', text: `${p.label}：题干含图片，编码题暂不支持图片输入，仅按文字题面作答` });
+      if (cls.status === 'skipped') {
+        r.summary.skippedAnswered += 1;
+        fire({ kind: 'log', level: 'info', text: `${p.label}：跳过，已作答` });
+      } else {
+        fire({ kind: 'log', level: 'info', text: `收题 ${r.ci + 1}/${r.problems.length}：${p.label}（${p.typeName}）` });
+      }
+      batchPrevText = q.text;
+      r.ci += 1;
+      if (!writeRelay(r)) { abortRelay(r, 'sessionStorage 写入失败'); return; }
+      if (r.ci < r.problems.length) await paceSpaSwitch('收题');
     }
+    // 收题完成 → 回列表页卸载编辑器（此处还没写过任何新草稿，SPA 卸载回写无害）
+    const lastType = r.problems[r.problems.length - 1].typeId;
+    if (!(await openTypeList(r.psId, lastType))) {
+      if (rateLimitedNow()) { pauseBatchForRateLimit(r, '收题收尾'); return; }
+      abortRelay(r, '收题后回不到题目列表页（SPA 未响应），请重试');
+      return;
+    }
+    r.phase = 'answer';
+    if (!writeRelay(r)) { abortRelay(r, 'sessionStorage 写入失败'); return; }
+    await runAnswerPhase(r);
   } catch (err) {
     abortRelay(r, err?.message || String(err));
   }
 }
 
-// 失败明细的纯函数（failDetails，单测覆盖）：label 缺省回退服务端题 id 后四位
-export function failDetails(failed) {
-  return (failed || []).map(f => `${f.label || (f.id || '').slice(-4)}：${f.reason}`).join('\n');
+// boot 后由 init 调用：存在批量续跑单就按阶段恢复（总开关仍要开着）。
+// 限流页可能被 PTA 换成别的地址/错误页：先识别再校验 URL，避免把限流误判成「用户导航走了」而弃单。
+export async function resumeRelay(settings) {
+  const r = readRelay();
+  if (!r) return;
+  if (r.v !== RELAY_VERSION) { // v1 旧单（每题两文档 relay）：协议已退役，就地作废
+    clearRelay();
+    fire({ kind: 'log', level: 'warn', text: '检测到旧版编码题续跑单（v1），已作废；请重新开始答题' });
+    return;
+  }
+  if (!(settings && settings.autoAnswer)) {
+    clearRelay();
+    fire({ kind: 'log', level: 'warn', text: '编码题批量作答取消：总开关未开启' });
+    return;
+  }
+  if (r.aborted) { // 上一页已按用户要求中止（中止写入续跑单后才翻页的残单）：就地作废
+    clearRelay();
+    fire({ kind: 'log', level: 'warn', text: '编码题批量作答已中止（按你的要求停止）' });
+    fire({ kind: 'state', running: false, error: '已中止' });
+    return;
+  }
+  if (rateLimitedNow()) { pauseBatchForRateLimit(r, '页面加载'); return; }
+  const act = resumeAction(r, { pathname: location.pathname, search: location.search });
+  if (act.action === 'clear') {
+    clearRelay();
+    fire({ kind: 'log', level: 'warn', text: '编码题批量作答取消：' + act.reason });
+    return;
+  }
+  running = true;
+  runAbort = new AbortController(); // 每张恢复页都挂终止信号，面板的中止按钮每页都有效
+  suppressLeaveConfirm();
+  fire({ kind: 'state', running: true });
+  // 每页的进页日志：跨页日志已持久化（见 readPersistedLog），这里只立坐标；
+  // 历史日志丢了（用户手动清空）才回放失败清单兜底
+  const hadHistory = readPersistedLog().length > 0;
+  const phaseText = { collect: '收题', answer: '并发作答', verify: '水合提交' }[r.phase] || r.phase;
+  fire({ kind: 'log', level: 'info', text: `编码题批量作答恢复（${phaseText}阶段）` });
+  if (r.summary.failed.length && !hadHistory) {
+    fire({ kind: 'log', level: 'warn', text: `此前已失败 ${r.summary.failed.length} 题：\n${failDetails(r.summary.failed)}` });
+  }
+  try {
+    if (act.action === 'collect') {
+      await runCollectPhase(r); // 可能正停在待收题的题目页（限流冷却/刷新恢复），runCollectPhase 内部处理
+    } else if (act.action === 'answer') {
+      await runAnswerPhase(r);
+    } else if (act.action === 'verify') {
+      await verifyCurrent(r);
+    } else if (act.action === 'seedVerify') { // 刷新停在列表页：种当前待提交题的键再跳过去
+      if (seedVerifyProblem(r) && writeRelay(r)) {
+        running = false;
+        await pacePageLoad('恢复待提交题');
+        if (userStopped(r)) { stopBatchByUser(r); return; }
+        navigateRelay(verifyUrl(r, r.verifyIds[r.vi]), r, '恢复待提交题');
+      }
+    }
+  } catch (err) {
+    abortRelay(r, err?.message || String(err));
+  }
 }
 
 export function relaySummaryLine(r) {
@@ -1267,8 +1441,9 @@ function relayRecordFail(r, prob, label, reason) {
 }
 
 function abortRelay(r, reason) {
+  batchFatal = reason;
   clearRelay();
-  fire({ kind: 'log', level: 'err', text: '编码题续跑中止：' + reason });
+  fire({ kind: 'log', level: 'err', text: '编码题批量作答中止：' + reason });
   fire({ kind: 'log', level: 'info', text: relaySummaryLine(r) });
   fire({ kind: 'state', running: false, error: reason });
   running = false;
@@ -1276,192 +1451,248 @@ function abortRelay(r, reason) {
   restoreLeaveConfirm();
 }
 
-// 用户中止（跨页续跑）：不再翻页，就地收摊；已落位题目保持各自状态（草稿/提交不动）
-function stopRelayByUser(r) {
+/* ---------- 批量·作答（列表页，k 路并发 + 草稿串行队列） ---------- */
+
+// 草稿写入必须串行：pacedDraftPost 的 2.2s 间距靠模块级时间戳，并发调用会同时穿透。
+// 队列保证同一时刻只有一个 POST 在飞（重试也整段排队），完成后 Tail 前移。
+let draftTail = Promise.resolve();
+function saveDraftQueued(pspId, kind, detail, compilerId, program) {
+  const run = draftTail.then(
+    () => saveDraft(pspId, kind, detail, compilerId, program),
+    () => saveDraft(pspId, kind, detail, compilerId, program),
+  );
+  draftTail = run.then(() => undefined, () => undefined);
+  return run;
+}
+
+// 作答阶段：停在没有编辑器的列表页，k 路并发请求模型，草稿写入走串行队列。
+// 此处绝不发生页面导航——SPA 卸载会把编辑器内容回写服务端草稿（初探 §10.10 铁律②）。
+async function runAnswerPhase(r) {
+  try {
+    // pending 之外还要捡回 'answering'：上一文档刷新/崩溃时在途请求随文档销毁，
+    // 这些题既不是 answered 也不是 failed，不重跑就会被静默丢掉
+    const pending = r.problems.filter(p => p.status === 'pending' || p.status === 'answering');
+    for (const p of pending) p.status = 'pending';
+    if (!pending.length) { await startVerifyPhase(r); return; }
+    const k = clampConcurrency(r.cfg.concurrency, pending.length);
+    fire({ kind: 'log', level: 'info', text: `并发作答 ${pending.length} 题（${k} 路同时请求，${r.cfg.model || '未知模型'}）` });
+    await runPool(pending, k, async p => {
+      if (userStopped(r)) return;
+      p.status = 'answering';
+      fire({ kind: 'log', level: 'info', text: `${p.label}：请求模型中…（${r.cfg.model || '未知模型'}）` }); // await 期间的事件流在场日志
+      // 严格读草稿快照：拿不到就不写草稿，防止 customTestData 被空值覆盖
+      const snap = await getDraftDetailStrict(p.id);
+      if (!snap.ok) {
+        relayRecordFail(r, p, p.label, `草稿快照读取失败（${snap.error}），为保护自定义测试数据不写入`);
+        p.status = 'failed';
+        return;
+      }
+      p.detail = slimDraftDetail(snap.detail, p.id);
+      // 用户未保存输入保护：本地键与草稿不一致（瘦身前用原始快照比对），未开覆盖就保守跳过
+      if (!r.cfg.overwrite && localInputDiffers(p.id, snap.detail)) {
+        r.summary.skippedAnswered += 1;
+        p.status = 'skipped';
+        fire({ kind: 'log', level: 'warn', text: `${p.label}：本地存在未保存的手敲代码（与服务端草稿不一致），已保守跳过不覆盖` });
+        return;
+      }
+      const picked = pickCompiler(p, p.detail, r.cfg, {
+        labelFor: id => COMPILER_LABELS[id] || '',
+        compilerIdFromLabel,
+      });
+      if (!picked.ok) {
+        relayRecordFail(r, p, p.label, picked.reason);
+        p.status = 'failed';
+        return;
+      }
+      p.compilerId = picked.compilerId;
+      p.wantLangLabel = picked.wantLangLabel;
+      const messages = buildPrompt({ ...p, langLabel: p.wantLangLabel || p.langLabel || '' });
+      let raw = null;
+      try {
+        raw = globalThis.__BPS_LLM_MOCK__
+          ? await globalThis.__BPS_LLM_MOCK__(messages)
+          : await chatWithRetry(r.cfg, messages, { label: p.label });
+      } catch (err) {
+        if (userStopped(r)) return; // 中止来的失败不算题目的失败，别记假账
+        relayRecordFail(r, p, p.label, 'LLM 调用失败：' + (err?.message || err));
+        p.status = 'failed';
+        return;
+      }
+      const code = parseCodeAnswer(raw);
+      if (!code) {
+        relayRecordFail(r, p, p.label, 'LLM 输出解析不出代码：' + String(raw).slice(0, 60));
+        p.status = 'failed';
+        return;
+      }
+      if (code.length > 16384) {
+        relayRecordFail(r, p, p.label, `代码超长（${code.length} 字符，平台限 16KB）`);
+        p.status = 'failed';
+        return;
+      }
+      const written = await saveDraftQueued(p.id, p.kind, p.detail, p.compilerId, code);
+      if (!written.ok) {
+        relayRecordFail(r, p, p.label, `草稿写入失败（HTTP ${written.status ?? '未知'}${written.err ? '：' + written.err : ''}）`);
+        p.status = 'failed';
+        return;
+      }
+      stripDraftHttpCache(p.id);
+      p.code = code;
+      p.status = 'answered';
+      fire({ kind: 'log', level: 'ok', text: `${p.label}：草稿已写入（${code.length} 字符），待逐题水合提交` });
+    }, () => userStopped(r));
+    if (userStopped(r)) { stopBatchByUser(r); return; }
+    if (!writeRelay(r)) { abortRelay(r, 'sessionStorage 写入失败'); return; }
+    await startVerifyPhase(r);
+  } catch (err) {
+    abortRelay(r, err?.message || String(err));
+  }
+}
+
+/* ---------- 批量·提交（种本地键 + 整页 reload，逐题推进） ---------- */
+
+function verifyUrl(r, id) {
+  const p = r.problems.find(x => x.id === id);
+  return p
+    ? `/problem-sets/${r.psId}/exam/problems/type/${p.typeId}?problemSetProblemId=${p.id}`
+    : location.href;
+}
+
+// 种当前待提交题的水合键；种子失败记失败跳下一题，全部失败就地收尾。
+// 返回 false 表示已收尾/无可提交题，调用方不要再导航。
+function seedVerifyProblem(r) {
+  for (;;) {
+    const id = (r.verifyIds || [])[r.vi];
+    if (!id) { finishBatch(r); return false; }
+    const p = r.problems.find(x => x.id === id);
+    const seeded = seedCodingProblemCache(id, p.code, p.detail);
+    if (seeded.seeded) return true;
+    relayRecordFail(r, p, p.label, '水合键写入失败' + (seeded.err ? '：' + seeded.err : ''));
+    p.status = 'failed';
+    r.vi += 1;
+  }
+}
+
+// 进入提交阶段：先种第一题的键，再整页跳过去（水合是 PTA 自己 boot 干的，键必须先于页面存在）
+async function startVerifyPhase(r) {
+  r.verifyIds = buildVerifyPlan(r.problems);
+  r.vi = 0;
+  if (!r.verifyIds.length) { finishBatch(r); return; }
+  r.phase = 'verify';
+  fire({ kind: 'log', level: 'info', text: `作答完成：${r.verifyIds.length} 题待提交（逐题种键 + 整页水合）` });
+  if (!seedVerifyProblem(r)) return;
+  if (!writeRelay(r)) { abortRelay(r, 'sessionStorage 写入失败'); return; }
+  running = false; // 文档即将卸载，复位标记避免残留运行态
+  await pacePageLoad('切到第一道待提交题');
+  if (userStopped(r)) { stopBatchByUser(r); return; }
+  navigateRelay(verifyUrl(r, r.verifyIds[r.vi]), r, '进入第一道待提交题');
+}
+
+// 推进：记账 + 进度 + 中止检查 + 种下一题的键（就在当前页种，只提前一个 5s 等待窗口）+ 整页跳转
+async function advanceVerify(r) {
+  r.rlTries = 0; // 能走到推进 = 不是限流页：下次限流重新从 60s 冷却开始
+  fire({ kind: 'progress', done: r.vi + 1, total: r.verifyIds.length });
+  if (userStopped(r)) { stopBatchByUser(r); return; }
+  r.vi += 1;
+  if (r.vi >= r.verifyIds.length) { finishBatch(r); return; }
+  if (!seedVerifyProblem(r)) return;
+  if (!writeRelay(r)) { abortRelay(r, 'sessionStorage 写入失败'); return; }
+  running = false;
+  await pacePageLoad('切到下一道待提交题');
+  if (userStopped(r)) { stopBatchByUser(r); return; }
+  navigateRelay(verifyUrl(r, r.verifyIds[r.vi]), r, '切到下一道待提交题');
+}
+
+function finishBatch(r) {
+  const line = relaySummaryLine(r);
+  try { sessionStorage.setItem('__BPS_AA_SUMMARY_DONE__', JSON.stringify({ ok: !r.summary.failed.length, line, failed: r.summary.failed })); } catch (_) {}
   clearRelay();
   running = false;
   runAbort = null;
   restoreLeaveConfirm();
-  fire({ kind: 'log', level: 'warn', text: '已中止：编码题续跑按你的要求停止' });
+  const lvl = r.summary.failed.length ? 'warn' : 'ok';
+  fire({ kind: 'log', level: lvl, text: '编码题批量作答结束：' + line });
+  fire({ kind: 'state', running: false });
+}
+
+// 用户中止：就地收摊；已写入的草稿/已提交的题目保持各自状态
+function stopBatchByUser(r) {
+  batchAborted = true;
+  clearRelay();
+  running = false;
+  runAbort = null;
+  restoreLeaveConfirm();
+  fire({ kind: 'log', level: 'warn', text: '已中止：编码题批量作答按你的要求停止' });
   fire({ kind: 'log', level: 'info', text: relaySummaryLine(r) });
   fire({ kind: 'state', running: false, error: '已中止' });
 }
 
-// 推进到下一题（record: 'ok'|'skip'|'fail'——fail 的失败条目由调用方写好）；最后一题收尾
-async function relayNext(r, record, text) {
-  r.rlTries = 0; // 能走到这里说明不是限流页：下一次限流重新从 60s 冷却开始
-  if (record === 'ok') {
-    r.summary.applied += 1;
-    if (text) fire({ kind: 'log', level: 'ok', text });
-  }
-  if (record === 'skip') {
-    r.summary.skippedAnswered += 1;
-    if (text) fire({ kind: 'log', level: 'info', text });
-  }
-  // 进度随球：此刻 r.pi 指刚完成的那题，pi+1 = 已完成数（收尾分支 pi 也停在最后一题位）
-  fire({ kind: 'progress', done: r.pi + 1, total: r.problems.length });
-  // 用户已请求中止：不再翻页，就地收摊（记账已先行，刚完成的题计入汇总）
-  if (userStopped(r)) { stopRelayByUser(r); return; }
-  const nextIdx = r.pi + 1;
-  if (nextIdx >= r.problems.length) {
-    const line = relaySummaryLine(r);
-    try { sessionStorage.setItem('__BPS_AA_SUMMARY_DONE__', JSON.stringify({ ok: !r.summary.failed.length, line, failed: r.summary.failed })); } catch (_) {}
-    clearRelay();
-    running = false;
-    runAbort = null;
-    restoreLeaveConfirm();
-    const lvl = r.summary.failed.length ? 'warn' : 'ok';
-    fire({ kind: 'log', level: lvl, text: '编码题跨页续跑结束：' + line });
-    fire({ kind: 'state', running: false });
-    return;
-  }
-  r.pi = nextIdx;
-  r.phase = 'collect'; // 下一题重新从 collect 开始（否则带着上一题的 verify 状态/hint 会误杀）
-  r.hint = null;       // hint 必须由下一题的 collect 重写，不能复用上一题的（head/草稿都不属于本题）
-  const next = r.problems[r.pi];
-  await prepNextProblemCache(next.id); // PAT 剥离在函数内会一起做；不一致缓存保留（用户代码签名）
-  if (!writeRelay(r)) { abortRelay(r, 'sessionStorage 写入失败'); return; }
-  running = false;
-  await pacePageLoad('切换下一题');
-  navigateRelay(`/problem-sets/${r.psId}/exam/problems/type/${next.typeId}?problemSetProblemId=${next.id}`, r, '切换下一题');
-}
-
-// collect 文档：收题 → 守护 → LLM → 写草稿 → 转 verify（整页 reload）
-async function relayCollect(r, prob) {
-  const q = collectCodingProblem();
-  if (!q) {
-    if (rateLimitedNow()) { pauseForRateLimit(r, '收集题目'); return; }
-    relayRecordFail(r, prob, null, '编码题页面收不到题目');
-    return relayNext(r, 'fail');
-  }
-  r.rlTries = 0; // 真实题目页已打开：限流冷却计数清零
-  const label = q.label || prob.id.slice(-4);
-  if (q.answered && !r.cfg.overwrite) return relayNext(r, 'skip', `${label}：跳过，已作答`);
-  // 编码题的视觉链路未接（取图与带图消息组装只做在客观题上）：含图题照常按文字题面
-  // 作答并提交，只在日志写明这一局限，避免用户以为模型看过图。
-  if (q.hasImg) fire({ kind: 'log', level: 'warn', text: `${label}：题干含图片，编码题暂不支持图片输入，仅按文字题面作答` });
-
-  const detail = await getDraftDetail(prob.id);
-  let compilerId = null;
-  let wantLangLabel = '';
-  if (q.kind !== 'CODE_COMPLETION') {
-    // 编程题需要确定编译器（草稿带 compiler 字段）；函数题编译器由题目固定，草稿无此字段
-    compilerId = r.cfg.language
-      ? r.cfg.language
-      : (compilerIdFromLabel(q.langLabel) || (detail?.programmingSubmissionDetail?.compiler || null));
-    if (!compilerId) {
-      relayRecordFail(r, prob, label, `读不到当前语言「${q.langLabel || '（空）'}」，无法确定编译器`);
-      return relayNext(r, 'fail');
-    }
-    wantLangLabel = COMPILER_LABELS[compilerId] || q.langLabel || '';
-  }
-
-  const messages = buildPrompt({ ...q, langLabel: wantLangLabel || q.langLabel || '' });
-  let raw = null;
-  fire({ kind: 'log', level: 'info', text: `${label}：请求模型中…（${r.cfg.model || '未知模型'}）` }); // await 期间的事件流在场日志
-  try {
-    raw = globalThis.__BPS_LLM_MOCK__
-      ? await globalThis.__BPS_LLM_MOCK__(messages)
-      : await chatWithRetry(r.cfg, messages, { label });
-  } catch (err) {
-    if (userStopped(r)) { stopRelayByUser(r); return; } // 中止来的失败不算题目的失败，别记假账
-    relayRecordFail(r, prob, label, 'LLM 调用失败：' + (err?.message || err));
-    return relayNext(r, 'fail');
-  }
-  const code = parseCodeAnswer(raw);
-  if (!code) {
-    relayRecordFail(r, prob, label, 'LLM 输出解析不出代码：' + String(raw).slice(0, 60));
-    return relayNext(r, 'fail');
-  }
-  if (code.length > 16384) {
-    relayRecordFail(r, prob, label, `代码超长（${code.length} 字符，平台限 16KB）`);
-    return relayNext(r, 'fail');
-  }
-
-  const written = await saveDraft(prob.id, q.kind, detail, compilerId, code);
-  if (!written.ok) {
-    if (rateLimitedNow()) { pauseForRateLimit(r, '写草稿'); return; }
-    relayRecordFail(r, prob, label, `草稿写入失败（HTTP ${written.status ?? '未知'}${written.err ? '：' + written.err : ''}）`);
-    return relayNext(r, 'fail');
-  }
-  stripDraftHttpCache(prob.id);
-  // 服务端草稿已不参与 boot 水合（2026-10-15 实测），清键改为种键：verify 文档 boot 从该键
-  // 回带本题代码。种入失败则 verify 必挂水合校验，这里直接记失败不翻页白耗一轮。
-  const seeded = seedCodingProblemCache(prob.id, code, detail);
-  if (!seeded.seeded) {
-    relayRecordFail(r, prob, label, '水合键写入失败' + (seeded.err ? '：' + seeded.err : ''));
-    return relayNext(r, 'fail');
-  }
-  r.phase = 'verify';
-  r.hint = { label, kind: q.kind, compilerId, wantLangLabel, head: (code.split('\n')[0] || '').trim().slice(0, 24), detail };
-  if (!writeRelay(r)) { abortRelay(r, 'sessionStorage 写入失败'); return; }
-  running = false; // 文档马上销毁，复位标记避免残留运行态
-  await pacePageLoad('提交草稿后校验');
-  try { location.reload(); } catch (_) { /* 交浏览器 */ }
-}
-
-// verify 文档：水合探测 → 语言守护（仅编程题） → dry 撤销 / 点「提交本题作答」→ 推进下一题（或收尾）
-async function relayVerify(r, prob) {
-  const hint = r.hint;
-  if (!hint || !hint.head) { abortRelay(r, 'verify 阶段缺少 hint（replay 状态错乱）'); return; }
-  if (rateLimitedNow()) { pauseForRateLimit(r, '水合校验'); return; }
-  const label = hint.label || prob.id.slice(-4);
-  const kind = hint.kind || 'PROGRAMMING'; // 旧续跑单没有 kind 字段：只可能是编程题
-  const wantLangLabel = hint.wantLangLabel || '';
-  const compilerId = hint.compilerId;
-  const head = String(hint.head || '').trim();
-  const detail = hint.detail || null;
-
+// verify 页：水合探测 → 语言守护（仅编程题） → dry 撤销 / 点「提交本题作答」→ 种下一题的键并整页跳转。
+// 键由上一张页面种好（只提前一个 5s 等待窗口），本页 boot 直接回带代码、按钮解锁。
+async function verifyCurrent(r) {
+  const id = (r.verifyIds || [])[r.vi];
+  const p = r.problems.find(x => x.id === id);
+  if (!p || !p.code) { abortRelay(r, 'verify 阶段找不到待提交题（续跑单状态错乱）'); return; }
+  if (rateLimitedNow()) { pauseBatchForRateLimit(r, '水合校验'); return; }
   const hyd = await waitHydrate(true);
   const cmText = editableCm()?.textContent || '';
+  const head = String(p.code.split('\n')[0] || '').trim().slice(0, 24);
   if (!hyd.ok || (head && !cmText.includes(head))) {
-    if (rateLimitedNow()) { pauseForRateLimit(r, '水合校验'); return; }
-    const rollback = await saveDraft(prob.id, kind, detail, compilerId, '');
-    stripDraftHttpCache(prob.id);
-    clearCodingProblemCache(prob.id);
-    relayRecordFail(r, prob, label, '水合校验失败（编辑器未回带代码）' + (rollback.ok ? '，草稿已撤销' : '，草稿残留需人工核对'));
-    if (!rollback.ok) return abortRelay(r, '草稿撤销失败（残留代码），需人工核对后再试');
-    return relayNext(r, 'fail');
+    if (rateLimitedNow()) { pauseBatchForRateLimit(r, '水合校验'); return; }
+    const rollback = await saveDraftQueued(p.id, p.kind, p.detail, p.compilerId, '');
+    stripDraftHttpCache(p.id);
+    clearCodingProblemCache(p.id);
+    relayRecordFail(r, p, p.label, '水合校验失败（编辑器未回带代码）' + (rollback.ok ? '，草稿已撤销' : '，草稿残留需人工核对'));
+    if (!rollback.ok) { abortRelay(r, '草稿撤销失败（残留代码），需人工核对后再试'); return; }
+    p.status = 'failed';
+    return advanceVerify(r);
   }
   r.rlTries = 0; // 水合通过 = 真实题目页，限流冷却计数清零
 
   // 语言一致性守卫（仅编程题）：实挂语言 != 代码语言时不提交（提交载荷的 compiler 由页面
   // 默认链决定，可能不理会草稿 compiler——不能拿错配代码冒险）。函数题的编译器由题目固定、
   // 草稿不带 compiler 字段，不存在错配，直接跳过。
-  if (kind !== 'CODE_COMPLETION') {
+  if (p.kind !== 'CODE_COMPLETION') {
     const mountedLabel = langLabelOf();
-    if (mountedLabel !== wantLangLabel) {
-      const rollback = await saveDraft(prob.id, kind, detail, compilerId, '');
-      stripDraftHttpCache(prob.id);
-      clearCodingProblemCache(prob.id);
-      relayRecordFail(r, prob, label, `语言不一致（草稿 ${wantLangLabel}，实挂「${mountedLabel || '未知'}」），已弃答防错配` + (rollback.ok ? '，草稿已撤销' : '，草稿残留需人工核对'));
-      if (!rollback.ok) return abortRelay(r, '草稿撤销失败（残留代码），需人工核对后再试');
-      return relayNext(r, 'fail');
+    if (mountedLabel !== p.wantLangLabel) {
+      const rollback = await saveDraftQueued(p.id, p.kind, p.detail, p.compilerId, '');
+      stripDraftHttpCache(p.id);
+      clearCodingProblemCache(p.id);
+      relayRecordFail(r, p, p.label, `语言不一致（草稿 ${p.wantLangLabel}，实挂「${mountedLabel || '未知'}」），已弃答防错配` + (rollback.ok ? '，草稿已撤销' : '，草稿残留需人工核对'));
+      if (!rollback.ok) { abortRelay(r, '草稿撤销失败（残留代码），需人工核对后再试'); return; }
+      p.status = 'failed';
+      return advanceVerify(r);
     }
   }
 
   if (r.cfg.drySave) {
-    const rollback = await saveDraft(prob.id, kind, detail, compilerId, '');
-    stripDraftHttpCache(prob.id);
-    clearCodingProblemCache(prob.id);
-    if (!rollback.ok) return abortRelay(r, 'dry：水合校验通过后撤销草稿失败，残留需人工核对');
-    return relayNext(r, 'ok', `${label} → ${head}…（dry：草稿水合校验通过后已撤销，未提交）`);
+    const rollback = await saveDraftQueued(p.id, p.kind, p.detail, p.compilerId, '');
+    stripDraftHttpCache(p.id);
+    clearCodingProblemCache(p.id);
+    if (!rollback.ok) { abortRelay(r, 'dry：水合校验通过后撤销草稿失败，残留需人工核对'); return; }
+    p.status = 'submitted'; // dry 也算走完流程（汇总仍标注未提交）
+    r.summary.applied += 1;
+    fire({ kind: 'log', level: 'ok', text: `${p.label} → ${head}…（dry：草稿水合校验通过后已撤销，未提交）` });
+    return advanceVerify(r);
   }
 
   // 中止检查必须卡在真实评测提交之前：提交即写提交记录，不能替用户「再补一枪」
-  if (userStopped(r)) { stopRelayByUser(r); return; }
+  if (userStopped(r)) { stopBatchByUser(r); return; }
   const saved = await submitProgramming();
   if (!saved.saved || rateLimitedNow()) {
     // 限流页可能替换在提交之后：不记账、不回滚草稿，冷却后重载本题再试
-    if (rateLimitedNow()) { pauseForRateLimit(r, '提交评测'); return; }
-    const rollback = await saveDraft(prob.id, kind, detail, compilerId, '');
-    stripDraftHttpCache(prob.id);
-    clearCodingProblemCache(prob.id);
-    relayRecordFail(r, prob, label, '提交失败：' + saved.reason + (rollback.ok ? '，草稿已撤销' : '，草稿残留含本次代码，需人工核对'));
-    if (!rollback.ok) return abortRelay(r, '草稿撤销失败（残留代码），需人工核对后再试');
-    return relayNext(r, 'fail');
+    if (rateLimitedNow()) { pauseBatchForRateLimit(r, '提交评测'); return; }
+    const rollback = await saveDraftQueued(p.id, p.kind, p.detail, p.compilerId, '');
+    stripDraftHttpCache(p.id);
+    clearCodingProblemCache(p.id);
+    relayRecordFail(r, p, p.label, '提交失败：' + saved.reason + (rollback.ok ? '，草稿已撤销' : '，草稿残留含本次代码，需人工核对'));
+    if (!rollback.ok) { abortRelay(r, '草稿撤销失败（残留代码），需人工核对后再试'); return; }
+    p.status = 'failed';
+    return advanceVerify(r);
   }
-  return relayNext(r, 'ok', `${label} → ${head}…（已提交评测）`);
+  p.status = 'submitted';
+  r.summary.applied += 1;
+  fire({ kind: 'log', level: 'ok', text: `${p.label} → ${head}…（已提交评测）` });
+  return advanceVerify(r);
 }
 
 /* ---------- 运行编排 ---------- */
@@ -1512,9 +1743,9 @@ export function isRunning() {
   return running;
 }
 
-// 请求中止：本页在跑就拉响终止信号（在途 fetch 立断、worker 停拉新题，已填答案所在页
-// 照常保存）；编程题跨页续跑滚动中时（哪怕本页还没接上）把中止写进续跑单，
-// 由本页 relayNext 就地收摊、或下一页 boot 直接作废残单。返回是否受理。
+// 请求中止：本页在跑就拉响终止信号（在途 fetch 立断、并发 worker 停拉新题，已填答案所在页
+// 照常保存）；编码题批量作答滚动中时（哪怕本页还没接上）把中止写进续跑单，
+// 由本页就地收摊、或下一页 boot 直接作废残单。返回是否受理。
 export function abortRun() {
   const r = readRelay();
   if (running && runAbort) {
@@ -1601,9 +1832,9 @@ export async function handleRun(config = {}) {
   if (running) { fire({ kind: 'log', level: 'warn', text: '已有一次答题在运行中' }); return { ok: false, error: '已有一次答题在运行中' }; }
   const preRelay = readRelay();
   if (preRelay && !preRelay.aborted) {
-    // 编码题跨页续跑滚动中（每页由 boot 的 resumeRelay 恢复阶段）；该页不在题目页时续跑已弃单
-    fire({ kind: 'log', level: 'warn', text: '编码题跨页续跑正在进行（看各页悬浮球状态）；本页若已不在题目上则续跑会自行取消' });
-    return { ok: false, error: '编码题跨页续跑正在进行' };
+    // 编码题批量作答进行中（各页由 boot 的 resumeRelay 恢复阶段）；页面漂移时续跑会自行弃单
+    fire({ kind: 'log', level: 'warn', text: '编码题批量作答正在进行（看悬浮球/日志状态）；本页若已不在题目上则续跑会自行取消' });
+    return { ok: false, error: '编码题批量作答正在进行' };
   }
   if (preRelay) clearRelay(); // 已中止的续跑残单：作废，不拦新运行
   const m = location.pathname.match(EXAM_PROBLEMS_RE);
@@ -1617,6 +1848,7 @@ export async function handleRun(config = {}) {
     overwrite: !!config.overwrite,
     images: !!config.images, // 作答含图题（需视觉模型；只作用于客观题，编程题恒按文字题面作答）
     language: config.language || '', // 编程题固定语言（白名单 id）；空 = 跟随各题编辑器当前语言；函数题忽略（编译器由题目固定）
+    concurrency: clampConcurrency(config.concurrency, 6), // 编码题并发作答路数（1–6）；收题/提交仍是串行页面操作
     drySave: !!config.drySave,
   };
   if (globalThis.__BPS_LLM_MOCK__ && !cfg.drySave) {
@@ -1639,9 +1871,10 @@ export async function handleRun(config = {}) {
   runAbort = new AbortController(); // 中止按钮的终止信号：请求与各循环按它收摊
   suppressLeaveConfirm();
   const summary = { types: [], applied: 0, skippedAnswered: 0, skippedImage: 0, failed: [], savedTypes: 0, saveFails: [] };
-  const progTypes = []; // 编程题：转跨文档续跑（整页装载才有真草稿水合），统一在客观题之后触发
+  const progTypes = []; // 编码题（编程/函数）：转批量作答（SPA 收题 → 并发 LLM → 种键整页提交），统一在客观题之后触发
   let ret = null;
   let relayStarted = false;
+  let batchOutcome = null; // 编码题批量结果（handedOff/paused/aborted/error）：finally 据此决定事件归属
   try {
     clearPersistedLog(); // 新一轮从空日志开始（跨页续跑属于同一轮，不会走到这里）
     fire({ kind: 'log-clear' });
@@ -1685,7 +1918,7 @@ export async function handleRun(config = {}) {
       }
       await sleep(300); // 渲染稳定
       if (isCoding) {
-        // 编码题只与整页装载的水合机制兼容（SPA remount 命中内存响应缓存），转跨文档续跑；
+        // 编码题转批量作答（收题/提交与整页装载机制耦合，作答在列表页并发跑）；
         // 为让客观题在本文档内先处理完，编码题统一推迟到本轮所有客观题之后触发。
         // 锚点必须在本题型页面就绪的当下收：侧栏只渲染当前题型的题目锚点，循环结束后文档
         // 已停在最后一个编码题型页，回头统一收会把先遍历的题型收空、静默漏出续跑单
@@ -1750,27 +1983,41 @@ export async function handleRun(config = {}) {
     if (runAbort.signal.aborted) throw new Error('已中止'); // 最后一页答完才按中止也要如实报
     ret = { ok: true, summary };
     if (progTypes.length) {
-      // 编码题统一推迟到所有客观题之后；启动续跑后 ret 语义是「客观题已完成、编码题滚动中」
-      if (startProgrammingRelay(psId, progTypes, cfg)) {
-        relayStarted = true;
-        const relayNames = [...new Set(progTypes.map(t => t.typeName))].join('、');
-        summary.types.push({ type: relayNames || '编码题', total: progTypes.reduce((n, x) => n + x.total, 0), applied: 0, skippedAnswered: 0, skippedImage: 0, failed: 0, saved: false });
-        ret = { ok: true, relay: true, summary };
-      }
+      // 编码题统一推迟到所有客观题之后；批量模式 = SPA 收题 → 列表页并发作答 → 逐题种键 reload 提交。
+      // 必须 await：并发 LLM 的中止信号挂在本次运行的 runAbort 上；startCodingBatch 返回时
+      // 要么已跳去第一张 verify 页（文档即将卸载），要么整轮在本文档内结束/中止/限流挂起。
+      batchOutcome = await startCodingBatch(psId, progTypes, cfg);
+      relayStarted = batchOutcome.handedOff || batchOutcome.paused;
+      const relayNames = [...new Set(progTypes.map(t => t.typeName))].join('、');
+      summary.types.push({ type: relayNames || '编码题', total: progTypes.reduce((n, x) => n + x.total, 0), applied: 0, skippedAnswered: 0, skippedImage: 0, failed: 0, saved: false });
+      // 中止/致命错误时 ok=false 交给调用方，但结果事件由引擎自己发过（见 finally 注释）
+      ret = batchOutcome.aborted
+        ? { ok: false, error: '已中止', summary, relay: true }
+        : batchOutcome.error
+          ? { ok: false, error: batchOutcome.error, summary, relay: true }
+          : { ok: true, relay: true, summary };
     }
   } catch (err) {
     ret = { ok: false, error: err?.message || String(err), summary };
   } finally {
     // 先复位运行标志，再发完成事件——面板收到事件时 isRunning() 必须已是 false，
     // 否则 UI 会永远停在“答题中”。confirm 的恢复同理（面板可能立刻重新打开面板导航）。
-    // 编程题续跑启动后 confirm 不能恢复（续跑的下一页还要压未保存弹窗）。
+    // 编码题批量跨页推进后 confirm 不能恢复（verify 页的导航还要压未保存弹窗）。
     running = false;
     runAbort = null;
     if (!relayStarted) restoreLeaveConfirm();
 
-    if (ret.ok) {
+    if (ret.relay && batchOutcome) {
+      // 批量路径：结束/中止/失败的叙述已由引擎自己发过（finishBatch / stopBatchByUser /
+      // abortRelay，以及限流冷却后的恢复页），这里只补「跨页推进」坐标行并复位面板状态。
+      if (batchOutcome.handedOff || batchOutcome.paused) {
+        const failN = ret.summary.failed.length;
+        fire({ kind: 'log', level: failN ? 'warn' : 'ok', text: '客观题完成；编码题批量作答已推进（收题 → 并发作答 → 逐题提交，日志随各页出现）' });
+      }
+      fire(ret.ok ? { kind: 'state', running: false } : { kind: 'state', running: false, error: ret.error });
+    } else if (ret.ok) {
       const failN = ret.summary.failed.length;
-      fire({ kind: 'log', level: failN ? 'warn' : 'ok', text: `${ret.relay ? '客观题完成（编码题已转逐页续跑，日志随各页出现）' : `完成：作答 ${ret.summary.applied} · 跳过已答 ${ret.summary.skippedAnswered} · 跳过含图 ${ret.summary.skippedImage} · 失败 ${failN}${cfg.drySave ? '（未保存）' : ''}`}` });
+      fire({ kind: 'log', level: failN ? 'warn' : 'ok', text: `完成：作答 ${ret.summary.applied} · 跳过已答 ${ret.summary.skippedAnswered} · 跳过含图 ${ret.summary.skippedImage} · 失败 ${failN}${cfg.drySave ? '（未保存）' : ''}` });
       fire({ kind: 'state', running: false });
     } else {
       // 用户中止不带「原因前缀」重复（错误路径才需要「已中止：<原因>」）
