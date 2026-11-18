@@ -41,10 +41,10 @@
     // 可自填网关的模型名（OpenCode Go / 自定义）；空 = 用适配预设的默认模型
     autoAnswerBaseUrl: "",
     // 「自定义」服务的 OpenAI 兼容端点（填到 /v1；仅选自定义时用）
-    autoAnswerOverwrite: false,
-    // 覆盖已作答的题目（默认跳过已答，避免把用户的正确答案改错）
+    autoAnswerRedo: "skip",
+    // 已答题处理：skip=跳过已答；wrong=仅重做判分未通过的编码题；all=全部重做（v0.12.2 起替代布尔 autoAnswerOverwrite）
     autoAnswerImages: false,
-    // 含图题作答（需视觉模型如 deepseek-flash：图片下载编码进 prompt；默认关闭=客观题含图跳过；编程题不受此项影响）
+    // 含图题作答（需视觉模型如 deepseek-flash：图片下载编码进 prompt；默认关闭=含图题跳过；v0.12.1 起客观题与编码题都生效）
     autoAnswerLanguage: "",
     // 编程题固定语言（exams 接口白名单的编译器 id）；空 = 跟随各题编辑器当前语言
     autoAnswerConcurrency: 3,
@@ -52,7 +52,7 @@
     settingsVersion: 0
     // 0 = 旧版设置；v4 起「列表/分组」不再持久化（改为按路由的会话内状态）
   };
-  var SETTINGS_VERSION = 7;
+  var SETTINGS_VERSION = 8;
   var HAS_CHROME_STORAGE = typeof chrome !== "undefined" && !!chrome.storage?.sync;
   function needsMigration(raw) {
     return (raw?.settingsVersion || 0) < SETTINGS_VERSION;
@@ -67,8 +67,11 @@
       delete s.autoAnswerApiKey;
       s.reminderEmailEnabled = typeof raw?.reminderEnabled === "boolean" ? raw.reminderEnabled : s.reminderEmailEnabled !== false;
       delete s.reminderEnabled;
+      s.autoAnswerRedo = typeof raw?.autoAnswerOverwrite === "boolean" ? raw.autoAnswerOverwrite ? "all" : "skip" : "skip";
+      delete s.autoAnswerOverwrite;
       s.settingsVersion = SETTINGS_VERSION;
     }
+    delete s.autoAnswerOverwrite;
     return s;
   }
   var storage = {
@@ -357,10 +360,14 @@
     let lastProgressAt = 0;
     let headersTimer = setTimeout(() => abortWith("headers"), LLM_HEADERS_TIMEOUT_MS);
     let idleTimer = null;
-    const totalTimer = setTimeout(() => abortWith("total"), LLM_TOTAL_TIMEOUT_MS);
+    let totalTimer = setTimeout(() => abortWith("total"), LLM_TOTAL_TIMEOUT_MS);
     const armIdle = () => {
       clearTimeout(idleTimer);
       idleTimer = setTimeout(() => abortWith("idle"), LLM_IDLE_TIMEOUT_MS);
+    };
+    const armTotal = () => {
+      clearTimeout(totalTimer);
+      totalTimer = setTimeout(() => abortWith("total"), LLM_TOTAL_TIMEOUT_MS);
     };
     const progress = (phase, chars) => {
       const now = Date.now();
@@ -418,6 +425,7 @@
           const delta = sseDeltaText(ev.data);
           if (delta) {
             text += delta;
+            armTotal();
             if (!firstAt) {
               firstAt = Date.now();
               progress("first", text.length);
@@ -427,6 +435,7 @@
           const think = sseReasoningText(ev.data);
           if (!think) return;
           reasoning += think;
+          armTotal();
           if (!firstThinkAt) {
             firstThinkAt = Date.now();
             progress("thinking", reasoning.length);
@@ -455,7 +464,7 @@
       return { ok: true, status: res.status, text: body, logId };
     } catch (err) {
       const streamDetail = streamError ? typeof streamError === "string" ? streamError : streamError.message || "" : "";
-      const reason = abortReason === "headers" ? `\u7F51\u5173 ${Math.round(LLM_HEADERS_TIMEOUT_MS / 1e3)}s \u672A\u8FD4\u56DE\u54CD\u5E94\u5934\uFF0C\u5224\u5B9A\u5361\u4F4F` : abortReason === "idle" ? `\u7F51\u5173 ${Math.round(LLM_IDLE_TIMEOUT_MS / 1e3)}s \u65E0\u6570\u636E\uFF0C\u5224\u5B9A\u5361\u4F4F` : abortReason === "total" ? `\u751F\u6210\u8D85\u8FC7 ${Math.round(LLM_TOTAL_TIMEOUT_MS / 1e3)}s \u603B\u4E0A\u9650\uFF0C\u5DF2\u4E2D\u65AD` : abortReason === "stream" ? "\u7F51\u5173\u6D41\u9519\u8BEF" + (streamDetail ? "\uFF1A" + streamDetail : "") : abortReason === "user" ? "\u5DF2\u4E2D\u6B62" : err?.message || String(err);
+      const reason = abortReason === "headers" ? `\u7F51\u5173 ${Math.round(LLM_HEADERS_TIMEOUT_MS / 1e3)}s \u672A\u8FD4\u56DE\u54CD\u5E94\u5934\uFF0C\u5224\u5B9A\u5361\u4F4F` : abortReason === "idle" ? `\u7F51\u5173 ${Math.round(LLM_IDLE_TIMEOUT_MS / 1e3)}s \u65E0\u6570\u636E\uFF0C\u5224\u5B9A\u5361\u4F4F` : abortReason === "total" ? `\u8FDE\u7EED ${Math.round(LLM_TOTAL_TIMEOUT_MS / 1e3)}s \u6CA1\u6709\u65B0\u5185\u5BB9\uFF0C\u5224\u5B9A\u5361\u4F4F` : abortReason === "stream" ? "\u7F51\u5173\u6D41\u9519\u8BEF" + (streamDetail ? "\uFF1A" + streamDetail : "") : abortReason === "user" ? "\u5DF2\u4E2D\u6B62" : err?.message || String(err);
       const kind = abortReason === "headers" || abortReason === "idle" ? "idle" : abortReason === "total" ? "total" : abortReason === "user" ? "abort" : abortReason === "stream" ? "protocol" : "network";
       return { ok: false, status: 0, reason, kind };
     } finally {

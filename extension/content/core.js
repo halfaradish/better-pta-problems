@@ -1,6 +1,7 @@
 /* 更好的题目集 · PTA 题目集列表增强（构建产物，请勿直接编辑；源码见 src/content/） */
 (() => {
   // src/shared/settings.js
+  var REDO_MODES = ["skip", "wrong", "all"];
   var DEFAULTS = {
     enabled: true,
     // 总开关
@@ -41,10 +42,10 @@
     // 可自填网关的模型名（OpenCode Go / 自定义）；空 = 用适配预设的默认模型
     autoAnswerBaseUrl: "",
     // 「自定义」服务的 OpenAI 兼容端点（填到 /v1；仅选自定义时用）
-    autoAnswerOverwrite: false,
-    // 覆盖已作答的题目（默认跳过已答，避免把用户的正确答案改错）
+    autoAnswerRedo: "skip",
+    // 已答题处理：skip=跳过已答；wrong=仅重做判分未通过的编码题；all=全部重做（v0.12.2 起替代布尔 autoAnswerOverwrite）
     autoAnswerImages: false,
-    // 含图题作答（需视觉模型如 deepseek-flash：图片下载编码进 prompt；默认关闭=客观题含图跳过；编程题不受此项影响）
+    // 含图题作答（需视觉模型如 deepseek-flash：图片下载编码进 prompt；默认关闭=含图题跳过；v0.12.1 起客观题与编码题都生效）
     autoAnswerLanguage: "",
     // 编程题固定语言（exams 接口白名单的编译器 id）；空 = 跟随各题编辑器当前语言
     autoAnswerConcurrency: 3,
@@ -52,7 +53,7 @@
     settingsVersion: 0
     // 0 = 旧版设置；v4 起「列表/分组」不再持久化（改为按路由的会话内状态）
   };
-  var SETTINGS_VERSION = 7;
+  var SETTINGS_VERSION = 8;
   var HAS_CHROME_STORAGE = typeof chrome !== "undefined" && !!chrome.storage?.sync;
   function needsMigration(raw) {
     return (raw?.settingsVersion || 0) < SETTINGS_VERSION;
@@ -67,8 +68,11 @@
       delete s.autoAnswerApiKey;
       s.reminderEmailEnabled = typeof raw?.reminderEnabled === "boolean" ? raw.reminderEnabled : s.reminderEmailEnabled !== false;
       delete s.reminderEnabled;
+      s.autoAnswerRedo = typeof raw?.autoAnswerOverwrite === "boolean" ? raw.autoAnswerOverwrite ? "all" : "skip" : "skip";
+      delete s.autoAnswerOverwrite;
       s.settingsVersion = SETTINGS_VERSION;
     }
+    delete s.autoAnswerOverwrite;
     return s;
   }
   var storage = {
@@ -291,9 +295,38 @@
     }
     return problems;
   }
+  function redoModeOf(cfg) {
+    const mode = cfg && cfg.redo;
+    if (REDO_MODES.includes(mode)) return mode;
+    return cfg && cfg.overwrite ? "all" : "skip";
+  }
+  function verdictOf(status) {
+    if (status == null) return "unknown";
+    const st = String(status);
+    if (!st || st === "PROBLEM_NO_ANSWER") return "none";
+    if (st === "PROBLEM_ACCEPTED") return "accepted";
+    if (st === "PROBLEM_SUBMITTED" || st.includes("JUDGING")) return "pending";
+    return "wrong";
+  }
   function classifyProblem(q, cfg) {
-    if (q && q.answered && !(cfg && cfg.overwrite)) return { status: "skipped" };
-    return { status: "pending" };
+    const mode = redoModeOf(cfg);
+    const imgGate = !!(q && q.hasImg) && !(cfg && cfg.images);
+    if (mode === "all") {
+      return imgGate ? { status: "skippedImage", reason: "image" } : { status: "pending", reason: "all" };
+    }
+    if (mode === "wrong") {
+      const verdict = q && q.verdict;
+      if (verdict === "accepted") return { status: "skipped", reason: "accepted" };
+      if (verdict === "pending") return { status: "skipped", reason: "judging" };
+      if (verdict === "wrong") {
+        return imgGate ? { status: "skippedImage", reason: "wrong-image" } : { status: "pending", reason: "wrong" };
+      }
+      if (verdict === "none" && q && q.answered) {
+        return imgGate ? { status: "skippedImage", reason: "unsubmitted-image" } : { status: "pending", reason: "unsubmitted" };
+      }
+    }
+    if (q && q.answered) return { status: "skipped", reason: mode === "wrong" ? "unknown" : "draft" };
+    return imgGate ? { status: "skippedImage", reason: "image" } : { status: "pending", reason: "new" };
   }
   function slimDraftDetail(detail, pspId) {
     const d = detail && typeof detail === "object" ? detail : null;
@@ -325,7 +358,7 @@
   function isFreshStatement(prevText, q, targetId) {
     if (!q || String(q.id || "") !== String(targetId || "")) return { ok: false, reason: "\u9875\u9762\u9898\u76EE\u4E0E\u76EE\u6807\u4E0D\u7B26" };
     const text = String(q.text || "");
-    if (text.length < 20) return { ok: false, reason: "\u9898\u5E72\u4E3A\u7A7A\u6216\u8FC7\u77ED" };
+    if (text.length < 20 && !(q.hasImg && text.length > 0)) return { ok: false, reason: "\u9898\u5E72\u4E3A\u7A7A\u6216\u8FC7\u77ED" };
     const prev = String(prevText || "");
     if (prev && text === prev) return { ok: false, reason: "\u9898\u5E72\u4E0E\u4E0A\u4E00\u9898\u76F8\u540C\uFF08\u7591\u4F3C\u9875\u9762\u672A\u5207\u6362\uFF09" };
     return { ok: true };
@@ -539,7 +572,7 @@
     return [
       {
         role: "system",
-        content: isCodingKind(q.kind) ? "\u4F60\u662F\u4E25\u8C28\u7684\u7B54\u9898\u52A9\u624B\uFF0C\u53EA\u8F93\u51FA\u4E00\u4E2A\u4EE3\u7801\u56F4\u680F\u5757\uFF08``` \u5305\u88F9\u7684\u5B8C\u6574\u7A0B\u5E8F\u6E90\u7801\uFF09\uFF0C\u4E0D\u8981\u8F93\u51FA\u4EFB\u4F55\u5176\u4ED6\u6587\u5B57\u3002" : "\u4F60\u662F\u4E25\u8C28\u7684\u7B54\u9898\u52A9\u624B\uFF0C\u53EA\u8F93\u51FA\u8981\u6C42\u7684 JSON\uFF0C\u4E0D\u8981\u8F93\u51FA\u4EFB\u4F55\u5176\u4ED6\u6587\u5B57\u3002"
+        content: q.kind === "CODE_COMPLETION" ? "\u4F60\u662F\u4E25\u8C28\u7684\u7B54\u9898\u52A9\u624B\uFF0C\u53EA\u8F93\u51FA\u4E00\u4E2A\u4EE3\u7801\u56F4\u680F\u5757\uFF08``` \u5305\u88F9\u7684\u51FD\u6570\u5B9E\u73B0\u6E90\u7801\uFF09\uFF0C\u4E0D\u8981\u8F93\u51FA\u4EFB\u4F55\u5176\u4ED6\u6587\u5B57\u3002" : isCodingKind(q.kind) ? "\u4F60\u662F\u4E25\u8C28\u7684\u7B54\u9898\u52A9\u624B\uFF0C\u53EA\u8F93\u51FA\u4E00\u4E2A\u4EE3\u7801\u56F4\u680F\u5757\uFF08``` \u5305\u88F9\u7684\u5B8C\u6574\u7A0B\u5E8F\u6E90\u7801\uFF09\uFF0C\u4E0D\u8981\u8F93\u51FA\u4EFB\u4F55\u5176\u4ED6\u6587\u5B57\u3002" : "\u4F60\u662F\u4E25\u8C28\u7684\u7B54\u9898\u52A9\u624B\uFF0C\u53EA\u8F93\u51FA\u8981\u6C42\u7684 JSON\uFF0C\u4E0D\u8981\u8F93\u51FA\u4EFB\u4F55\u5176\u4ED6\u6587\u5B57\u3002"
       },
       { role: "user", content: lines.join("\n") }
     ];
@@ -610,13 +643,38 @@
     }
     return null;
   }
-  async function fetchAllowedCompilers(psId) {
-    const data = await fetch(`/api/problem-sets/${psId}/exams`, {
+  async function fetchExamInfo(psId, stopSignal = null) {
+    const res = await fetchBounded(`/api/problem-sets/${psId}/exams`, {
       headers: { accept: "application/json" },
       credentials: "include"
-    }).then((r) => r.json());
+    }, 1e4, stopSignal);
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const data = await res.json();
     const list = data?.problemSet?.problemSetConfig?.compilers;
-    return Array.isArray(list) && list.length ? list : null;
+    return {
+      compilers: Array.isArray(list) && list.length ? list : null,
+      examId: data?.exam?.id ? String(data.exam.id) : ""
+    };
+  }
+  async function fetchAllowedCompilers(psId) {
+    return (await fetchExamInfo(psId)).compilers;
+  }
+  async function fetchProblemStatusMap(psId) {
+    const info = await fetchExamInfo(psId, runAbort?.signal ?? null);
+    if (!info.examId) throw new Error("\u672A\u53D6\u5230\u8003\u8BD5\u573A\u6B21\uFF08\u53EF\u80FD\u5C1A\u672A\u8FDB\u5165\u8FC7\u672C\u573A\u8003\u8BD5\uFF09");
+    const res = await fetchBounded(
+      `/api/exams/${encodeURIComponent(info.examId)}/problem-sets/${encodeURIComponent(psId)}/problem-status?_bps=autoanswer`,
+      { headers: { accept: "application/json" }, credentials: "include" },
+      1e4,
+      runAbort?.signal ?? null
+    );
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const data = await res.json();
+    const map = {};
+    for (const it of data?.problemStatus || []) {
+      if (it && it.id != null) map[String(it.id)] = String(it.problemSubmissionStatus || "");
+    }
+    return { map, labels: data?.examLabelByProblemSetProblemId || {} };
   }
   function answerFormEl() {
     return document.querySelector('[class*="CodingProblemAnswerForm"]');
@@ -636,6 +694,29 @@
     const hit = (headings || []).some((h) => String(h || "").includes("\u51FD\u6570\u63A5\u53E3\u5B9A\u4E49") || /format of function/i.test(String(h || "")));
     return hit ? "CODE_COMPLETION" : "PROGRAMMING";
   }
+  function codingFigures(mainEl, form) {
+    const out = [];
+    const seen = /* @__PURE__ */ new Set();
+    const walker = document.createTreeWalker(mainEl, NodeFilter.SHOW_ELEMENT);
+    let section = "\u9898\u76EE\u63CF\u8FF0";
+    while (walker.nextNode()) {
+      const el2 = walker.currentNode;
+      if (form && form.contains(el2)) continue;
+      const tag = el2.tagName;
+      if (tag === "H1" || tag === "H2" || tag === "H3" || tag === "H4") {
+        const t = (el2.textContent || "").replace(/\s+/g, " ").trim();
+        if (t) section = t;
+        continue;
+      }
+      if (tag !== "IMG" || !el2.getAttribute("src")) continue;
+      if (el2.closest("button")) continue;
+      const src = el2.src || el2.getAttribute("src");
+      if (!src || seen.has(src)) continue;
+      seen.add(src);
+      out.push({ src, context: section });
+    }
+    return out;
+  }
   function collectCodingProblem() {
     const mainEl = document.querySelector("main");
     const form = answerFormEl();
@@ -645,8 +726,8 @@
     const pspId = (location.search.match(/problemSetProblemId=(\d+)/) || [])[1];
     if (!pspId) return null;
     const kind = codingKindFromHeadings([...mainEl.querySelectorAll("h1,h2,h3")].map((h) => h.textContent));
-    const stem = [...mainEl.querySelectorAll("img")].filter((i) => !form.contains(i)).map((i) => i.getAttribute("src") ? i.src : null).filter(Boolean);
-    const imgInfo = { options: {}, stem, total: stem.length };
+    const figures = codingFigures(mainEl, form);
+    const imgInfo = { options: {}, stem: figures.map((f) => f.src), contexts: figures.map((f) => f.context), total: figures.length };
     const text = cleanText(mainEl, '[class*="CodingProblemAnswerForm"]');
     return {
       id: pspId,
@@ -1024,7 +1105,7 @@
     throw err;
   }
   var hasBgFetch = typeof chrome !== "undefined" && !!chrome.runtime?.connect && !!chrome.runtime?.sendMessage;
-  function backgroundChat(msg, { timeoutMs, signal, onProgress } = {}) {
+  function backgroundChat(msg, { timeoutMs = LLM_TOTAL_TIMEOUT_MS, signal, onProgress } = {}) {
     return new Promise((resolve, reject) => {
       let port = null;
       let settled = false;
@@ -1052,11 +1133,15 @@
         }
         finish(reject, abortedError());
       };
-      timer = setTimeout(() => {
-        const err = new Error(`\u540E\u53F0\u8F6C\u53D1 ${Math.round(timeoutMs / 1e3)}s \u65E0\u54CD\u5E94`);
-        err.kind = "timeout";
-        finish(reject, err);
-      }, timeoutMs + 5e3);
+      const armTimer = () => {
+        clearTimeout(timer);
+        timer = setTimeout(() => {
+          const err = new Error(`\u540E\u53F0\u8F6C\u53D1 ${Math.round(timeoutMs / 1e3)}s \u65E0\u8FDB\u5EA6`);
+          err.kind = "timeout";
+          finish(reject, err);
+        }, timeoutMs + 5e3);
+      };
+      armTimer();
       try {
         port = chrome.runtime.connect({ name: "bps-llm" });
       } catch (err) {
@@ -1071,6 +1156,7 @@
       port.onMessage.addListener((m) => {
         if (!m || settled) return;
         if (m.type === "progress") {
+          armTimer();
           try {
             onProgress?.(m);
           } catch (_) {
@@ -1224,7 +1310,8 @@
   async function toDataUrl(src) {
     try {
       return await toDataUrlPage(src);
-    } catch (_) {
+    } catch (err) {
+      if (runAbort?.signal.aborted) throw err;
     }
     if (!hasBgFetch) throw new Error("\u9875\u9762 fetch \u88AB\u62D2\u4E14\u65E0 background \u53EF\u8F6C\u53D6");
     const rsp = await new Promise((resolve, reject) => {
@@ -1245,16 +1332,18 @@
     if (!rsp?.ok) throw new Error("background \u8F6C\u53D6\u5931\u8D25\uFF1A" + (rsp?.reason || "no response"));
     return rsp.dataUrl;
   }
-  function assembleImgMessage(userContent, imgs) {
+  function assembleImgMessage(userContent, imgs, opts = {}) {
+    const coding = opts.coding === true;
     const stem = imgs.stem || [];
-    const parts = [{
-      type: "text",
-      text: `${userContent}
+    const intro = coding ? `${userContent}
 
-\uFF08\u672C\u9898\u542B\u914D\u56FE\uFF1A\u9898\u5E72\u56FE\u5728\u524D\uFF0C\u9009\u9879\u56FE\u968F\u540E\u5E76\u6807\u6CE8\u5F52\u5C5E\u9009\u9879\u3002\u8BF7\u540C\u65F6\u4F9D\u636E\u56FE\u7247\u5185\u5BB9\u4F5C\u7B54\uFF0C\u4ECD\u53EA\u8F93\u51FA\u4E00\u4E2A JSON\uFF0C\u4E0D\u8981\u89E3\u91CA\u3002\uFF09`
-    }];
+\uFF08\u672C\u9898\u542B\u914D\u56FE\uFF1A\u9898\u76EE\u63CF\u8FF0\u3001\u8F93\u5165/\u8F93\u51FA\u683C\u5F0F\u4E0E\u6837\u4F8B\u53EF\u80FD\u5168\u90E8\u6216\u90E8\u5206\u4EE5\u56FE\u7247\u7ED9\u51FA\u3002\u8BF7\u5148\u9010\u5F20\u9605\u8BFB\u914D\u56FE\uFF08\u5305\u62EC\u5176\u4E2D\u7684\u516C\u5F0F\u3001\u77E9\u9635\u548C\u6587\u5B57\uFF09\uFF0C\u518D\u7ED3\u5408\u4E0A\u9762\u7684\u6587\u5B57\u9898\u9762\u5B8C\u6210\u4F5C\u7B54\uFF1B\u8F93\u51FA\u7EA6\u5B9A\u4E0E\u4E0A\u9762\u7684\u9898\u578B\u8BF4\u660E\u5B8C\u5168\u4E00\u81F4\uFF0C\u4ECD\u53EA\u8F93\u51FA\u4E00\u4E2A\u4EE3\u7801\u56F4\u680F\u5757\uFF0C\u4E0D\u8981\u89E3\u91CA\u3002\uFF09` : `${userContent}
+
+\uFF08\u672C\u9898\u542B\u914D\u56FE\uFF1A\u9898\u5E72\u56FE\u5728\u524D\uFF0C\u9009\u9879\u56FE\u968F\u540E\u5E76\u6807\u6CE8\u5F52\u5C5E\u9009\u9879\u3002\u8BF7\u540C\u65F6\u4F9D\u636E\u56FE\u7247\u5185\u5BB9\u4F5C\u7B54\uFF0C\u4ECD\u53EA\u8F93\u51FA\u4E00\u4E2A JSON\uFF0C\u4E0D\u8981\u89E3\u91CA\u3002\uFF09`;
+    const parts = [{ type: "text", text: intro }];
     stem.forEach((url, i) => {
-      parts.push({ type: "text", text: `\uFF08\u9898\u5E72\u914D\u56FE ${i + 1}/${stem.length}\uFF09` });
+      const ctx = (imgs.contexts || [])[i];
+      parts.push({ type: "text", text: ctx ? `\uFF08\u9898\u5E72\u914D\u56FE ${i + 1}/${stem.length}\uFF0C\u6240\u5C5E\u5C0F\u8282\uFF1A${ctx}\uFF09` : `\uFF08\u9898\u5E72\u914D\u56FE ${i + 1}/${stem.length}\uFF09` });
       parts.push({ type: "image_url", image_url: { url } });
     });
     for (const [letter, url] of Object.entries(imgs.options || {})) {
@@ -1264,9 +1353,9 @@
     return parts;
   }
   async function downloadImgs(imgInfo) {
-    const out = { stem: [], options: {} };
+    const out = { stem: [], options: {}, contexts: imgInfo.contexts || [] };
     for (const src of imgInfo.stem) out.stem.push(await toDataUrl(src));
-    for (const [letter, src] of Object.entries(imgInfo.options)) out.options[letter] = await toDataUrl(src);
+    for (const [letter, src] of Object.entries(imgInfo.options || {})) out.options[letter] = await toDataUrl(src);
     return out;
   }
   async function answerOne(q, cfg) {
@@ -1455,6 +1544,9 @@
     return true;
   }
   var STATEMENT_READY_RE = /(输入格式|输出格式|输入样例|输出样例|函数接口定义|裁判测试程序|Format|Input|Output|Sample)/i;
+  function hasStatementImg(mainEl, form) {
+    return !!(mainEl && [...mainEl.querySelectorAll("img")].some((i) => (!form || !form.contains(i)) && i.getAttribute("src")));
+  }
   async function settleProblemReady(id) {
     let mounted = false;
     for (let i = 0; i < 50; i++) {
@@ -1471,7 +1563,8 @@
     for (let i = 0; i < 30; i++) {
       await sleep(100);
       const text = mainEl ? mainEl.innerText || "" : "";
-      if (text && text === prev && STATEMENT_READY_RE.test(text)) return true;
+      const ready = !!text && text === prev && (STATEMENT_READY_RE.test(text) || text.length >= 20 && hasStatementImg(mainEl, answerFormEl()));
+      if (ready) return true;
       prev = text;
     }
     return false;
@@ -1491,16 +1584,35 @@
   async function startCodingBatch(psId, progTypes, cfg) {
     const problems = flattenCodingTypes(progTypes);
     if (!problems.length) throw new Error("\u300C\u7F16\u7801\u9898\u300D\u627E\u4E0D\u5230\u9898\u76EE\u951A\u70B9\uFF08\u9898\u76EE\u603B\u89C8\u6536\u8D77\uFF1F\u70B9\u5F00\u540E\u91CD\u8BD5\uFF09");
+    let statusMap = null;
+    let statusLabels = null;
+    if (redoModeOf(cfg) === "wrong") {
+      fire({ kind: "log", level: "info", text: "\u8BFB\u53D6\u5224\u5206\u72B6\u6001\u2026\uFF08\u4EC5\u91CD\u505A\u9519\u8BEF\u9700\u8981\uFF0C\u4E00\u6B21\u8BF7\u6C42\u62FF\u5168\u9898\u96C6\uFF09" });
+      try {
+        const snap = await fetchProblemStatusMap(psId);
+        statusMap = snap.map;
+        statusLabels = snap.labels;
+        const counts = { accepted: 0, wrong: 0, pending: 0, none: 0, unknown: 0 };
+        for (const p of problems) counts[verdictOf(statusMap[p.id])] += 1;
+        fire({ kind: "log", level: "info", text: `\u5224\u5206\u72B6\u6001\uFF1A\u901A\u8FC7 ${counts.accepted} \xB7 \u672A\u901A\u8FC7 ${counts.wrong} \xB7 \u5F85\u5224 ${counts.pending} \xB7 \u672A\u63D0\u4EA4 ${counts.none}${counts.unknown ? ` \xB7 \u672A\u77E5 ${counts.unknown}` : ""}` });
+      } catch (err) {
+        if (runAbort?.signal.aborted) throw abortedError();
+        statusMap = {};
+        fire({ kind: "log", level: "warn", text: `\u5224\u5206\u72B6\u6001\u8BFB\u53D6\u5931\u8D25\uFF08${err?.message || err}\uFF09\uFF0C\u5DF2\u7B54\u9898\u6309\u8DF3\u8FC7\u5904\u7406\uFF1B\u672A\u7B54\u9898\u7167\u5E38\u4F5C\u7B54` });
+      }
+    }
     const relay = {
       v: RELAY_VERSION,
       cfg: { ...cfg },
       psId,
+      statusMap,
+      statusLabels,
       problems: problems.map((p) => ({ ...p, status: void 0 })),
       ci: 0,
       phase: "collect",
       verifyIds: [],
       vi: 0,
-      summary: { applied: 0, skippedAnswered: 0, failed: [] },
+      summary: { applied: 0, skippedAnswered: 0, skippedImage: 0, redoWrong: 0, failed: [] },
       rlTries: 0
     };
     if (!writeRelay(relay)) throw new Error("sessionStorage \u4E0D\u53EF\u5199\u6216\u7EED\u8DD1\u5355\u8D85\u9650\uFF0C\u65E0\u6CD5\u6279\u91CF\u4F5C\u7B54\u7F16\u7801\u9898");
@@ -1565,21 +1677,38 @@
           r.ci += 1;
           continue;
         }
+        if (r.statusMap) q.verdict = verdictOf(r.statusMap[q.id]);
         const cls = classifyProblem(q, r.cfg);
         Object.assign(p, {
-          label: q.label || p.id.slice(-4),
+          label: q.label || r.statusLabels && r.statusLabels[p.id] || p.id.slice(-4),
           kind: q.kind,
           text: q.text,
           langLabel: q.langLabel,
           hasImg: q.hasImg,
-          status: cls.status
+          imgInfo: q.hasImg ? q.imgInfo : null,
+          // 只存地址与所属小节，data URL 到作答页现取
+          status: cls.status,
+          redoReason: cls.reason || null
+          // wrong/unsubmitted 用于作答阶段的覆盖保护放行
         });
-        if (q.hasImg) fire({ kind: "log", level: "warn", text: `${p.label}\uFF1A\u9898\u5E72\u542B\u56FE\u7247\uFF0C\u7F16\u7801\u9898\u6682\u4E0D\u652F\u6301\u56FE\u7247\u8F93\u5165\uFF0C\u4EC5\u6309\u6587\u5B57\u9898\u9762\u4F5C\u7B54` });
         if (cls.status === "skipped") {
           r.summary.skippedAnswered += 1;
-          fire({ kind: "log", level: "info", text: `${p.label}\uFF1A\u8DF3\u8FC7\uFF0C\u5DF2\u4F5C\u7B54` });
+          const why = cls.reason === "accepted" ? "\u8DF3\u8FC7\uFF0C\u5224\u5206\u6B63\u786E" : cls.reason === "judging" ? "\u8DF3\u8FC7\uFF0C\u8BC4\u6D4B\u4E2D/\u5F85\u5224\u5206" : cls.reason === "unknown" ? "\u8DF3\u8FC7\uFF0C\u5224\u5206\u72B6\u6001\u672A\u77E5\uFF08\u6309\u5DF2\u7B54\u5904\u7406\uFF09" : "\u8DF3\u8FC7\uFF0C\u5DF2\u4F5C\u7B54";
+          fire({ kind: "log", level: "info", text: `${p.label}\uFF1A${why}` });
+        } else if (cls.status === "skippedImage") {
+          r.summary.skippedImage = (r.summary.skippedImage || 0) + 1;
+          const why = cls.reason === "wrong-image" || cls.reason === "unsubmitted-image" ? "\u8DF3\u8FC7\uFF0C\u5224\u5206\u672A\u901A\u8FC7\u4F46\u9898\u5E72\u542B\u56FE\u7247\uFF08\u672A\u5F00\u300C\u4F5C\u7B54\u542B\u56FE\u9898\u300D\uFF09" : "\u8DF3\u8FC7\uFF0C\u9898\u5E72\u542B\u56FE\u7247\uFF08\u672A\u5F00\u300C\u4F5C\u7B54\u542B\u56FE\u9898\u300D\uFF09";
+          fire({ kind: "log", level: "warn", text: `${p.label}\uFF1A${why}` });
         } else {
+          if (cls.reason === "wrong") {
+            r.summary.redoWrong = (r.summary.redoWrong || 0) + 1;
+            fire({ kind: "log", level: "info", text: `${p.label}\uFF1A\u5224\u5206\u672A\u901A\u8FC7\uFF0C\u91CD\u505A` });
+          } else if (cls.reason === "unsubmitted") {
+            r.summary.redoWrong = (r.summary.redoWrong || 0) + 1;
+            fire({ kind: "log", level: "info", text: `${p.label}\uFF1A\u8349\u7A3F\u672A\u63D0\u4EA4\uFF0C\u91CD\u505A` });
+          }
           fire({ kind: "log", level: "info", text: `\u6536\u9898 ${r.ci + 1}/${r.problems.length}\uFF1A${p.label}\uFF08${p.typeName}\uFF09` });
+          if (q.hasImg) fire({ kind: "log", level: "info", text: `${p.label}\uFF1A\u9898\u5E72\u542B ${q.imgInfo.total} \u5F20\u56FE\u7247\uFF0C\u4F5C\u7B54\u65F6\u968F\u9898\u9762\u4EA4\u7ED9\u89C6\u89C9\u6A21\u578B` });
         }
         batchPrevText = q.text;
         r.ci += 1;
@@ -1697,7 +1826,9 @@ ${failDetails(r.summary.failed)}` });
   }
   function relaySummaryLine(r) {
     const s = r.summary;
-    const line = `\u4F5C\u7B54 ${s.applied} \xB7 \u8DF3\u8FC7\u5DF2\u7B54 ${s.skippedAnswered} \xB7 \u5931\u8D25 ${s.failed.length}${r.cfg.drySave ? "\uFF08dry\uFF0C\u672A\u63D0\u4EA4\uFF09" : ""}`;
+    const skippedImg = Number(s.skippedImage) || 0;
+    const redoWrong = Number(s.redoWrong) || 0;
+    const line = `\u4F5C\u7B54 ${s.applied} \xB7 \u8DF3\u8FC7\u5DF2\u7B54 ${s.skippedAnswered}${redoWrong ? ` \xB7 \u91CD\u505A\u9519\u9898 ${redoWrong}` : ""}${skippedImg ? ` \xB7 \u8DF3\u8FC7\u542B\u56FE ${skippedImg}` : ""} \xB7 \u5931\u8D25 ${s.failed.length}${r.cfg.drySave ? "\uFF08dry\uFF0C\u672A\u63D0\u4EA4\uFF09" : ""}`;
     if (!s.failed.length) return line;
     return `${line}
 \u5931\u8D25\u660E\u7EC6\uFF1A
@@ -1747,11 +1878,17 @@ ${failDetails(s.failed)}`;
           return;
         }
         p.detail = slimDraftDetail(snap.detail, p.id);
-        if (!r.cfg.overwrite && localInputDiffers(p.id, snap.detail)) {
+        const redoMode = redoModeOf(r.cfg);
+        const allowOverwrite = redoMode === "all" || redoMode === "wrong" && (p.redoReason === "wrong" || p.redoReason === "unsubmitted");
+        const localDiffers = localInputDiffers(p.id, snap.detail);
+        if (!allowOverwrite && localDiffers) {
           r.summary.skippedAnswered += 1;
           p.status = "skipped";
           fire({ kind: "log", level: "warn", text: `${p.label}\uFF1A\u672C\u5730\u5B58\u5728\u672A\u4FDD\u5B58\u7684\u624B\u6572\u4EE3\u7801\uFF08\u4E0E\u670D\u52A1\u7AEF\u8349\u7A3F\u4E0D\u4E00\u81F4\uFF09\uFF0C\u5DF2\u4FDD\u5B88\u8DF3\u8FC7\u4E0D\u8986\u76D6` });
           return;
+        }
+        if (redoMode === "wrong" && localDiffers) {
+          fire({ kind: "log", level: "info", text: `${p.label}\uFF1A\u672C\u5730\u6709\u672A\u4FDD\u5B58\u6539\u52A8\uFF0C\u4F46\u672C\u9898${p.redoReason === "wrong" ? "\u5224\u5206\u672A\u901A\u8FC7" : "\u8349\u7A3F\u672A\u63D0\u4EA4"}\uFF0C\u6309\u300C\u4EC5\u91CD\u505A\u9519\u8BEF\u300D\u8986\u76D6` });
         }
         const picked = pickCompiler(p, p.detail, r.cfg, {
           labelFor: (id) => COMPILER_LABELS[id] || "",
@@ -1764,7 +1901,35 @@ ${failDetails(s.failed)}`;
         }
         p.compilerId = picked.compilerId;
         p.wantLangLabel = picked.wantLangLabel;
-        const messages = buildPrompt({ ...p, langLabel: p.wantLangLabel || p.langLabel || "" });
+        const basePrompt = buildPrompt({ ...p, langLabel: p.wantLangLabel || p.langLabel || "" });
+        let messages = basePrompt;
+        if (p.hasImg) {
+          if (!r.cfg.images) {
+            r.summary.skippedImage = (r.summary.skippedImage || 0) + 1;
+            p.status = "skipped";
+            fire({ kind: "log", level: "warn", text: `${p.label}\uFF1A\u8DF3\u8FC7\uFF0C\u9898\u5E72\u542B\u56FE\u7247\uFF08\u672A\u5F00\u300C\u4F5C\u7B54\u542B\u56FE\u9898\u300D\uFF09` });
+            return;
+          }
+          if (!p.imgInfo || !Array.isArray(p.imgInfo.stem) || !p.imgInfo.stem.length) {
+            relayRecordFail(r, p, p.label, "\u542B\u56FE\u9898\u7F3A\u5C11\u56FE\u7247\u5730\u5740\uFF08\u65E7\u7248\u7EED\u8DD1\u5355\uFF09\uFF0C\u8BF7\u91CD\u65B0\u5F00\u59CB\u7B54\u9898");
+            p.status = "failed";
+            return;
+          }
+          let images = null;
+          try {
+            images = await downloadImgs(p.imgInfo);
+          } catch (err) {
+            if (userStopped(r)) return;
+            relayRecordFail(r, p, p.label, "\u542B\u56FE\u9898\u56FE\u7247\u52A0\u8F7D\u5931\u8D25\uFF1A" + (err?.message || err));
+            p.status = "failed";
+            return;
+          }
+          fire({ kind: "log", level: "info", text: `${p.label}\uFF1A\u5DF2\u53D6 ${images.stem.length} \u5F20\u9898\u5E72\u56FE\uFF0C\u968F\u9898\u9762\u4EA4\u7ED9\u89C6\u89C9\u6A21\u578B` });
+          messages = [
+            { role: "system", content: basePrompt[0].content },
+            { role: "user", content: assembleImgMessage(basePrompt[1].content, images, { coding: true }) }
+          ];
+        }
         let raw = null;
         try {
           raw = globalThis.__BPS_LLM_MOCK__ ? await globalThis.__BPS_LLM_MOCK__(messages) : await chatWithRetry(r.cfg, messages, { label: p.label });
@@ -2120,14 +2285,18 @@ ${failDetails(s.failed)}`;
       return { ok: false, error: "\u8BF7\u5148\u8FDB\u5165\u9898\u76EE\u5217\u8868\u7684\u67D0\u4E2A\u9898\u578B\u9875\uFF08\u5224\u65AD/\u5355\u9009/\u586B\u7A7A\u6807\u7B7E\uFF09\u518D\u5F00\u59CB" };
     }
     const psId = m[1];
+    const redo = redoModeOf({ redo: config.redo, overwrite: config.overwrite });
     const cfg = {
       baseUrl: config.baseUrl || "",
       apiKey: config.apiKey || "",
       model: config.model || "",
       gateway: config.gateway || "",
-      overwrite: !!config.overwrite,
+      redo,
+      // 已答题处理：skip / wrong / all
+      overwrite: redo === "all",
+      // 兼容仍按布尔口径读 cfg.overwrite 的旧分支与在途续跑单
       images: !!config.images,
-      // 作答含图题（需视觉模型；只作用于客观题，编程题恒按文字题面作答）
+      // 作答含图题（需视觉模型；客观题与编码题均生效，编码题的图片随题面交给模型）
       language: config.language || "",
       // 编程题固定语言（白名单 id）；空 = 跟随各题编辑器当前语言；函数题忽略（编译器由题目固定）
       concurrency: clampConcurrency(config.concurrency, 6),
@@ -2160,7 +2329,11 @@ ${failDetails(s.failed)}`;
       clearPersistedLog();
       fire({ kind: "log-clear" });
       fire({ kind: "state", running: true });
-      fire({ kind: "log", level: "info", text: `\u5F00\u59CB\u7B54\u9898\uFF08\u6BCF\u9898\u4E00\u6B21\u8BF7\u6C42\uFF0C${cfg.overwrite ? "\u8986\u76D6\u5DF2\u4F5C\u7B54" : "\u8DF3\u8FC7\u5DF2\u7B54"}${cfg.images ? "\uFF0C\u542B\u56FE\u9898\u4F5C\u7B54" : ""}\uFF09` });
+      const redoLabel = cfg.redo === "wrong" ? "\u4EC5\u91CD\u505A\u9519\u8BEF" : cfg.redo === "all" ? "\u5168\u90E8\u91CD\u505A" : "\u8DF3\u8FC7\u5DF2\u7B54";
+      fire({ kind: "log", level: "info", text: `\u5F00\u59CB\u7B54\u9898\uFF08\u6BCF\u9898\u4E00\u6B21\u8BF7\u6C42\uFF0C${redoLabel}${cfg.images ? "\uFF0C\u542B\u56FE\u9898\u4F5C\u7B54" : ""}\uFF09` });
+      if (cfg.redo === "wrong") {
+        fire({ kind: "log", level: "info", text: "\u4EC5\u91CD\u505A\u9519\u8BEF\uFF1A\u53EA\u4F5C\u7528\u4E8E\u7F16\u7801\u9898\uFF1B\u5BA2\u89C2\u9898\u7B54\u9898\u4E2D\u4E0D\u5224\u5206\uFF0C\u6309\u8DF3\u8FC7\u5DF2\u7B54\u5904\u7406" });
+      }
       const types = sidebarTypes().filter((t) => TYPE_BY_NAME[t.typeName] || false).filter((t) => t.total > 0);
       const unknown = sidebarTypes().filter((t) => !(t.typeName in TYPE_BY_NAME) && t.total > 0);
       if (!types.length) throw new Error("\u672C\u9875\u4FA7\u680F\u6CA1\u6709\u53EF\u4F5C\u7B54\u7684\u9898\u578B\uFF08\u82E5\u300C\u9898\u76EE\u603B\u89C8\u300D\u6536\u8D77\u8BF7\u5148\u5C55\u5F00\u518D\u91CD\u8BD5\uFF09");
@@ -2216,7 +2389,7 @@ ${failDetails(s.failed)}`;
           while (cursor < queue2.length && !runAbort.signal.aborted) {
             const { q } = queue2[cursor++];
             done += 1;
-            if (q.answered && !cfg.overwrite) {
+            if (q.answered && redoModeOf(cfg) !== "all") {
               stats.skippedAnswered += 1;
               fire({ kind: "log", level: "info", text: `${q.label || q.id.slice(-4)}\uFF1A\u8DF3\u8FC7\uFF0C\u5DF2\u4F5C\u7B54` });
               tick();
@@ -2813,19 +2986,26 @@ input:disabled, button:disabled { opacity: .6; cursor: not-allowed; } /* PTA \u7
     peek.textContent = "\u663E\u793A";
     peek.setAttribute("aria-label", "\u663E\u793A\u6216\u9690\u85CF API Key");
     el("p", "hint", fKey).textContent = "\u6BCF\u4E2A\u670D\u52A1\u5404\u5B58\u4E00\u628A Key\uFF0C\u5207\u670D\u52A1\u81EA\u52A8\u5E26\u51FA\uFF1B\u4EC5\u4FDD\u5B58\u5728\u672C\u673A\u6D4F\u89C8\u5668";
-    const sw = el("label", "switchrow", pageAnswer);
-    sw.htmlFor = "aa-overwrite";
-    const stxt = el("span", "stxt", sw);
-    el("b", "", stxt).textContent = "\u8986\u76D6\u5DF2\u4F5C\u7B54";
-    el("small", "", stxt).textContent = "\u9ED8\u8BA4\u8DF3\u8FC7\u5DF2\u7B54\u9898\uFF0C\u4FDD\u7559\u539F\u6709\u7B54\u6848";
-    const ovw = el("input", "switch", sw);
-    ovw.id = "aa-overwrite";
-    ovw.type = "checkbox";
+    const fRedo = el("div", "field", pageAnswer);
+    el("label", "flabel", fRedo).textContent = "\u5DF2\u7B54\u9898\u5904\u7406";
+    fRedo.querySelector("label").htmlFor = "aa-redo";
+    const rsel = el("select", "", fRedo);
+    rsel.id = "aa-redo";
+    for (const [value, label] of [
+      ["skip", "\u8DF3\u8FC7\u5DF2\u7B54\uFF08\u9ED8\u8BA4\uFF09"],
+      ["wrong", "\u4EC5\u91CD\u505A\u9519\u8BEF\u9898"],
+      ["all", "\u5168\u90E8\u91CD\u505A\uFF08\u8986\u76D6\uFF09"]
+    ]) {
+      const o = el("option", "", rsel);
+      o.value = value;
+      o.textContent = label;
+    }
+    el("p", "hint", fRedo).textContent = "\u4EC5\u91CD\u505A\u9519\u8BEF\uFF1A\u6309 PTA \u5224\u5206\u72B6\u6001\u53EA\u91CD\u505A\u7B54\u9519\u7684\u7F16\u7801\u9898\uFF08\u672A\u63D0\u4EA4\u8349\u7A3F\u4E5F\u4F1A\u91CD\u505A\uFF09\uFF1B\u5BA2\u89C2\u9898\u7B54\u9898\u4E2D\u4E0D\u5224\u5206\uFF0C\u4ECD\u6309\u8DF3\u8FC7\u5904\u7406";
     const swImg = el("label", "switchrow", pageAnswer);
     swImg.htmlFor = "aa-images";
     const stxtImg = el("span", "stxt", swImg);
     el("b", "", stxtImg).textContent = "\u4F5C\u7B54\u542B\u56FE\u9898";
-    el("small", "", stxtImg).textContent = "\u9700\u89C6\u89C9\u6A21\u578B\uFF08\u5982 deepseek-flash\uFF09\uFF0C\u9ED8\u8BA4\u8DF3\u8FC7\uFF1B\u4EC5\u5BA2\u89C2\u9898";
+    el("small", "", stxtImg).textContent = "\u9700\u89C6\u89C9\u6A21\u578B\uFF08\u5982 deepseek-flash\uFF09\uFF0C\u9ED8\u8BA4\u8DF3\u8FC7\uFF1B\u5BA2\u89C2\u9898\u4E0E\u7F16\u7A0B/\u51FD\u6570\u9898";
     const imgs = el("input", "switch", swImg);
     imgs.id = "aa-images";
     imgs.type = "checkbox";
@@ -2843,8 +3023,8 @@ input:disabled, button:disabled { opacity: .6; cursor: not-allowed; } /* PTA \u7
     logs.id = "logs";
     logs.setAttribute("role", "log");
     logs.setAttribute("aria-live", "polite");
-    el("p", "foot", pageAnswer).textContent = "\u5B9E\u9A8C\u529F\u80FD\uFF1A\u7B54\u9898\u4E2D\u5E73\u53F0\u4E0D\u53CD\u9988\u5BF9\u9519\uFF0C\u5B8C\u6210\u540E\u8BF7\u81EA\u884C\u6838\u5BF9\u7ED3\u679C\u3002";
-    el("p", "foot", pageAnswer).textContent = "\u6587\u672C\u6A21\u578B\u770B\u4E0D\u89C1\u56FE\u7247\uFF1A\u5BA2\u89C2\u9898\u542B\u56FE\u9898\u8981\u4E48\u8DF3\u8FC7\uFF0C\u8981\u4E48\u5207\u5230\u89C6\u89C9\u6A21\u578B\uFF08\u5982 deepseek-flash\uFF09\u5E76\u5F00\u542F\u300C\u4F5C\u7B54\u542B\u56FE\u9898\u300D\uFF1B\u7F16\u7A0B\u9898\u4E0D\u63A5\u56FE\u7247\u8F93\u5165\uFF0C\u542B\u56FE\u9898\u6309\u6587\u5B57\u9898\u9762\u4F5C\u7B54\u5E76\u7167\u5E38\u63D0\u4EA4\u3002";
+    el("p", "foot", pageAnswer).textContent = "\u5B9E\u9A8C\u529F\u80FD\uFF1A\u5BA2\u89C2\u9898\u7B54\u9898\u4E2D\u5E73\u53F0\u4E0D\u53CD\u9988\u5BF9\u9519\uFF0C\u7F16\u7801\u9898\u63D0\u4EA4\u5373\u8BC4\u6D4B\uFF1B\u5B8C\u6210\u540E\u8BF7\u81EA\u884C\u6838\u5BF9\u7ED3\u679C\u3002";
+    el("p", "foot", pageAnswer).textContent = "\u6587\u672C\u6A21\u578B\u770B\u4E0D\u89C1\u56FE\u7247\uFF1A\u542B\u56FE\u9898\uFF08\u5BA2\u89C2\u9898\u4E0E\u7F16\u7A0B/\u51FD\u6570\u9898\uFF09\u8981\u4E48\u8DF3\u8FC7\uFF0C\u8981\u4E48\u5207\u5230\u89C6\u89C9\u6A21\u578B\uFF08\u5982 deepseek-flash\uFF09\u5E76\u5F00\u542F\u300C\u4F5C\u7B54\u542B\u56FE\u9898\u300D\uFF1B\u5F00\u542F\u540E\u7F16\u7801\u9898\u4F1A\u628A\u9898\u5E72\u56FE\u7247\u968F\u9898\u9762\u4EA4\u7ED9\u6A21\u578B\uFF0C\u518D\u7167\u5E38\u6C34\u5408\u63D0\u4EA4\u8BC4\u6D4B\u3002";
     el("p", "foot", pageAnswer).textContent = "\u7F16\u7A0B\u9898\u63D0\u4EA4\u5373\u8BC4\u6D4B\uFF1A\u4F5C\u7B54\u4F1A\u5B9E\u65F6\u751F\u6210\u63D0\u4EA4\u8BB0\u5F55\u4E0E\u4F5C\u7B54\u5EA6\uFF0C\u6210\u7EE9\u7531\u8BC4\u6D4B\u7ED3\u679C\u51B3\u5B9A\uFF0C\u4E0E\u5BA2\u89C2\u9898\u5224\u5206\u8DEF\u5F84\u4E0D\u540C\u3002";
     let drag = null;
     let suppressClickUntil = 0;
@@ -2927,7 +3107,8 @@ input:disabled, button:disabled { opacity: .6; cursor: not-allowed; } /* PTA \u7
     burl.value = ((settings || {}).autoAnswerBaseUrl || "").trim();
     mname.value = ((settings || {}).autoAnswerModel || "").trim();
     key.value = currentKey(settings, sel.value);
-    ovw.checked = !!(settings || {}).autoAnswerOverwrite;
+    const savedRedo = (settings || {}).autoAnswerRedo;
+    rsel.value = REDO_MODES.includes(savedRedo) ? savedRedo : "skip";
     imgs.checked = !!(settings || {}).autoAnswerImages;
     csel.value = String(clampConcurrency((settings || {}).autoAnswerConcurrency, 6));
     refreshLangOptions();
@@ -2945,7 +3126,7 @@ input:disabled, button:disabled { opacity: .6; cursor: not-allowed; } /* PTA \u7
     mname.addEventListener("change", persist);
     key.addEventListener("change", persist);
     lsel.addEventListener("change", persist);
-    ovw.addEventListener("change", persist);
+    rsel.addEventListener("change", persist);
     imgs.addEventListener("change", persist);
     csel.addEventListener("change", persist);
     clear.addEventListener("click", () => {
@@ -3079,7 +3260,8 @@ input:disabled, button:disabled { opacity: .6; cursor: not-allowed; } /* PTA \u7
   async function persist() {
     if (!shadow) return;
     const apiKey = shadow.getElementById("aa-key").value.trim();
-    const overwrite = shadow.getElementById("aa-overwrite").checked;
+    const redoPick = shadow.getElementById("aa-redo")?.value;
+    const redo = REDO_MODES.includes(redoPick) ? redoPick : "skip";
     const withImages = shadow.getElementById("aa-images").checked;
     const gw = shadow.getElementById("aa-model");
     const gateway = PRESETS[gw.value] ? gw.value : "deepseek";
@@ -3090,7 +3272,7 @@ input:disabled, button:disabled { opacity: .6; cursor: not-allowed; } /* PTA \u7
     const concurrency = clampConcurrency(shadow.getElementById("aa-concurrency")?.value, 6);
     try {
       const fresh = await loadSettings();
-      await saveSettings({ ...withKeyFor(fresh, gateway, apiKey), autoAnswerOverwrite: overwrite, autoAnswerImages: withImages, autoAnswerGateway: gateway, autoAnswerBaseUrl: baseUrl, autoAnswerModel: model, autoAnswerLanguage: language, autoAnswerConcurrency: concurrency });
+      await saveSettings({ ...withKeyFor(fresh, gateway, apiKey), autoAnswerRedo: redo, autoAnswerImages: withImages, autoAnswerGateway: gateway, autoAnswerBaseUrl: baseUrl, autoAnswerModel: model, autoAnswerLanguage: language, autoAnswerConcurrency: concurrency });
     } catch (_) {
     }
   }
@@ -3125,7 +3307,8 @@ input:disabled, button:disabled { opacity: .6; cursor: not-allowed; } /* PTA \u7
       shadow.getElementById("aa-key").focus();
       return;
     }
-    const overwrite = shadow.getElementById("aa-overwrite").checked;
+    const redoPick = shadow.getElementById("aa-redo")?.value;
+    const redo = REDO_MODES.includes(redoPick) ? redoPick : "skip";
     const withImages = shadow.getElementById("aa-images").checked;
     const language = (shadow.getElementById("aa-lang")?.value || "").trim();
     const concurrency = clampConcurrency(shadow.getElementById("aa-concurrency")?.value, 6);
@@ -3134,7 +3317,7 @@ input:disabled, button:disabled { opacity: .6; cursor: not-allowed; } /* PTA \u7
       baseUrl,
       model,
       apiKey,
-      overwrite,
+      redo,
       images: withImages,
       gateway: preset.gateway,
       language,

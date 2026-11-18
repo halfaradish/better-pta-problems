@@ -60,6 +60,20 @@ test('端口通道：progress 转发，done 正常回传', async () => {
   assert.equal(port.disconnected, true);
 });
 
+test('端口通道：progress 会重置无进度计时，长思考不被总时长误杀', async () => {
+  const { ports } = fakeChrome();
+  const { backgroundChat } = await load();
+  const p = backgroundChat({ type: 'BPS_LLM_CHAT', reqId: 'req-5' }, { timeoutMs: 400 });
+  const port = ports[0];
+  await new Promise(r => setTimeout(r, 150));
+  // 原截止 ≈405ms，progress 后应续到 ≈555ms
+  port.emit({ type: 'progress', phase: 'thinking-tick', chars: 10, elapsedMs: 150 });
+  await new Promise(r => setTimeout(r, 300)); // t≈450ms：没有续命的话这里已经超时
+  port.emit({ type: 'done', ok: true, status: 200, content: 'ok' });
+  const rsp = await p;
+  assert.equal(rsp.content, 'ok');
+});
+
 test('端口通道：后台被回收 → channelClosed 错误（可重试分类）', async () => {
   const { ports } = fakeChrome();
   const { backgroundChat } = await load();

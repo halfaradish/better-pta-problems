@@ -1,6 +1,7 @@
 /* 更好的题目集 · 设置弹窗（构建产物，请勿直接编辑；源码见 src/popup/） */
 (() => {
   // src/shared/settings.js
+  var REDO_MODES = ["skip", "wrong", "all"];
   var DEFAULTS = {
     enabled: true,
     // 总开关
@@ -41,10 +42,10 @@
     // 可自填网关的模型名（OpenCode Go / 自定义）；空 = 用适配预设的默认模型
     autoAnswerBaseUrl: "",
     // 「自定义」服务的 OpenAI 兼容端点（填到 /v1；仅选自定义时用）
-    autoAnswerOverwrite: false,
-    // 覆盖已作答的题目（默认跳过已答，避免把用户的正确答案改错）
+    autoAnswerRedo: "skip",
+    // 已答题处理：skip=跳过已答；wrong=仅重做判分未通过的编码题；all=全部重做（v0.12.2 起替代布尔 autoAnswerOverwrite）
     autoAnswerImages: false,
-    // 含图题作答（需视觉模型如 deepseek-flash：图片下载编码进 prompt；默认关闭=客观题含图跳过；编程题不受此项影响）
+    // 含图题作答（需视觉模型如 deepseek-flash：图片下载编码进 prompt；默认关闭=含图题跳过；v0.12.1 起客观题与编码题都生效）
     autoAnswerLanguage: "",
     // 编程题固定语言（exams 接口白名单的编译器 id）；空 = 跟随各题编辑器当前语言
     autoAnswerConcurrency: 3,
@@ -52,7 +53,7 @@
     settingsVersion: 0
     // 0 = 旧版设置；v4 起「列表/分组」不再持久化（改为按路由的会话内状态）
   };
-  var SETTINGS_VERSION = 7;
+  var SETTINGS_VERSION = 8;
   var HAS_CHROME_STORAGE = typeof chrome !== "undefined" && !!chrome.storage?.sync;
   function needsMigration(raw) {
     return (raw?.settingsVersion || 0) < SETTINGS_VERSION;
@@ -67,8 +68,11 @@
       delete s.autoAnswerApiKey;
       s.reminderEmailEnabled = typeof raw?.reminderEnabled === "boolean" ? raw.reminderEnabled : s.reminderEmailEnabled !== false;
       delete s.reminderEnabled;
+      s.autoAnswerRedo = typeof raw?.autoAnswerOverwrite === "boolean" ? raw.autoAnswerOverwrite ? "all" : "skip" : "skip";
+      delete s.autoAnswerOverwrite;
       s.settingsVersion = SETTINGS_VERSION;
     }
+    delete s.autoAnswerOverwrite;
     return s;
   }
   var storage = {
@@ -114,6 +118,7 @@
     for (const [k, dv] of Object.entries(DEFAULTS)) {
       const v = src[k];
       if (typeof dv === "boolean") next[k] = typeof v === "boolean" ? v : dv;
+      else if (k === "autoAnswerRedo") next[k] = REDO_MODES.includes(v) ? v : dv;
       else if (typeof dv === "string") next[k] = typeof v === "string" ? v : dv;
       else if (typeof dv === "number") next[k] = typeof v === "number" && Number.isFinite(v) ? v : dv;
       else if (k === "autoAnswerApiKeys") {

@@ -3,6 +3,9 @@
  * 拆分前 DEFAULTS 与版本迁移在 core.js 和 popup.js 各写一份，加一个开关要改两处，
  * 漏一处就是静默漂移——现在只有这里一份。
  */
+// 已答题处理策略：skip=跳过已答（默认）；wrong=仅重做判分未通过的编码题；all=全部重做（覆盖）
+export const REDO_MODES = ['skip', 'wrong', 'all'];
+
 export const DEFAULTS = {
   enabled: true,          // 总开关
   badge: true,            // 卡片上的课程徽章
@@ -25,14 +28,14 @@ export const DEFAULTS = {
   autoAnswerGateway: 'deepseek', // 悬浮面板选中的模型适配（content/autoanswer-panel.js 的 PRESETS 键）
   autoAnswerModel: '',        // 可自填网关的模型名（OpenCode Go / 自定义）；空 = 用适配预设的默认模型
   autoAnswerBaseUrl: '',      // 「自定义」服务的 OpenAI 兼容端点（填到 /v1；仅选自定义时用）
-  autoAnswerOverwrite: false, // 覆盖已作答的题目（默认跳过已答，避免把用户的正确答案改错）
-  autoAnswerImages: false,    // 含图题作答（需视觉模型如 deepseek-flash：图片下载编码进 prompt；默认关闭=客观题含图跳过；编程题不受此项影响）
+  autoAnswerRedo: 'skip',     // 已答题处理：skip=跳过已答；wrong=仅重做判分未通过的编码题；all=全部重做（v0.12.2 起替代布尔 autoAnswerOverwrite）
+  autoAnswerImages: false,    // 含图题作答（需视觉模型如 deepseek-flash：图片下载编码进 prompt；默认关闭=含图题跳过；v0.12.1 起客观题与编码题都生效）
   autoAnswerLanguage: '',     // 编程题固定语言（exams 接口白名单的编译器 id）；空 = 跟随各题编辑器当前语言
   autoAnswerConcurrency: 3,   // 编码题并发作答路数（1–6，默认 3）：同时向模型发起的请求数；收题/提交仍是串行页面操作
   settingsVersion: 0,     // 0 = 旧版设置；v4 起「列表/分组」不再持久化（改为按路由的会话内状态）
 };
 
-export const SETTINGS_VERSION = 7;
+export const SETTINGS_VERSION = 8;
 
 // 扩展环境用 chrome.storage.sync（跨设备同步）；预览页 / 独立打开的弹窗退化为内存
 export const HAS_CHROME_STORAGE = typeof chrome !== 'undefined' && !!chrome.storage?.sync;
@@ -56,8 +59,18 @@ export function migrate(raw) {
     // 注意读的是 raw：DEFAULTS 里已没有 reminderEnabled，且下面的 delete 会把它从 s 里抹掉
     s.reminderEmailEnabled = typeof raw?.reminderEnabled === 'boolean' ? raw.reminderEnabled : s.reminderEmailEnabled !== false;
     delete s.reminderEnabled;
+    // v8：布尔「覆盖已作答」升级为三态「已答题处理」——旧 true → all，false/缺失 → skip。
+    // 注意 raw 可能已被 storage.get() 合并过 DEFAULTS（autoAnswerRedo 默认 'skip'），
+    // 因此不能靠「raw 里有没有新字段」判断；能走到这里就说明 settingsVersion < 8，
+    // 而这个版本本来就没有 autoAnswerRedo，旧布尔值才是唯一可信来源。
+    s.autoAnswerRedo = typeof raw?.autoAnswerOverwrite === 'boolean'
+      ? (raw.autoAnswerOverwrite ? 'all' : 'skip')
+      : 'skip';
+    delete s.autoAnswerOverwrite;
     s.settingsVersion = SETTINGS_VERSION;
   }
+  // v8 起旧键不再使用；即使 settingsVersion 已是 8（手改/混入旧导出），读设置时也顺手清掉
+  delete s.autoAnswerOverwrite;
   return s;
 }
 
@@ -138,6 +151,7 @@ export function sanitizeSettings(raw) {
   for (const [k, dv] of Object.entries(DEFAULTS)) {
     const v = src[k];
     if (typeof dv === 'boolean') next[k] = typeof v === 'boolean' ? v : dv;
+    else if (k === 'autoAnswerRedo') next[k] = REDO_MODES.includes(v) ? v : dv; // 枚举白名单，防止导入任意字符串
     else if (typeof dv === 'string') next[k] = typeof v === 'string' ? v : dv;
     else if (typeof dv === 'number') next[k] = (typeof v === 'number' && Number.isFinite(v)) ? v : dv;
     else if (k === 'autoAnswerApiKeys') {

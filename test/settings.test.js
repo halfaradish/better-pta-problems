@@ -6,9 +6,9 @@ import {
   sanitizeSettings, saveSettings, unwrapExport,
 } from '../src/shared/settings.js';
 
-test('migrate：旧版设置升级到 v7，删掉不再持久化的 grouped，自动答题字段补默认值', () => {
+test('migrate：旧版设置升级到 v8，删掉不再持久化的 grouped，自动答题字段补默认值', () => {
   const next = migrate({ grouped: true, enabled: false });
-  assert.equal(next.settingsVersion, 7);
+  assert.equal(next.settingsVersion, 8);
   assert.equal('grouped' in next, false);
   assert.equal(next.enabled, false);
   assert.equal(next.separators, DEFAULTS.separators); // 缺失字段补默认值
@@ -17,7 +17,7 @@ test('migrate：旧版设置升级到 v7，删掉不再持久化的 grouped，�
   assert.equal(next.autoAnswerGateway, 'deepseek'); // 面板选中的模型适配默认 DeepSeek
   assert.equal(next.autoAnswerModel, '');
   assert.equal(next.autoAnswerBaseUrl, '');
-  assert.equal(next.autoAnswerOverwrite, false);
+  assert.equal(next.autoAnswerRedo, 'skip');   // 已答题处理默认跳过
   assert.equal(next.autoAnswerImages, false); // 含图题默认跳过（视觉模型需用户显式开启）
   assert.equal(next.autoAnswerLanguage, ''); // 编程题语言默认跟随编辑器当前（不固定）
 });
@@ -35,7 +35,7 @@ test('migrate v5→v6：旧的单把 API Key 归入当时选中的服务名下',
 
 test('migrate v6→v7：旧的「启用邮件提醒」更名到邮件通道，浏览器通知通道补默认开', () => {
   const off = migrate({ settingsVersion: 6, reminderEnabled: false, reminderServer: 'x:1', reminderEmail: 'a@b.c' });
-  assert.equal(off.settingsVersion, 7);
+  assert.equal(off.settingsVersion, 8);
   assert.equal(off.reminderEmailEnabled, false);        // 旧开关的状态跟着走（关着就继续关）
   assert.equal(off.reminderBrowser, true);              // 新通道默认开（零配置、纯本地、不外发）
   assert.equal('reminderEnabled' in off, false);        // 旧字段清掉，防止继续被读成总开关
@@ -63,8 +63,19 @@ test('reminderChannels：双通道判定（邮件需开关开 + 服务器与邮�
   assert.equal(quiet.skipDone, false);
 });
 
-test('migrate：已是 v7 的设置不再改动', () => {
-  const kept = migrate({ settingsVersion: 7, separators: '·', grouped: true });
+test('migrate v7→v8：布尔「覆盖已作答」升级为三态「已答题处理」', () => {
+  assert.equal(migrate({ settingsVersion: 7, autoAnswerOverwrite: true }).autoAnswerRedo, 'all');
+  assert.equal(migrate({ settingsVersion: 7, autoAnswerOverwrite: false }).autoAnswerRedo, 'skip');
+  assert.equal(migrate({ settingsVersion: 7 }).autoAnswerRedo, 'skip'); // 没存过按默认跳过
+  const next = migrate({ settingsVersion: 7, autoAnswerOverwrite: true });
+  assert.equal('autoAnswerOverwrite' in next, false); // 旧字段清掉，防止继续被读成开关
+  // 真实存储路径：storage.get() 会先合并 DEFAULTS（autoAnswerRedo 已是 'skip'），
+  // 迁移不能因此把旧 true 当成「新字段已存在」而丢掉
+  assert.equal(migrate({ settingsVersion: 7, autoAnswerRedo: 'skip', autoAnswerOverwrite: true }).autoAnswerRedo, 'all');
+});
+
+test('migrate：已是 v8 的设置不再改动', () => {
+  const kept = migrate({ settingsVersion: 8, separators: '·', grouped: true });
   assert.equal(kept.separators, '·');
   assert.equal(kept.grouped, true); // 迁移只负责旧版清理
 });
@@ -74,7 +85,8 @@ test('needsMigration', () => {
   assert.equal(needsMigration({ settingsVersion: 4 }), true);
   assert.equal(needsMigration({ settingsVersion: 5 }), true);
   assert.equal(needsMigration({ settingsVersion: 6 }), true);
-  assert.equal(needsMigration({ settingsVersion: 7 }), false);
+  assert.equal(needsMigration({ settingsVersion: 7 }), true);
+  assert.equal(needsMigration({ settingsVersion: 8 }), false);
 });
 
 test('无扩展环境（预览页 / 独立打开弹窗）退化为内存存储', async () => {
@@ -127,6 +139,10 @@ test('sanitizeSettings：只收认识且同型的字段，导入旧格式先迁�
   assert.equal(sanitizeSettings({ enabled: 'yes' }).enabled, DEFAULTS.enabled);
   assert.equal(sanitizeSettings({ separators: 123 }).separators, DEFAULTS.separators);
   assert.deepEqual(sanitizeSettings({ autoAnswerApiKeys: [] }).autoAnswerApiKeys, {});
+  // 三态枚举只收白名单值，非法字符串回默认
+  assert.equal(sanitizeSettings({ autoAnswerRedo: 'wrong' }).autoAnswerRedo, 'wrong');
+  assert.equal(sanitizeSettings({ autoAnswerRedo: 'delete-everything' }).autoAnswerRedo, 'skip');
+  assert.equal(sanitizeSettings({ autoAnswerRedo: true }).autoAnswerRedo, 'skip');
   assert.deepEqual(sanitizeSettings(null), { ...DEFAULTS, settingsVersion: SETTINGS_VERSION });
 
   // Key 映射逐条过滤：非字符串值的条目丢弃，字符串保留

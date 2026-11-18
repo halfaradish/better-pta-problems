@@ -1,7 +1,7 @@
 /* 自动答题悬浮球与面板（实验）。
  *
  * 弹窗只保留总开关（settings.autoAnswer）；题目列表页（/exam/problems…）挂出悬浮球，
- * 点开为答题面板：模型适配选择（DeepSeek / OpenCode Go）、API Key、覆盖已作答、
+ * 点开为答题面板：模型适配选择（DeepSeek / OpenCode Go）、API Key、已答题处理、
  * 开始/中止答题（运行中按钮变身「中止答题」）、运行日志（可清空）。面板用 Shadow DOM 隔离——不吸 PTA 页面的样式，也不把自己的
  * 类名泄进页面；设计令牌与设置弹窗、注入样式同源（PTA 实测令牌，主色 hsl(212,89%,53%)，
  * 暗色跟随 PTA 自己的 .dark 类而不是系统）。
@@ -10,7 +10,7 @@
  * 关掉面板 / 翻到别的页面都不打断运行；运行中悬浮球常驻并显示整体进度环。
  */
 import { clampConcurrency } from '../shared/coding-batch.js';
-import { loadSettings, saveSettings } from '../shared/settings.js';
+import { loadSettings, REDO_MODES, saveSettings } from '../shared/settings.js';
 import {
   abortRun, clearPersistedLog, COMPILER_LABELS, EXAM_PROBLEMS_RE, fetchAllowedCompilers,
   handleRun, isRunning, normalizeBaseUrl, persistLogLine, readPersistedLog, setEventSink,
@@ -604,20 +604,29 @@ function mount() {
   peek.setAttribute('aria-label', '显示或隐藏 API Key');
   el('p', 'hint', fKey).textContent = '每个服务各存一把 Key，切服务自动带出；仅保存在本机浏览器';
 
-  const sw = el('label', 'switchrow', pageAnswer);
-  sw.htmlFor = 'aa-overwrite';
-  const stxt = el('span', 'stxt', sw);
-  el('b', '', stxt).textContent = '覆盖已作答';
-  el('small', '', stxt).textContent = '默认跳过已答题，保留原有答案';
-  const ovw = el('input', 'switch', sw);
-  ovw.id = 'aa-overwrite';
-  ovw.type = 'checkbox';
+  // 已答题处理：三态策略（v0.12.2）。「仅重做错误」按 PTA 判分状态只重做未通过的编码题；
+  // 客观题答题中不判分，仍按跳过已答处理。
+  const fRedo = el('div', 'field', pageAnswer);
+  el('label', 'flabel', fRedo).textContent = '已答题处理';
+  fRedo.querySelector('label').htmlFor = 'aa-redo';
+  const rsel = el('select', '', fRedo);
+  rsel.id = 'aa-redo';
+  for (const [value, label] of [
+    ['skip', '跳过已答（默认）'],
+    ['wrong', '仅重做错误题'],
+    ['all', '全部重做（覆盖）'],
+  ]) {
+    const o = el('option', '', rsel);
+    o.value = value;
+    o.textContent = label;
+  }
+  el('p', 'hint', fRedo).textContent = '仅重做错误：按 PTA 判分状态只重做答错的编码题（未提交草稿也会重做）；客观题答题中不判分，仍按跳过处理';
 
   const swImg = el('label', 'switchrow', pageAnswer);
   swImg.htmlFor = 'aa-images';
   const stxtImg = el('span', 'stxt', swImg);
   el('b', '', stxtImg).textContent = '作答含图题';
-  el('small', '', stxtImg).textContent = '需视觉模型（如 deepseek-flash），默认跳过；仅客观题';
+  el('small', '', stxtImg).textContent = '需视觉模型（如 deepseek-flash），默认跳过；客观题与编程/函数题';
   const imgs = el('input', 'switch', swImg);
   imgs.id = 'aa-images';
   imgs.type = 'checkbox';
@@ -638,8 +647,8 @@ function mount() {
   logs.setAttribute('role', 'log');
   logs.setAttribute('aria-live', 'polite');
 
-  el('p', 'foot', pageAnswer).textContent = '实验功能：答题中平台不反馈对错，完成后请自行核对结果。';
-  el('p', 'foot', pageAnswer).textContent = '文本模型看不见图片：客观题含图题要么跳过，要么切到视觉模型（如 deepseek-flash）并开启「作答含图题」；编程题不接图片输入，含图题按文字题面作答并照常提交。';
+  el('p', 'foot', pageAnswer).textContent = '实验功能：客观题答题中平台不反馈对错，编码题提交即评测；完成后请自行核对结果。';
+  el('p', 'foot', pageAnswer).textContent = '文本模型看不见图片：含图题（客观题与编程/函数题）要么跳过，要么切到视觉模型（如 deepseek-flash）并开启「作答含图题」；开启后编码题会把题干图片随题面交给模型，再照常水合提交评测。';
   el('p', 'foot', pageAnswer).textContent = '编程题提交即评测：作答会实时生成提交记录与作答度，成绩由评测结果决定，与客观题判分路径不同。';
 
   // —— 事件绑定 ——
@@ -718,7 +727,8 @@ function mount() {
   burl.value = ((settings || {}).autoAnswerBaseUrl || '').trim();
   mname.value = ((settings || {}).autoAnswerModel || '').trim();
   key.value = currentKey(settings, sel.value); // 按当前服务的映射取回上文 Key
-  ovw.checked = !!((settings || {}).autoAnswerOverwrite);
+  const savedRedo = (settings || {}).autoAnswerRedo;
+  rsel.value = REDO_MODES.includes(savedRedo) ? savedRedo : 'skip';
   imgs.checked = !!((settings || {}).autoAnswerImages);
   csel.value = String(clampConcurrency((settings || {}).autoAnswerConcurrency, 6));
   // 语言选项异步填充（拉本题集白名单后再恢复上次固定值）
@@ -738,7 +748,7 @@ function mount() {
   mname.addEventListener('change', persist);
   key.addEventListener('change', persist);
   lsel.addEventListener('change', persist);
-  ovw.addEventListener('change', persist);
+  rsel.addEventListener('change', persist);
   imgs.addEventListener('change', persist);
   csel.addEventListener('change', persist);
   clear.addEventListener('click', () => {
@@ -885,7 +895,8 @@ async function saveKeyFor(gateway, value) {
 async function persist() {
   if (!shadow) return;
   const apiKey = shadow.getElementById('aa-key').value.trim();
-  const overwrite = shadow.getElementById('aa-overwrite').checked;
+  const redoPick = shadow.getElementById('aa-redo')?.value;
+  const redo = REDO_MODES.includes(redoPick) ? redoPick : 'skip';
   const withImages = shadow.getElementById('aa-images').checked;
   const gw = shadow.getElementById('aa-model');
   const gateway = PRESETS[gw.value] ? gw.value : 'deepseek';
@@ -897,7 +908,7 @@ async function persist() {
   try {
     const fresh = await loadSettings();
     // Key 归档进当前服务的名下（withKeyFor 只动这一个键，其他服务的 Key 原样保留）
-    await saveSettings({ ...withKeyFor(fresh, gateway, apiKey), autoAnswerOverwrite: overwrite, autoAnswerImages: withImages, autoAnswerGateway: gateway, autoAnswerBaseUrl: baseUrl, autoAnswerModel: model, autoAnswerLanguage: language, autoAnswerConcurrency: concurrency });
+    await saveSettings({ ...withKeyFor(fresh, gateway, apiKey), autoAnswerRedo: redo, autoAnswerImages: withImages, autoAnswerGateway: gateway, autoAnswerBaseUrl: baseUrl, autoAnswerModel: model, autoAnswerLanguage: language, autoAnswerConcurrency: concurrency });
   } catch (_) { /* 存储失败不阻断 UI */ }
 }
 
@@ -931,7 +942,8 @@ async function startRun() {
     shadow.getElementById('aa-key').focus();
     return;
   }
-  const overwrite = shadow.getElementById('aa-overwrite').checked;
+  const redoPick = shadow.getElementById('aa-redo')?.value;
+  const redo = REDO_MODES.includes(redoPick) ? redoPick : 'skip';
   const withImages = shadow.getElementById('aa-images').checked;
   const language = (shadow.getElementById('aa-lang')?.value || '').trim();
   const concurrency = clampConcurrency(shadow.getElementById('aa-concurrency')?.value, 6);
@@ -940,7 +952,7 @@ async function startRun() {
     baseUrl,
     model,
     apiKey,
-    overwrite,
+    redo,
     images: withImages,
     gateway: preset.gateway,
     language,

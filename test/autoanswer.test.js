@@ -220,6 +220,20 @@ test('assembleImgMessage：视觉消息 = 原文本在前（附说明），题�
   assert.match(empty[0].text, /本题含配图/);
 });
 
+test('assembleImgMessage：编码题变体输出代码围栏约定，并按收题语境标注图片所属小节', () => {
+  const parts = assembleImgMessage('题目文本…', { stem: ['d1', 'd2'], options: {}, contexts: ['题目描述', '输入格式:'] }, { coding: true });
+  assert.match(parts[0].text, /题目文本…/);
+  assert.match(parts[0].text, /代码围栏块/);
+  assert.doesNotMatch(parts[0].text, /只输出一个 JSON/);
+  assert.deepEqual(parts[1], { type: 'text', text: '（题干配图 1/2，所属小节：题目描述）' });
+  assert.deepEqual(parts[2], { type: 'image_url', image_url: { url: 'd1' } });
+  assert.deepEqual(parts[3], { type: 'text', text: '（题干配图 2/2，所属小节：输入格式:）' });
+  assert.deepEqual(parts[4], { type: 'image_url', image_url: { url: 'd2' } });
+  // 老续跑单/客观题没有 contexts 时回退到纯编号
+  const noCtx = assembleImgMessage('x', { stem: ['d1'], options: {} }, { coding: true });
+  assert.deepEqual(noCtx[1], { type: 'text', text: '（题干配图 1/1）' });
+});
+
 test('PRESETS：OpenCode Go 网关适配的关键约定（协议头分支与默认模型）', () => {
   assert.equal(PRESETS.opencode.gateway, 'opencode'); // chatOnce 靠它走后台转发并加 x-opencode-session
   assert.equal(PRESETS.opencode.baseUrl, 'https://opencode.ai/inference/go/openai/v1'); // 官方文档口径
@@ -341,7 +355,20 @@ test('relaySummaryLine：无失败只有汇总行；有失败追加明细（跨�
   });
   assert.match(clean, /作答 1 · 跳过已答 2 · 失败 0$/);
   assert.doesNotMatch(clean, /跳过含图/);
+  assert.doesNotMatch(clean, /重做错题/);
   assert.doesNotMatch(clean, /明细/);
+  // 仅重做错误的重做数同样只在 >0 时出现
+  const withRedo = relaySummaryLine({
+    summary: { applied: 1, skippedAnswered: 2, redoWrong: 1, failed: [] },
+    cfg: {},
+  });
+  assert.match(withRedo, /作答 1 · 跳过已答 2 · 重做错题 1 · 失败 0$/);
+  // 含图题跳过数只在 >0 时出现，兼容没有该字段的旧续跑单
+  const withImg = relaySummaryLine({
+    summary: { applied: 1, skippedAnswered: 2, skippedImage: 3, failed: [] },
+    cfg: {},
+  });
+  assert.match(withImg, /作答 1 · 跳过已答 2 · 跳过含图 3 · 失败 0$/);
   const messy = relaySummaryLine({
     summary: { applied: 0, skippedAnswered: 0, failed: [{ id: '2110', label: '7-1', reason: 'LLM 调用失败：请求 120s 无响应，已按超时中断' }] },
     cfg: {},
@@ -399,6 +426,9 @@ test('buildPrompt：函数题——签名一致、不写 main、围栏输出、�
   assert.match(user, /不要写 main/);
   assert.doesNotMatch(user, /JSON/); // 与客观题的 JSON 指令互斥，防模型输出 {"answer":…}
   assert.match(p[0].content, /代码围栏块/);
+  // 系统提示也必须是「函数实现」而不是「完整程序」，否则与「不要写 main」冲突
+  assert.match(p[0].content, /函数实现源码/);
+  assert.doesNotMatch(p[0].content, /完整程序源码/);
   // 语言标签缺省回落「题目规定的语言」
   const p2 = buildPrompt({ kind: 'CODE_COMPLETION', text: '…', langLabel: '', options: [], blanks: 0 });
   assert.match(p2[1].content, /题目规定的语言/);

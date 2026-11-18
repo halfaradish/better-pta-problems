@@ -118,10 +118,16 @@ async function relayLlmChat(msg, emit = () => {}) {
   let lastProgressAt = 0;
   let headersTimer = setTimeout(() => abortWith('headers'), LLM_HEADERS_TIMEOUT_MS);
   let idleTimer = null;
-  const totalTimer = setTimeout(() => abortWith('total'), LLM_TOTAL_TIMEOUT_MS);
+  let totalTimer = setTimeout(() => abortWith('total'), LLM_TOTAL_TIMEOUT_MS);
   const armIdle = () => {
     clearTimeout(idleTimer);
     idleTimer = setTimeout(() => abortWith('idle'), LLM_IDLE_TIMEOUT_MS);
+  };
+  // 无新内容看门狗：正文/推理增量会重置它，所以长思考只要还在出字就不会被总时长误杀；
+  // 只发 SSE keep-alive 注释、迟迟没有真正内容的流仍会在 300s 被判定卡住。
+  const armTotal = () => {
+    clearTimeout(totalTimer);
+    totalTimer = setTimeout(() => abortWith('total'), LLM_TOTAL_TIMEOUT_MS);
   };
   const progress = (phase, chars) => {
     const now = Date.now();
@@ -173,6 +179,7 @@ async function relayLlmChat(msg, emit = () => {}) {
         const delta = sseDeltaText(ev.data);
         if (delta) {
           text += delta;
+          armTotal(); // 正文增量算「有进展」：重置无新内容看门狗
           if (!firstAt) { firstAt = Date.now(); progress('first', text.length); }
           else progress('tick', text.length);
           return;
@@ -182,6 +189,7 @@ async function relayLlmChat(msg, emit = () => {}) {
         const think = sseReasoningText(ev.data);
         if (!think) return;
         reasoning += think;
+        armTotal(); // 推理增量也算「有进展」：深推理模型可以连续思考数分钟
         if (!firstThinkAt) { firstThinkAt = Date.now(); progress('thinking', reasoning.length); }
         else progress('thinking-tick', reasoning.length);
       });
@@ -211,7 +219,7 @@ async function relayLlmChat(msg, emit = () => {}) {
       : '';
     const reason = abortReason === 'headers' ? `网关 ${Math.round(LLM_HEADERS_TIMEOUT_MS / 1000)}s 未返回响应头，判定卡住`
       : abortReason === 'idle' ? `网关 ${Math.round(LLM_IDLE_TIMEOUT_MS / 1000)}s 无数据，判定卡住`
-        : abortReason === 'total' ? `生成超过 ${Math.round(LLM_TOTAL_TIMEOUT_MS / 1000)}s 总上限，已中断`
+        : abortReason === 'total' ? `连续 ${Math.round(LLM_TOTAL_TIMEOUT_MS / 1000)}s 没有新内容，判定卡住`
           : abortReason === 'stream' ? ('网关流错误' + (streamDetail ? '：' + streamDetail : ''))
             : abortReason === 'user' ? '已中止'
               : (err?.message || String(err));

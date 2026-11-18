@@ -4,7 +4,7 @@ import { test } from 'node:test';
 import {
   RELAY_VERSION, RELAY_SIZE_LIMIT, SPA_SWITCH_WAIT_MS,
   buildVerifyPlan, clampConcurrency, classifyProblem, failDetails, flattenCodingTypes,
-  isFreshStatement, pickCompiler, resumeAction, runPool, slimDraftDetail,
+  isFreshStatement, pickCompiler, redoModeOf, resumeAction, runPool, slimDraftDetail, verdictOf,
 } from '../src/shared/coding-batch.js';
 
 const PROG_TYPES = [
@@ -29,6 +29,69 @@ test('classifyProblem：已答默认跳过；覆盖已作答时仍 pending', () 
   assert.equal(classifyProblem({ answered: true }, { overwrite: true }).status, 'pending');
   assert.equal(classifyProblem({ answered: false }, {}).status, 'pending');
   assert.equal(classifyProblem(null, {}).status, 'pending');
+});
+
+test('redoModeOf：三态优先，旧布尔 overwrite 兼容', () => {
+  assert.equal(redoModeOf({ redo: 'wrong' }), 'wrong');
+  assert.equal(redoModeOf({ redo: 'all' }), 'all');
+  assert.equal(redoModeOf({ redo: 'skip', overwrite: true }), 'skip'); // 新值优先
+  assert.equal(redoModeOf({ overwrite: true }), 'all');                // 旧续跑单只有布尔
+  assert.equal(redoModeOf({ overwrite: false }), 'skip');
+  assert.equal(redoModeOf({}), 'skip');
+  assert.equal(redoModeOf(null), 'skip');
+  assert.equal(redoModeOf({ redo: 'bogus' }), 'skip');
+});
+
+test('verdictOf：PTA 判分状态映射（非通过终态一律可重做）', () => {
+  assert.equal(verdictOf('PROBLEM_ACCEPTED'), 'accepted');
+  assert.equal(verdictOf('PROBLEM_WRONG_ANSWER'), 'wrong');
+  assert.equal(verdictOf('PROBLEM_COMPILATION_ERROR'), 'wrong');
+  assert.equal(verdictOf('PROBLEM_PARTIAL_ACCEPTED'), 'wrong');
+  assert.equal(verdictOf('PROBLEM_SUBMITTED'), 'pending');
+  assert.equal(verdictOf('PROBLEM_JUDGING'), 'pending');
+  assert.equal(verdictOf('PROBLEM_NO_ANSWER'), 'none');
+  assert.equal(verdictOf(''), 'none');
+  assert.equal(verdictOf(undefined), 'unknown'); // 状态接口失败 / 该题不在响应里
+  assert.equal(verdictOf(null), 'unknown');
+});
+
+test('classifyProblem：仅重做错误按判分状态分流', () => {
+  const cfg = { redo: 'wrong' };
+  assert.equal(classifyProblem({ answered: true, verdict: 'accepted' }, cfg).status, 'skipped');
+  assert.equal(classifyProblem({ answered: true, verdict: 'accepted' }, cfg).reason, 'accepted');
+  assert.equal(classifyProblem({ answered: true, verdict: 'wrong' }, cfg).status, 'pending');
+  assert.equal(classifyProblem({ answered: true, verdict: 'wrong' }, cfg).reason, 'wrong');
+  assert.equal(classifyProblem({ answered: false, verdict: 'wrong' }, cfg).status, 'pending');
+  assert.equal(classifyProblem({ answered: true, verdict: 'pending' }, cfg).status, 'skipped');
+  assert.equal(classifyProblem({ answered: false, verdict: 'pending' }, cfg).status, 'skipped');
+  // 从未提交但有草稿：用户选择一并重做
+  assert.equal(classifyProblem({ answered: true, verdict: 'none' }, cfg).status, 'pending');
+  assert.equal(classifyProblem({ answered: true, verdict: 'none' }, cfg).reason, 'unsubmitted');
+  // 从未提交且无草稿：正常作答
+  assert.equal(classifyProblem({ answered: false, verdict: 'none' }, cfg).status, 'pending');
+  // 状态缺失：保守回退（已答跳过，未答照常答）
+  assert.equal(classifyProblem({ answered: true, verdict: 'unknown' }, cfg).status, 'skipped');
+  assert.equal(classifyProblem({ answered: true, verdict: 'unknown' }, cfg).reason, 'unknown');
+  assert.equal(classifyProblem({ answered: false, verdict: 'unknown' }, cfg).status, 'pending');
+  // 含图闸门仍生效：判分错误但没开含图题 → 跳过并标注原因
+  assert.equal(classifyProblem({ answered: true, verdict: 'wrong', hasImg: true }, cfg).status, 'skippedImage');
+  assert.equal(classifyProblem({ answered: true, verdict: 'wrong', hasImg: true }, { ...cfg, images: true }).status, 'pending');
+  // 已通过的含图题仍然跳过，不因图片开关改判
+  assert.equal(classifyProblem({ answered: true, verdict: 'accepted', hasImg: true }, { ...cfg, images: true }).status, 'skipped');
+});
+
+test('classifyProblem：全部重做模式不受判分状态影响', () => {
+  assert.equal(classifyProblem({ answered: true, verdict: 'accepted' }, { redo: 'all' }).status, 'pending');
+  assert.equal(classifyProblem({ answered: true, verdict: 'wrong', hasImg: true }, { redo: 'all' }).status, 'skippedImage');
+});
+
+test('classifyProblem：含图编码题在未开「作答含图题」时跳过，开了仍 pending', () => {
+  assert.equal(classifyProblem({ answered: false, hasImg: true }, {}).status, 'skippedImage');
+  assert.equal(classifyProblem({ answered: false, hasImg: true }, { images: true }).status, 'pending');
+  // 已答优先（保留用户答案），开不开图都不改判
+  assert.equal(classifyProblem({ answered: true, hasImg: true }, { images: true }).status, 'skipped');
+  // 无图题不受开关影响
+  assert.equal(classifyProblem({ answered: false, hasImg: false }, {}).status, 'pending');
 });
 
 test('slimDraftDetail：保留 problemId/problemSetProblemId/customTestData，抽出 compiler，不搬旧 program', () => {
@@ -101,6 +164,12 @@ test('isFreshStatement：id 命中、题干非空、与上一题不同', () => {
   assert.equal(isFreshStatement('', q, '9999').ok, false);
   // 题干过短
   assert.equal(isFreshStatement('', { id: '3001', text: '太短' }, '3001').ok, false);
+  // 纯图片题：题面文本只有标题/分值，但有题干图 → 放宽文本长度
+  assert.deepEqual(
+    isFreshStatement('', { id: '3001', text: '7-4 矩阵 分数 10', hasImg: true }, '3001'),
+    { ok: true },
+  );
+  assert.equal(isFreshStatement('', { id: '3001', text: '', hasImg: true }, '3001').ok, false);
 });
 
 test('resumeAction：collect 阶段按题型页/题目页恢复，页面漂移弃单', () => {

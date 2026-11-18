@@ -18,7 +18,7 @@ import { LLM_DIRECT_TIMEOUT_MS, LLM_MAX_ATTEMPTS, LLM_MAX_IDLE_ATTEMPTS, LLM_TOT
 import {
   RELAY_SIZE_LIMIT, RELAY_VERSION, SPA_SWITCH_WAIT_MS,
   buildVerifyPlan, classifyProblem, clampConcurrency, failDetails, flattenCodingTypes,
-  isFreshStatement, pickCompiler, resumeAction, runPool, slimDraftDetail,
+  isFreshStatement, pickCompiler, redoModeOf, resumeAction, runPool, slimDraftDetail, verdictOf,
 } from '../shared/coding-batch.js';
 
 // 失败明细的实现下沉到 shared/coding-batch（批量流程与客观题汇总共用）；导出位置保持不变
@@ -192,9 +192,11 @@ export function buildPrompt(q) {
   return [
     {
       role: 'system',
-      content: isCodingKind(q.kind)
-        ? '你是严谨的答题助手，只输出一个代码围栏块（``` 包裹的完整程序源码），不要输出任何其他文字。'
-        : '你是严谨的答题助手，只输出要求的 JSON，不要输出任何其他文字。',
+      content: q.kind === 'CODE_COMPLETION'
+        ? '你是严谨的答题助手，只输出一个代码围栏块（``` 包裹的函数实现源码），不要输出任何其他文字。'
+        : isCodingKind(q.kind)
+          ? '你是严谨的答题助手，只输出一个代码围栏块（``` 包裹的完整程序源码），不要输出任何其他文字。'
+          : '你是严谨的答题助手，只输出要求的 JSON，不要输出任何其他文字。',
     },
     { role: 'user', content: lines.join('\n') },
   ];
@@ -280,14 +282,45 @@ export function parseCodeAnswer(raw) {
   return null;
 }
 
-// 题集语言白名单（页面侧带登录态 fetch；必须带 accept: application/json 才回 JSON）
-export async function fetchAllowedCompilers(psId) {
-  const data = await fetch(`/api/problem-sets/${psId}/exams`, {
+// 题集 + 考试场次信息（页面侧带登录态 fetch；必须带 accept: application/json 才回 JSON）。
+// exam.id 是判分状态接口的钥匙（2026-11-18 实测：首次进场后 /exams 返回 exam 对象）。
+export async function fetchExamInfo(psId, stopSignal = null) {
+  const res = await fetchBounded(`/api/problem-sets/${psId}/exams`, {
     headers: { accept: 'application/json' },
     credentials: 'include',
-  }).then(r => r.json());
+  }, 10000, stopSignal);
+  if (!res.ok) throw new Error('HTTP ' + res.status);
+  const data = await res.json();
   const list = data?.problemSet?.problemSetConfig?.compilers;
-  return Array.isArray(list) && list.length ? list : null;
+  return {
+    compilers: Array.isArray(list) && list.length ? list : null,
+    examId: data?.exam?.id ? String(data.exam.id) : '',
+  };
+}
+
+// 题集语言白名单（面板语言下拉用）；保留原导出，内部复用 fetchExamInfo
+export async function fetchAllowedCompilers(psId) {
+  return (await fetchExamInfo(psId)).compilers;
+}
+
+// 判分状态快照（仅「仅重做错误」模式用）：problem-status 的 id 就是 pspId
+// （2026-11-18 实测 7 题 id 与侧栏 7-1…7-7 一一对应）。一次请求拿全题集，避免逐题取。
+async function fetchProblemStatusMap(psId) {
+  const info = await fetchExamInfo(psId, runAbort?.signal ?? null);
+  if (!info.examId) throw new Error('未取到考试场次（可能尚未进入过本场考试）');
+  const res = await fetchBounded(
+    `/api/exams/${encodeURIComponent(info.examId)}/problem-sets/${encodeURIComponent(psId)}/problem-status?_bps=autoanswer`,
+    { headers: { accept: 'application/json' }, credentials: 'include' },
+    10000,
+    runAbort?.signal ?? null,
+  );
+  if (!res.ok) throw new Error('HTTP ' + res.status);
+  const data = await res.json();
+  const map = {};
+  for (const it of data?.problemStatus || []) {
+    if (it && it.id != null) map[String(it.id)] = String(it.problemSubmissionStatus || '');
+  }
+  return { map, labels: data?.examLabelByProblemSetProblemId || {} };
 }
 
 /* ---------- 页面侧：编码题（编程/函数，CodeMirror 6，一页一题） ---------- */
@@ -319,6 +352,35 @@ export function codingKindFromHeadings(headings) {
   return hit ? 'CODE_COMPLETION' : 'PROGRAMMING';
 }
 
+// 编码题题干配图：main 内、答题表单之外的 img，按 DOM 顺序采集并去重。
+// 每张图附带「最近一个前置小节标题」作为语境——编程题题面常整段是图片（2026-11-18 实测
+// 7-4 矩阵：6 张图分别给出题目描述/输入格式/输出格式），视觉 prompt 需要让模型知道
+// 哪张图属于哪个小节，而不是只给一串编号。src 从活 DOM 取（绝对化），克隆节点不连树时
+// .src 不解析相对地址。
+function codingFigures(mainEl, form) {
+  const out = [];
+  const seen = new Set();
+  const walker = document.createTreeWalker(mainEl, NodeFilter.SHOW_ELEMENT);
+  let section = '题目描述';
+  while (walker.nextNode()) {
+    const el = walker.currentNode;
+    if (form && form.contains(el)) continue; // 答题表单（编辑器/测试用例）不是题面
+    const tag = el.tagName;
+    if (tag === 'H1' || tag === 'H2' || tag === 'H3' || tag === 'H4') {
+      const t = (el.textContent || '').replace(/\s+/g, ' ').trim();
+      if (t) section = t;
+      continue;
+    }
+    if (tag !== 'IMG' || !el.getAttribute('src')) continue;
+    if (el.closest('button')) continue; // 工具栏按钮里的图标不是题面内容
+    const src = el.src || el.getAttribute('src');
+    if (!src || seen.has(src)) continue;
+    seen.add(src);
+    out.push({ src, context: section });
+  }
+  return out;
+}
+
 // 编码题页题目收集（编程题与函数题同构）。返回 null 表示当前不是编码题题目页（列表页没有答题表单）。
 export function collectCodingProblem() {
   const mainEl = document.querySelector('main');
@@ -330,11 +392,9 @@ export function collectCodingProblem() {
   if (!pspId) return null;
   // 题型判别（见 codingKindFromHeadings）
   const kind = codingKindFromHeadings([...mainEl.querySelectorAll('h1,h2,h3')].map(h => h.textContent));
-  // 题干图：main 内、答题表单之外的 img（初探 §7.1 同一个数）；
-  //parsed src 从活 DOM 取（绝对化），克隆节点不连树时 .src 不解析相对地址
-  const stem = [...mainEl.querySelectorAll('img')].filter(i => !form.contains(i))
-    .map(i => (i.getAttribute('src') ? i.src : null)).filter(Boolean);
-  const imgInfo = { options: {}, stem, total: stem.length };
+  // 题干图：main 内、答题表单之外的 img（初探 §7.1 同一个数）
+  const figures = codingFigures(mainEl, form);
+  const imgInfo = { options: {}, stem: figures.map(f => f.src), contexts: figures.map(f => f.context), total: figures.length };
   const text = cleanText(mainEl, '[class*="CodingProblemAnswerForm"]');
   return {
     id: pspId,
@@ -804,7 +864,7 @@ const hasBgFetch = typeof chrome !== 'undefined' && !!chrome.runtime?.connect &&
  * 旧的单条 sendMessage 要横跨整段生成，worker 被回收时只剩 message channel closed；
  * 端口模式能显式收到 onDisconnect，内容脚本据此按可重试错误处理，不再丢最后一条日志。
  * 页面关闭/用户中止时断开端口，后台的 onDisconnect 会连带取消在途生成。 */
-export function backgroundChat(msg, { timeoutMs, signal, onProgress } = {}) {
+export function backgroundChat(msg, { timeoutMs = LLM_TOTAL_TIMEOUT_MS, signal, onProgress } = {}) {
   return new Promise((resolve, reject) => {
     let port = null;
     let settled = false;
@@ -826,11 +886,18 @@ export function backgroundChat(msg, { timeoutMs, signal, onProgress } = {}) {
       } catch (_) { /* 后台不在也本地放弃 */ }
       finish(reject, abortedError());
     };
-    timer = setTimeout(() => {
-      const err = new Error(`后台转发 ${Math.round(timeoutMs / 1000)}s 无响应`);
-      err.kind = 'timeout';
-      finish(reject, err);
-    }, timeoutMs + 5000);
+    // 无进度兜底：每收到一条 progress（首块/思考中/流式心跳）就重新计时。
+    // 长推理模型可能连续出字数分钟，不能被「首个请求的总时长」误杀；
+    // 真正卡住由后台 45s 无数据/无响应头判定，这里只防后台静默失联。
+    const armTimer = () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        const err = new Error(`后台转发 ${Math.round(timeoutMs / 1000)}s 无进度`);
+        err.kind = 'timeout';
+        finish(reject, err);
+      }, timeoutMs + 5000);
+    };
+    armTimer();
     try {
       port = chrome.runtime.connect({ name: 'bps-llm' });
     } catch (err) {
@@ -842,6 +909,7 @@ export function backgroundChat(msg, { timeoutMs, signal, onProgress } = {}) {
     port.onMessage.addListener(m => {
       if (!m || settled) return;
       if (m.type === 'progress') {
+        armTimer(); // 有进度就续命：长思考/长流式生成不能按首个请求的总时长误杀
         try { onProgress?.(m); } catch (_) { /* 面板异常不阻断 */ }
         return;
       }
@@ -993,7 +1061,10 @@ function toDataUrlPage(src) {
 async function toDataUrl(src) {
   try {
     return await toDataUrlPage(src);
-  } catch (_) { /* 页面层（CORS 等）失败 → background 转取 */ }
+  } catch (err) {
+    if (runAbort?.signal.aborted) throw err; // 用户中止：不再转 background 再等一轮
+    /* 页面层（CORS 等）失败 → background 转取 */
+  }
   if (!hasBgFetch) throw new Error('页面 fetch 被拒且无 background 可转取');
   const rsp = await new Promise((resolve, reject) => {
     let settled = false;
@@ -1011,15 +1082,19 @@ async function toDataUrl(src) {
 }
 
 // 带图 content 组装（纯函数，单测覆盖）：原文本在前、题干图逐张标注、选项图按字母映射。
-// OpenAI 兼容视觉格式：user.content = [{type:'text'},{type:'image_url'}] 交替
-export function assembleImgMessage(userContent, imgs) {
+// OpenAI 兼容视觉格式：user.content = [{type:'text'},{type:'image_url'}] 交替。
+// opts.coding=true 用于编码题：题面可能整段都在图片里（公式/矩阵/输入输出格式），
+// 输出约定仍是代码围栏而不是 JSON；imgs.contexts 是收题时记录的各图所属小节标题。
+export function assembleImgMessage(userContent, imgs, opts = {}) {
+  const coding = opts.coding === true;
   const stem = imgs.stem || [];
-  const parts = [{
-    type: 'text',
-    text: `${userContent}\n\n（本题含配图：题干图在前，选项图随后并标注归属选项。请同时依据图片内容作答，仍只输出一个 JSON，不要解释。）`,
-  }];
+  const intro = coding
+    ? `${userContent}\n\n（本题含配图：题目描述、输入/输出格式与样例可能全部或部分以图片给出。请先逐张阅读配图（包括其中的公式、矩阵和文字），再结合上面的文字题面完成作答；输出约定与上面的题型说明完全一致，仍只输出一个代码围栏块，不要解释。）`
+    : `${userContent}\n\n（本题含配图：题干图在前，选项图随后并标注归属选项。请同时依据图片内容作答，仍只输出一个 JSON，不要解释。）`;
+  const parts = [{ type: 'text', text: intro }];
   stem.forEach((url, i) => {
-    parts.push({ type: 'text', text: `（题干配图 ${i + 1}/${stem.length}）` });
+    const ctx = (imgs.contexts || [])[i];
+    parts.push({ type: 'text', text: ctx ? `（题干配图 ${i + 1}/${stem.length}，所属小节：${ctx}）` : `（题干配图 ${i + 1}/${stem.length}）` });
     parts.push({ type: 'image_url', image_url: { url } });
   });
   for (const [letter, url] of Object.entries(imgs.options || {})) {
@@ -1029,11 +1104,12 @@ export function assembleImgMessage(userContent, imgs) {
   return parts;
 }
 
-// 单题图片下载（输入 collectPage 的 imgInfo；串行取图，题内数量少够用）
+// 单题图片下载（输入 collectPage/collectCodingProblem 的 imgInfo；串行取图，题内数量少够用）。
+// contexts 原样透传，供 assembleImgMessage 标注每张图所属小节。
 async function downloadImgs(imgInfo) {
-  const out = { stem: [], options: {} };
+  const out = { stem: [], options: {}, contexts: imgInfo.contexts || [] };
   for (const src of imgInfo.stem) out.stem.push(await toDataUrl(src));
-  for (const [letter, src] of Object.entries(imgInfo.options)) out.options[letter] = await toDataUrl(src);
+  for (const [letter, src] of Object.entries(imgInfo.options || {})) out.options[letter] = await toDataUrl(src);
   return out;
 }
 
@@ -1257,11 +1333,17 @@ function clickProblemAnchor(id) {
   return true;
 }
 
-// 题面就绪特征：常规小节标题，或题号 N-M（英文题面/特殊小节兜底；与 collectCodingProblem 的 label 同源）
+// 题面就绪特征：常规小节标题，或题干配图（纯图片题可能只有「输入格式/输出格式」标题，
+// 2026-11-18 实测 7-4 矩阵：正文 6 张图 + 标题文本）。两次读数一致防半渲染。
 const STATEMENT_READY_RE = /(输入格式|输出格式|输入样例|输出样例|函数接口定义|裁判测试程序|Format|Input|Output|Sample)/i;
 
+// main 内、答题表单之外的题干图（与 collectCodingProblem 同口径，只用于就绪判定）
+function hasStatementImg(mainEl, form) {
+  return !!(mainEl && [...mainEl.querySelectorAll('img')].some(i => (!form || !form.contains(i)) && i.getAttribute('src')));
+}
+
 // SPA 切题就绪判定：URL 命中 + 答题表单挂载 + 编辑器/按钮读数稳定（沿用 settleEditorState 口径）
-// + 题干文本稳定且含小节特征/题号——防把渲染到一半的题面当完整题干（答错题比漏答严重）。
+// + 题干文本稳定且含小节特征/题干图——防把渲染到一半的题面当完整题干（答错题比漏答严重）。
 async function settleProblemReady(id) {
   let mounted = false;
   for (let i = 0; i < 50; i++) { // ≤5s：路由先变、内容后到
@@ -1275,7 +1357,9 @@ async function settleProblemReady(id) {
   for (let i = 0; i < 30; i++) { // ≤3s：题干两次读数一致才采信
     await sleep(100);
     const text = mainEl ? (mainEl.innerText || '') : '';
-    if (text && text === prev && STATEMENT_READY_RE.test(text)) return true;
+    const ready = !!text && text === prev
+      && (STATEMENT_READY_RE.test(text) || (text.length >= 20 && hasStatementImg(mainEl, answerFormEl())));
+    if (ready) return true;
     prev = text;
   }
   return false;
@@ -1301,16 +1385,37 @@ async function paceSpaSwitch(where) {
 async function startCodingBatch(psId, progTypes, cfg) {
   const problems = flattenCodingTypes(progTypes);
   if (!problems.length) throw new Error('「编码题」找不到题目锚点（题目总览收起？点开后重试）');
+  // 「仅重做错误」需要服务端判分状态：一次 problem-status 请求拿全题集。
+  // 取不到就退化为保守口径（已答跳过、未答照常答），绝不因数据缺失批量覆盖已答题。
+  let statusMap = null;
+  let statusLabels = null;
+  if (redoModeOf(cfg) === 'wrong') {
+    fire({ kind: 'log', level: 'info', text: '读取判分状态…（仅重做错误需要，一次请求拿全题集）' });
+    try {
+      const snap = await fetchProblemStatusMap(psId);
+      statusMap = snap.map;
+      statusLabels = snap.labels;
+      const counts = { accepted: 0, wrong: 0, pending: 0, none: 0, unknown: 0 };
+      for (const p of problems) counts[verdictOf(statusMap[p.id])] += 1;
+      fire({ kind: 'log', level: 'info', text: `判分状态：通过 ${counts.accepted} · 未通过 ${counts.wrong} · 待判 ${counts.pending} · 未提交 ${counts.none}${counts.unknown ? ` · 未知 ${counts.unknown}` : ''}` });
+    } catch (err) {
+      if (runAbort?.signal.aborted) throw abortedError();
+      statusMap = {};
+      fire({ kind: 'log', level: 'warn', text: `判分状态读取失败（${err?.message || err}），已答题按跳过处理；未答题照常作答` });
+    }
+  }
   const relay = {
     v: RELAY_VERSION,
     cfg: { ...cfg },
     psId,
+    statusMap,
+    statusLabels,
     problems: problems.map(p => ({ ...p, status: undefined })),
     ci: 0,
     phase: 'collect',
     verifyIds: [],
     vi: 0,
-    summary: { applied: 0, skippedAnswered: 0, failed: [] },
+    summary: { applied: 0, skippedAnswered: 0, skippedImage: 0, redoWrong: 0, failed: [] },
     rlTries: 0,
   };
   if (!writeRelay(relay)) throw new Error('sessionStorage 不可写或续跑单超限，无法批量作答编码题');
@@ -1372,21 +1477,43 @@ async function runCollectPhase(r) {
         r.ci += 1;
         continue;
       }
+      // 仅重做错误：把服务端判分状态挂到 q 上供纯函数 classifyProblem 使用；
+      // 旧续跑单没有 statusMap 时 verdict 为 unknown，classify 自动回退保守口径。
+      if (r.statusMap) q.verdict = verdictOf(r.statusMap[q.id]);
       const cls = classifyProblem(q, r.cfg);
       Object.assign(p, {
-        label: q.label || p.id.slice(-4),
+        label: q.label || (r.statusLabels && r.statusLabels[p.id]) || p.id.slice(-4),
         kind: q.kind,
         text: q.text,
         langLabel: q.langLabel,
         hasImg: q.hasImg,
+        imgInfo: q.hasImg ? q.imgInfo : null, // 只存地址与所属小节，data URL 到作答页现取
         status: cls.status,
+        redoReason: cls.reason || null, // wrong/unsubmitted 用于作答阶段的覆盖保护放行
       });
-      if (q.hasImg) fire({ kind: 'log', level: 'warn', text: `${p.label}：题干含图片，编码题暂不支持图片输入，仅按文字题面作答` });
       if (cls.status === 'skipped') {
         r.summary.skippedAnswered += 1;
-        fire({ kind: 'log', level: 'info', text: `${p.label}：跳过，已作答` });
+        const why = cls.reason === 'accepted' ? '跳过，判分正确'
+          : cls.reason === 'judging' ? '跳过，评测中/待判分'
+            : cls.reason === 'unknown' ? '跳过，判分状态未知（按已答处理）'
+              : '跳过，已作答';
+        fire({ kind: 'log', level: 'info', text: `${p.label}：${why}` });
+      } else if (cls.status === 'skippedImage') {
+        r.summary.skippedImage = (r.summary.skippedImage || 0) + 1;
+        const why = cls.reason === 'wrong-image' || cls.reason === 'unsubmitted-image'
+          ? '跳过，判分未通过但题干含图片（未开「作答含图题」）'
+          : '跳过，题干含图片（未开「作答含图题」）';
+        fire({ kind: 'log', level: 'warn', text: `${p.label}：${why}` });
       } else {
+        if (cls.reason === 'wrong') {
+          r.summary.redoWrong = (r.summary.redoWrong || 0) + 1;
+          fire({ kind: 'log', level: 'info', text: `${p.label}：判分未通过，重做` });
+        } else if (cls.reason === 'unsubmitted') {
+          r.summary.redoWrong = (r.summary.redoWrong || 0) + 1;
+          fire({ kind: 'log', level: 'info', text: `${p.label}：草稿未提交，重做` });
+        }
         fire({ kind: 'log', level: 'info', text: `收题 ${r.ci + 1}/${r.problems.length}：${p.label}（${p.typeName}）` });
+        if (q.hasImg) fire({ kind: 'log', level: 'info', text: `${p.label}：题干含 ${q.imgInfo.total} 张图片，作答时随题面交给视觉模型` });
       }
       batchPrevText = q.text;
       r.ci += 1;
@@ -1496,7 +1623,9 @@ export async function resumeRelay(settings) {
 
 export function relaySummaryLine(r) {
   const s = r.summary;
-  const line = `作答 ${s.applied} · 跳过已答 ${s.skippedAnswered} · 失败 ${s.failed.length}${r.cfg.drySave ? '（dry，未提交）' : ''}`;
+  const skippedImg = Number(s.skippedImage) || 0;
+  const redoWrong = Number(s.redoWrong) || 0;
+  const line = `作答 ${s.applied} · 跳过已答 ${s.skippedAnswered}${redoWrong ? ` · 重做错题 ${redoWrong}` : ''}${skippedImg ? ` · 跳过含图 ${skippedImg}` : ''} · 失败 ${s.failed.length}${r.cfg.drySave ? '（dry，未提交）' : ''}`;
   if (!s.failed.length) return line;
   return `${line}\n失败明细：\n${failDetails(s.failed)}`;
 }
@@ -1556,12 +1685,20 @@ async function runAnswerPhase(r) {
         return;
       }
       p.detail = slimDraftDetail(snap.detail, p.id);
-      // 用户未保存输入保护：本地键与草稿不一致（瘦身前用原始快照比对），未开覆盖就保守跳过
-      if (!r.cfg.overwrite && localInputDiffers(p.id, snap.detail)) {
+      // 用户未保存输入保护：本地键与草稿不一致（瘦身前用原始快照比对），未获准覆盖就保守跳过。
+      // 「全部重做」与「仅重做错误」中判分未通过/草稿未提交的题属于用户明确要重做的对象，放行覆盖。
+      const redoMode = redoModeOf(r.cfg);
+      const allowOverwrite = redoMode === 'all'
+        || (redoMode === 'wrong' && (p.redoReason === 'wrong' || p.redoReason === 'unsubmitted'));
+      const localDiffers = localInputDiffers(p.id, snap.detail);
+      if (!allowOverwrite && localDiffers) {
         r.summary.skippedAnswered += 1;
         p.status = 'skipped';
         fire({ kind: 'log', level: 'warn', text: `${p.label}：本地存在未保存的手敲代码（与服务端草稿不一致），已保守跳过不覆盖` });
         return;
+      }
+      if (redoMode === 'wrong' && localDiffers) {
+        fire({ kind: 'log', level: 'info', text: `${p.label}：本地有未保存改动，但本题${p.redoReason === 'wrong' ? '判分未通过' : '草稿未提交'}，按「仅重做错误」覆盖` });
       }
       const picked = pickCompiler(p, p.detail, r.cfg, {
         labelFor: id => COMPILER_LABELS[id] || '',
@@ -1574,7 +1711,39 @@ async function runAnswerPhase(r) {
       }
       p.compilerId = picked.compilerId;
       p.wantLangLabel = picked.wantLangLabel;
-      const messages = buildPrompt({ ...p, langLabel: p.wantLangLabel || p.langLabel || '' });
+      const basePrompt = buildPrompt({ ...p, langLabel: p.wantLangLabel || p.langLabel || '' });
+      let messages = basePrompt;
+      if (p.hasImg) {
+        // 开关关着就不作答（含图题按文字题面写代码只会产出与题意无关的代码并真实提交）；
+        // 正常路径在收题时已判 skippedImage，这里兜住旧版续跑单/配置漂移。
+        if (!r.cfg.images) {
+          r.summary.skippedImage = (r.summary.skippedImage || 0) + 1;
+          p.status = 'skipped';
+          fire({ kind: 'log', level: 'warn', text: `${p.label}：跳过，题干含图片（未开「作答含图题」）` });
+          return;
+        }
+        // 编码题的视觉链路：收题阶段只存图片地址（续跑单不塞 data URL），到没有编辑器、
+        // 可安全并发的列表页再取图。取图失败按单题失败处理，不拖垮其余题。
+        if (!p.imgInfo || !Array.isArray(p.imgInfo.stem) || !p.imgInfo.stem.length) {
+          relayRecordFail(r, p, p.label, '含图题缺少图片地址（旧版续跑单），请重新开始答题');
+          p.status = 'failed';
+          return;
+        }
+        let images = null;
+        try {
+          images = await downloadImgs(p.imgInfo);
+        } catch (err) {
+          if (userStopped(r)) return;
+          relayRecordFail(r, p, p.label, '含图题图片加载失败：' + (err?.message || err));
+          p.status = 'failed';
+          return;
+        }
+        fire({ kind: 'log', level: 'info', text: `${p.label}：已取 ${images.stem.length} 张题干图，随题面交给视觉模型` });
+        messages = [
+          { role: 'system', content: basePrompt[0].content },
+          { role: 'user', content: assembleImgMessage(basePrompt[1].content, images, { coding: true }) },
+        ];
+      }
       let raw = null;
       try {
         raw = globalThis.__BPS_LLM_MOCK__
@@ -1911,13 +2080,15 @@ export async function handleRun(config = {}) {
   const m = location.pathname.match(EXAM_PROBLEMS_RE);
   if (!m || !m[3]) { fire({ kind: 'log', level: 'err', text: '请先进入题型页（判断/单选/填空标签）再开始' }); return { ok: false, error: '请先进入题目列表的某个题型页（判断/单选/填空标签）再开始' }; }
   const psId = m[1];
+  const redo = redoModeOf({ redo: config.redo, overwrite: config.overwrite }); // 兼容旧调用方只传布尔 overwrite
   const cfg = {
     baseUrl: config.baseUrl || '',
     apiKey: config.apiKey || '',
     model: config.model || '',
     gateway: config.gateway || '',
-    overwrite: !!config.overwrite,
-    images: !!config.images, // 作答含图题（需视觉模型；只作用于客观题，编程题恒按文字题面作答）
+    redo, // 已答题处理：skip / wrong / all
+    overwrite: redo === 'all', // 兼容仍按布尔口径读 cfg.overwrite 的旧分支与在途续跑单
+    images: !!config.images, // 作答含图题（需视觉模型；客观题与编码题均生效，编码题的图片随题面交给模型）
     language: config.language || '', // 编程题固定语言（白名单 id）；空 = 跟随各题编辑器当前语言；函数题忽略（编译器由题目固定）
     concurrency: clampConcurrency(config.concurrency, 6), // 编码题并发作答路数（1–6）；收题/提交仍是串行页面操作
     drySave: !!config.drySave,
@@ -1950,7 +2121,11 @@ export async function handleRun(config = {}) {
     clearPersistedLog(); // 新一轮从空日志开始（跨页续跑属于同一轮，不会走到这里）
     fire({ kind: 'log-clear' });
     fire({ kind: 'state', running: true });
-    fire({ kind: 'log', level: 'info', text: `开始答题（每题一次请求，${cfg.overwrite ? '覆盖已作答' : '跳过已答'}${cfg.images ? '，含图题作答' : ''}）` });
+    const redoLabel = cfg.redo === 'wrong' ? '仅重做错误' : cfg.redo === 'all' ? '全部重做' : '跳过已答';
+    fire({ kind: 'log', level: 'info', text: `开始答题（每题一次请求，${redoLabel}${cfg.images ? '，含图题作答' : ''}）` });
+    if (cfg.redo === 'wrong') {
+      fire({ kind: 'log', level: 'info', text: '仅重做错误：只作用于编码题；客观题答题中不判分，按跳过已答处理' });
+    }
     const types = sidebarTypes().filter(t => TYPE_BY_NAME[t.typeName] || false).filter(t => t.total > 0);
     const unknown = sidebarTypes().filter(t => !(t.typeName in TYPE_BY_NAME) && t.total > 0);
     if (!types.length) throw new Error('本页侧栏没有可作答的题型（若「题目总览」收起请先展开再重试）');
@@ -2020,7 +2195,7 @@ export async function handleRun(config = {}) {
         while (cursor < queue.length && !runAbort.signal.aborted) {
           const { q } = queue[cursor++];
           done += 1;
-          if (q.answered && !cfg.overwrite) { stats.skippedAnswered += 1; fire({ kind: 'log', level: 'info', text: `${q.label || q.id.slice(-4)}：跳过，已作答` }); tick(); continue; }
+          if (q.answered && redoModeOf(cfg) !== 'all') { stats.skippedAnswered += 1; fire({ kind: 'log', level: 'info', text: `${q.label || q.id.slice(-4)}：跳过，已作答` }); tick(); continue; }
           if (q.hasImg && !cfg.images) { stats.skippedImage += 1; fire({ kind: 'log', level: 'warn', text: `${q.label || q.id.slice(-4)}：跳过，含图片（未开「作答含图题」）` }); tick(); continue; }
           // 请求在途的在场日志：服务挂起时 worker 停在 await，没有这行日志就与死机无法区分
           fire({ kind: 'log', level: 'info', text: `${q.label || q.id.slice(-4)}：请求模型中…（${cfg.model || '未知模型'}）` });

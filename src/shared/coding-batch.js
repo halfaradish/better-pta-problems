@@ -7,6 +7,8 @@
  * 见 docs/自动答题初探.md §10.10。
  */
 
+import { REDO_MODES } from './settings.js';
+
 export const RELAY_VERSION = 2;
 // sessionStorage 续跑单体积上限：题面/代码过大时明确报错中止，不静默截断（截断 = 可能答错题）
 export const RELAY_SIZE_LIMIT = 2 * 1024 * 1024;
@@ -28,10 +30,53 @@ export function flattenCodingTypes(progTypes) {
   return problems;
 }
 
-// 收题后的分类：已答且未开「覆盖已作答」→ skipped（保留用户答案）；其余 pending
+// 已答题处理策略：v0.12.2 起读三态 cfg.redo；旧续跑单只有布尔 cfg.overwrite，
+// 按旧口径回退（true=全部重做，false=跳过已答），保证升级瞬间在途的续跑单不改变行为。
+export function redoModeOf(cfg) {
+  const mode = cfg && cfg.redo;
+  if (REDO_MODES.includes(mode)) return mode;
+  return cfg && cfg.overwrite ? 'all' : 'skip';
+}
+
+// PTA 判分状态 → 分类裁决。词表见 docs/核心结论.md §2.1：只有 NO_ANSWER 是没交过；
+// 判分结论是 ACCEPTED / WRONG_ANSWER；SUBMITTED 是等判分（不要和判分赛跑）。
+// 非空且不属于上述三类的状态一律视为「未通过」（编译错误/部分通过/未来新状态都能重做）。
+export function verdictOf(status) {
+  if (status == null) return 'unknown'; // 状态接口失败或该题不在响应里
+  const st = String(status);
+  if (!st || st === 'PROBLEM_NO_ANSWER') return 'none';
+  if (st === 'PROBLEM_ACCEPTED') return 'accepted';
+  if (st === 'PROBLEM_SUBMITTED' || st.includes('JUDGING')) return 'pending';
+  return 'wrong';
+}
+
+// 收题后的分类：返回 status + reason（reason 只用于日志，不参与状态机）。
+// - skip（默认）：已答且草稿非空 → skipped（保留用户答案）；
+// - all：不论是否已答都重做（原「覆盖已作答」）；
+// - wrong：按 PTA 判分状态走——ACCEPTED/待判 → skipped；WRONG_ANSWER → pending；
+//   NO_ANSWER 但编辑器有草稿 → pending（用户选择「未提交草稿一并重做」）；
+//   状态缺失 → 回退保守口径（已答跳过，未答照常答）。
+// 含图且未开「作答含图题」→ skippedImage（纯图片题按文字题面硬答只会提交错码）。
 export function classifyProblem(q, cfg) {
-  if (q && q.answered && !(cfg && cfg.overwrite)) return { status: 'skipped' };
-  return { status: 'pending' };
+  const mode = redoModeOf(cfg);
+  const imgGate = !!(q && q.hasImg) && !(cfg && cfg.images);
+  if (mode === 'all') {
+    return imgGate ? { status: 'skippedImage', reason: 'image' } : { status: 'pending', reason: 'all' };
+  }
+  if (mode === 'wrong') {
+    const verdict = q && q.verdict;
+    if (verdict === 'accepted') return { status: 'skipped', reason: 'accepted' };
+    if (verdict === 'pending') return { status: 'skipped', reason: 'judging' };
+    if (verdict === 'wrong') {
+      return imgGate ? { status: 'skippedImage', reason: 'wrong-image' } : { status: 'pending', reason: 'wrong' };
+    }
+    if (verdict === 'none' && q && q.answered) {
+      return imgGate ? { status: 'skippedImage', reason: 'unsubmitted-image' } : { status: 'pending', reason: 'unsubmitted' };
+    }
+    // verdict === 'unknown' 或 'none' 且无草稿：落到下面的保守口径
+  }
+  if (q && q.answered) return { status: 'skipped', reason: mode === 'wrong' ? 'unknown' : 'draft' };
+  return imgGate ? { status: 'skippedImage', reason: 'image' } : { status: 'pending', reason: 'new' };
 }
 
 // 从 exam-draft GET 的 answer.detail 抽批量流程需要的字段（瘦身）：
@@ -74,11 +119,12 @@ export function buildVerifyPlan(problems) {
 }
 
 // 收题新鲜度：id 必须命中；题干非空；与上一题（或列表页）文本不同——防 SPA 路由先到、
-// 内容后到时把上一题的题面/编辑器状态当成本题（正确性风险，宁可不答不能答错）
+// 内容后到时把上一题的题面/编辑器状态当成本题（正确性风险，宁可不答不能答错）。
+// 纯图片题的题面文本可能只有标题/分值（2026-11-18 实测 7-4 矩阵），有题干图时放宽文本长度。
 export function isFreshStatement(prevText, q, targetId) {
   if (!q || String(q.id || '') !== String(targetId || '')) return { ok: false, reason: '页面题目与目标不符' };
   const text = String(q.text || '');
-  if (text.length < 20) return { ok: false, reason: '题干为空或过短' };
+  if (text.length < 20 && !(q.hasImg && text.length > 0)) return { ok: false, reason: '题干为空或过短' };
   const prev = String(prevText || '');
   if (prev && text === prev) return { ok: false, reason: '题干与上一题相同（疑似页面未切换）' };
   return { ok: true };
