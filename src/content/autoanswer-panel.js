@@ -1,13 +1,18 @@
 /* 自动答题悬浮球与面板（实验）。
  *
  * 弹窗只保留总开关（settings.autoAnswer）；题目列表页（/exam/problems…）挂出悬浮球，
- * 点开为答题面板：模型适配选择（DeepSeek / OpenCode Go）、API Key、已答题处理、
- * 开始/中止答题（运行中按钮变身「中止答题」）、运行日志（可清空）。面板用 Shadow DOM 隔离——不吸 PTA 页面的样式，也不把自己的
- * 类名泄进页面；设计令牌与设置弹窗、注入样式同源（PTA 实测令牌，主色 hsl(212,89%,53%)，
+ * 点开为答题面板。面板是单页「行式控制台」：左列 56px 短标签 + 右列 PTA 表单控件，
+ * 版面上只摆开箱即用的东西——服务、API Key、已答处理、含图题开关、开始按钮；
+ * 语言/并发这类低频调参收进「高级设置」抽屉（<details>，收起态右侧小字常显当前值）。
+ * 面板不写说明文字：字段解释放代码注释与 title 悬停提示，运行细节由引擎日志现报
+ * （旧版两页签 + 四条灰字 hint + 三段页脚「说明书」已在 v0.12.4 删净）。
+ * 面板用 Shadow DOM 隔离——不吸 PTA 页面的样式，也不把自己的类名泄进页面；
+ * 设计令牌与设置弹窗、注入样式同源（PTA 实测令牌，主色 hsl(212,89%,53%)，
  * 暗色跟随 PTA 自己的 .dark 类而不是系统）。
  *
  * 运行本体在 autoanswer.js：面板只是入口与事件流的展示层（setEventSink），
- * 关掉面板 / 翻到别的页面都不打断运行；运行中悬浮球常驻并显示整体进度环。
+ * 关掉面板 / 翻到别的页面都不打断运行；运行中悬浮球常驻并显示整体进度环，
+ * 配置控件整体禁用（handleRun 开跑即快照全部配置，中途可改是假象，禁用才诚实）。
  */
 import { clampConcurrency } from '../shared/coding-batch.js';
 import { loadSettings, REDO_MODES, saveSettings } from '../shared/settings.js';
@@ -22,13 +27,14 @@ import {
 // 协议的模型系可标 editableModel——GLM / Kimi / DeepSeek / LongCat / MiMo 等走
 // /chat/completions（本引擎支持），Claude / MiniMax M3 / Qwen3.8-3.7 走 Messages、
 // GPT / Grok / Muse Spark 走 Responses、Gemini 走 generateContent，均暂不解析。
+// hint 不再进版面，只作服务下拉的 title 悬停提示。
 export const PRESETS = {
   deepseek: {
     label: 'DeepSeek',
     baseUrl: 'https://api.deepseek.com',
     model: 'deepseek-flash', // 视觉模型；deepseek-chat 已下架（2026-10-13）
     gateway: 'deepseek',
-    hint: '官方 API · api.deepseek.com · 模型 deepseek-flash（视觉）',
+    hint: '官方 API · api.deepseek.com · 默认模型 deepseek-flash（视觉）',
   },
   opencode: {
     label: 'OpenCode Go',
@@ -119,18 +125,7 @@ const CSS = `
 .panel[hidden] { display: none; }
 @keyframes aa-pop { from { transform: scale(.94) translateY(5px); opacity: 0; } }
 
-/* ---------- 分区标签（答题配置 / 模型配置）---------- 
-   形制取 PTA 的页签（活跃题目集 / 所有题目集）：2px 下边框 + 主色，非选中项悬停也转主色 */
-.tabs { display: flex; gap: 8px; padding: 0 14px; }
-.tabs[role="tablist"] { border-bottom: 1px solid var(--hairline); }
-.tab { flex: 1; min-height: 38px; padding: 8px; margin-bottom: -1px;
-  border: 0; border-bottom: 2px solid transparent; border-radius: 0;
-  background: none; color: var(--text); font: inherit; font-size: 15px;
-  cursor: pointer; transition: color var(--trs), border-color var(--trs); }
-.tab:hover { color: var(--accent); border-bottom-color: var(--accent); }
-.tab[aria-selected="true"] { color: var(--accent); border-bottom-color: var(--accent); }
-.tab:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-
+/* ---------- 头部：标题 + 状态胶囊 + 收起 ---------- */
 .head { display: flex; align-items: center; gap: 8px; padding: 12px 14px;
   border-bottom: 1px solid var(--hairline); }
 .head .title { font-weight: 700; font-size: 15px; }
@@ -149,16 +144,23 @@ const CSS = `
 .collapse:hover { background: var(--bg-light); color: var(--text); }
 .collapse:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
-/* ---------- 分页容器（两个分区共用分页滚动） ---------- */
-.pages { flex: 1; min-height: 0; display: flex; flex-direction: column; }
-.pages > .page[hidden] { display: none; }
+/* ---------- 单页行式控制台 ----------
+   左列 56px 短标签 + 右列 PTA 表单控件，行高即控件高（32px）；说明不进版面
+   （字段解释放代码注释与 title 悬停，运行细节由引擎日志现报）。
+   低频调参（语言/并发）收进「高级设置」抽屉，收起态右侧小字常显当前值。 */
 .page { flex: 1; min-height: 0; padding: 12px 14px; overflow: auto;
   display: flex; flex-direction: column; gap: 12px; }
-/* 分区是可滚动的 flex 列：子项一律不参与收缩，否则定高的按钮/输入框/日志会被压扁
+/* 页面是可滚动的 flex 列：子项一律不参与收缩，否则定高的按钮/输入框/日志会被压扁
    （实测不写这条时 32px 的主按钮被挤成 24.5px），超出部分交给 overflow 滚动 */
 .page > * { flex: none; }
 
-.field .flabel { display: block; margin-bottom: 4px; font-size: 13px; line-height: 16px; color: var(--text-2); }
+.rows { display: flex; flex-direction: column; gap: 10px; }
+.row { display: flex; align-items: center; gap: 10px; }
+.row > .rl { flex: none; width: 56px; font-size: 13px; line-height: 16px; color: var(--text-2); }
+.row > .rc { flex: 1; min-width: 0; }
+/* 「端点/模型」行按预设条件显隐：display:flex 会盖过 UA 的 [hidden]，必须显式收回 */
+.row[hidden] { display: none; }
+
 /* 尺寸取 PTA 的表单控件：32px 高 / 4px 圆角 / #ced4da 边框 / 聚焦「主色边框 + 2px 环」 */
 select { appearance: none; -webkit-appearance: none; width: 100%; height: 32px; padding: 0 30px 0 12px;
   border: 1px solid var(--input-border); border-radius: 4px;
@@ -167,31 +169,30 @@ select { appearance: none; -webkit-appearance: none; width: 100%; height: 32px; 
   transition: border-color var(--trs), box-shadow var(--trs); }
 select:focus-visible { outline: none; border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-ring); }
 select:disabled { background: var(--bg-light); cursor: not-allowed; }
-.hint { margin: 4px 0 0; font-size: 13px; line-height: 16px; color: var(--text-3); }
 
-.keyrow { position: relative; }
-.keyrow input, .mrow input { width: 100%; height: 32px; padding: 0 12px; border: 1px solid var(--input-border);
+.rc input { width: 100%; height: 32px; padding: 0 12px; border: 1px solid var(--input-border);
   border-radius: 4px; background: var(--bg); color: var(--text); font: inherit;
   transition: border-color var(--trs), box-shadow var(--trs); }
+.rc input::placeholder { color: var(--text-3); font-style: italic; } /* PTA 的占位符样式 */
+.rc input:focus-visible { outline: none; border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-ring); }
+.rc input:disabled { background: var(--bg-light); cursor: not-allowed; }
+
+.keyrow { position: relative; }
 .keyrow input { padding-right: 56px; /* 右侧留给显示/隐藏按钮 */
   /* 用 text-security 遮罩而不是 type=password：Chrome 密码管理器只盯真密码框，
    * 真密码框的值一变就弹「要更新密码吗？」（把 API Key 当成 PTA 账号的新密码） */
   -webkit-text-security: disc; }
 .keyrow input.reveal { -webkit-text-security: none; } /* 「显示」态：明文回显 */
-.keyrow input::placeholder, .mrow input::placeholder { color: var(--text-3); font-style: italic; } /* PTA 的占位符样式 */
-.keyrow input:focus-visible, .mrow input:focus-visible { outline: none; border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-ring); }
-.keyrow input:disabled, .mrow input:disabled { background: var(--bg-light); cursor: not-allowed; }
 .keyrow .peek { position: absolute; right: 4px; top: 50%; transform: translateY(-50%);
   height: 24px; padding: 0 8px; border: none; border-radius: 4px; background: none;
   color: var(--text-3); font-size: 13px; cursor: pointer;
   transition: background-color var(--trs), color var(--trs); }
 .keyrow .peek:hover { color: var(--accent); background: var(--bg-light); }
+.keyrow .peek:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
-.switchrow { display: flex; align-items: center; justify-content: space-between; gap: 12px;
-  cursor: pointer; min-height: 26px; }
-.switchrow .stxt { display: flex; flex-direction: column; }
-.switchrow .stxt b { font-weight: 400; font-size: 15px; line-height: 20px; } /* PTA 行标题：15/20、常规字重 */
-.switchrow .stxt small { font-size: 13px; line-height: 16px; color: var(--text-3); }
+.switchrow { display: flex; align-items: center; gap: 10px; cursor: pointer; min-height: 32px; }
+.switchrow .rl { flex: none; width: 56px; font-size: 13px; line-height: 16px; color: var(--text-2); }
+.switchrow .switch { margin-left: auto; }
 .switch { appearance: none; -webkit-appearance: none; flex: none; width: 36px; height: 20px;
   margin: 0; border-radius: 9999px; background: var(--bg-normal); cursor: pointer; position: relative;
   transition: background var(--trs); }
@@ -203,8 +204,21 @@ select:disabled { background: var(--bg-light); cursor: not-allowed; }
 .switch:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 input:disabled, button:disabled { opacity: .6; cursor: not-allowed; } /* PTA 的禁用口径 */
 
-/* 主按钮：PTA 的实心按钮（主色底白字 / 2rem 高 / 4px 圆角），悬停压暗、按下 1px */
-.start { width: 100%; height: 32px; padding: 0 15px; border: 1px solid transparent; border-radius: 4px;
+/* 高级设置抽屉：<details> 自带展开语义；收起态右侧 12px 小字显示语言/并发当前值 */
+.adv summary { display: flex; align-items: center; gap: 6px; min-height: 24px; padding: 2px 0;
+  cursor: pointer; list-style: none; user-select: none;
+  color: var(--text-2); font-size: 13px; transition: color var(--trs); }
+.adv summary::-webkit-details-marker { display: none; }
+.adv summary:hover { color: var(--accent); }
+.adv summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+.adv .chev { flex: none; transition: transform var(--trs); }
+.adv[open] .chev { transform: rotate(90deg); }
+.adv .adv-cur { margin-left: auto; font-size: 12px; line-height: 16px; color: var(--text-3); }
+.adv-body { display: flex; flex-direction: column; gap: 10px; padding: 6px 0 2px; }
+
+/* 主按钮：PTA 的实心按钮（主色底白字 / 4px 圆角），悬停压暗、按下 1px；
+   36px 比表单控件高一档——面板唯一的重量级元素 */
+.start { width: 100%; height: 36px; padding: 0 15px; border: 1px solid transparent; border-radius: 4px;
   background: var(--accent); color: #fff; font: inherit; font-size: 15px; cursor: pointer;
   filter: brightness(var(--brightness, 1));
   transition: filter .2s ease; }
@@ -227,16 +241,19 @@ input:disabled, button:disabled { opacity: .6; cursor: not-allowed; } /* PTA 的
   font: 12px/1.7 ui-monospace, "Cascadia Mono", Consolas, monospace;
   white-space: pre-wrap; word-break: break-all; color: var(--text-2); }
 .logs .line { margin: 0 0 1px; }
-.logs .line::-webkit-scrollbar, .body::-webkit-scrollbar { width: 8px; }
-.logs::-webkit-scrollbar-thumb, .body::-webkit-scrollbar-thumb { background: var(--scroll); border-radius: 4px; }
+.logs::-webkit-scrollbar { width: 8px; }
+.logs::-webkit-scrollbar-thumb { background: var(--scroll); border-radius: 4px; }
 .logs .t { color: var(--text-3); font-size: 11px; margin-right: 6px; }
 .logs .lv-ok { color: var(--ok); }
 .logs .lv-err { color: var(--err); }
 .logs .lv-warn { color: var(--warn); }
-.foot { margin: 0; font-size: 13px; line-height: 16px; color: var(--text-3); }
+
+/* 页脚只留一行必要警示（旧版三段灰字说明已删，细节由引擎日志现报） */
+.foot { margin: 0; padding-top: 10px; border-top: 1px solid var(--hairline);
+  font-size: 12px; line-height: 16px; color: var(--text-3); }
 
 @media (prefers-reduced-motion: reduce) {
-  .ball, .tab, .collapse, .switch, .peek, .clear { transition: none; }
+  .ball, .collapse, .switch, .peek, .clear, .adv summary, .adv .chev { transition: none; }
   .panel { animation: none; }
   .wrap.dragging .ball { transition: none; }
   .pill.run::before { animation: none; }
@@ -285,7 +302,6 @@ let host = null;        // shadow host（body 直挂，显隐由 sync 控制）
 let shadow = null;
 let settings = null;
 let open = false;
-let activePage = 'answer'; // 分区标签：'answer'（答题配置，默认）| 'model'（模型配置）；会话内记忆
 let themeObserver = null;  // 跟着 PTA 的 .dark 走：观察 documentElement 的 class 变化
 
 // 悬浮球位置（拖拽记忆）：{r, b} = 距右/下边距 px，存 storage.local——
@@ -417,6 +433,17 @@ function onEvent(ev) {
   }
 }
 
+/* 运行中锁配置：handleRun 开跑即对全部配置做快照，中途改动不生效——禁用比
+ * 「能改但不生效」诚实；中止后按钮回「开始答题」时原样恢复 */
+const LOCK_IDS = ['aa-model', 'aa-key', 'aa-peek', 'aa-base', 'aa-model-name', 'aa-redo', 'aa-images', 'aa-lang', 'aa-concurrency'];
+function lockConfig(running) {
+  if (!shadow) return;
+  for (const id of LOCK_IDS) {
+    const n = shadow.getElementById(id);
+    if (n) n.disabled = running;
+  }
+}
+
 function updateRunUI() {
   if (!shadow) return;
   const running = isRunning();
@@ -442,6 +469,7 @@ function updateRunUI() {
     start.classList.toggle('stop', running);
     start.textContent = running ? '中止答题' : '开始答题';
   }
+  lockConfig(running);
 }
 
 /* ---------- 挂载与卸载 ---------- */
@@ -474,7 +502,7 @@ function mount() {
   ball.setAttribute('aria-expanded', 'false');
   ball.innerHTML = svgRing + '<span class="glyph">答</span>';
 
-  // —— 面板 ——
+  // —— 面板（单页：配置瘦身后的总量一屏放得下，不再分区页签） ——
   const panel = el('div', 'panel', wrap);
   panel.id = 'panel';
   panel.hidden = true;
@@ -492,36 +520,18 @@ function mount() {
   collapse.setAttribute('aria-label', '收起面板');
   collapse.textContent = '—';
 
-  // —— 分区标签：模型配置（服务/端点/模型/API Key）与答题配置分两页 ——
-  const tabbar = el('div', 'tabs', panel);
-  tabbar.setAttribute('role', 'tablist');
-  tabbar.setAttribute('aria-label', '面板分区');
-  const tabAnswer = el('button', 'tab', tabbar);
-  tabAnswer.id = 'tab-answer';
-  tabAnswer.setAttribute('role', 'tab');
-  tabAnswer.setAttribute('aria-controls', 'page-answer');
-  tabAnswer.textContent = '答题配置';
-  const tabModel = el('button', 'tab', tabbar);
-  tabModel.id = 'tab-model';
-  tabModel.setAttribute('role', 'tab');
-  tabModel.setAttribute('aria-controls', 'page-model');
-  tabModel.textContent = '模型配置';
+  const page = el('div', 'page', panel);
 
-  // —— 分页容器：答题配置（默认）与模型配置 ——
-  const pages = el('div', 'pages', panel);
-  const pageAnswer = el('div', 'page', pages);
-  pageAnswer.id = 'page-answer';
-  pageAnswer.setAttribute('role', 'tabpanel');
-  pageAnswer.setAttribute('aria-labelledby', 'tab-answer');
-  const pageModel = el('div', 'page', pages);
-  pageModel.id = 'page-model';
-  pageModel.setAttribute('role', 'tabpanel');
-  pageModel.setAttribute('aria-labelledby', 'tab-model');
+  // —— 行式配置区：开箱即用的字段 ——
+  const rows = el('div', 'rows', page);
 
-  const fModel = el('div', 'field', pageModel);
-  el('label', 'flabel', fModel).textContent = '服务';
-  fModel.querySelector('label').htmlFor = 'aa-model';
-  const sel = el('select', '', fModel);
+  // 服务：PRESETS 的一项；服务解释放 select 的 title 悬停（applyPreset 按所选填）
+  const rowSvc = el('div', 'row', rows);
+  const svcLabel = el('label', 'rl', rowSvc);
+  svcLabel.textContent = '服务';
+  svcLabel.htmlFor = 'aa-model';
+  const rcSvc = el('div', 'rc', rowSvc);
+  const sel = el('select', '', rcSvc);
   sel.id = 'aa-model';
   for (const [key, p] of Object.entries(PRESETS)) {
     const o = el('option', '', sel);
@@ -529,127 +539,143 @@ function mount() {
     o.textContent = p.label;
     if (p.disabled) o.disabled = true;
   }
-  el('p', 'hint', fModel); // 文案由 applyPreset 按所选服务填（下拉挪动/新增预设只改 PRESETS）
 
-  // 「自定义」服务多一行「端点」输入（任意 OpenAI 兼容根地址），预设服务不显示
-  const fBase = el('div', 'field', pageModel);
-  fBase.id = 'aa-base-field';
-  fBase.hidden = true;
-  el('label', 'flabel', fBase).textContent = '端点';
-  fBase.querySelector('label').htmlFor = 'aa-base';
-  const brow = el('div', 'mrow', fBase);
-  const burl = el('input', '', brow);
+  // API Key：type=text + text-security 遮罩（真密码框会触发密码管理器「要更新密码吗？」）
+  const rowKey = el('div', 'row', rows);
+  const keyLabel = el('label', 'rl', rowKey);
+  keyLabel.textContent = 'API Key';
+  keyLabel.htmlFor = 'aa-key';
+  const rcKey = el('div', 'rc keyrow', rowKey);
+  const key = el('input', '', rcKey);
+  key.id = 'aa-key';
+  key.type = 'text';
+  key.placeholder = 'sk-…';
+  key.autocomplete = 'off';
+  key.spellcheck = false;
+  key.title = '每个服务各存一把，切换服务自动带出；仅保存在本机浏览器';
+  const peek = el('button', 'peek', rcKey);
+  peek.type = 'button';
+  peek.id = 'aa-peek';
+  peek.textContent = '显示';
+  peek.setAttribute('aria-label', '显示或隐藏 API Key');
+
+  // 「自定义」服务多一行「端点」（任意 OpenAI 兼容根地址），预设服务隐藏（applyPreset 翻）
+  const rowBase = el('div', 'row', rows);
+  rowBase.id = 'row-base';
+  rowBase.hidden = true;
+  const baseLabel = el('label', 'rl', rowBase);
+  baseLabel.textContent = '端点';
+  baseLabel.htmlFor = 'aa-base';
+  const rcBase = el('div', 'rc', rowBase);
+  const burl = el('input', '', rcBase);
   burl.id = 'aa-base';
   burl.type = 'text';
   burl.placeholder = 'https://api.example.com/v1';
   burl.autocomplete = 'off';
   burl.spellcheck = false;
-  el('p', 'hint', fBase).textContent = 'OpenAI 兼容根地址，填到 /v1 即可（误粘 /chat/completions 会自动剥掉）';
+  burl.title = 'OpenAI 兼容根地址，填到 /v1 即可（误粘 /chat/completions 会自动剥掉）';
 
-  // 可自填模型的网关 / 自定义服务（editableModel）多一行「模型」输入，DeepSeek 这类固定适配不显示
-  const fModelName = el('div', 'field', pageModel);
-  fModelName.id = 'aa-model-field';
-  fModelName.hidden = true;
-  el('label', 'flabel', fModelName).textContent = '模型';
-  fModelName.querySelector('label').htmlFor = 'aa-model-name';
-  const mrow = el('div', 'mrow', fModelName);
-  const mname = el('input', '', mrow);
+  // 可自填模型的网关 / 自定义服务（editableModel）多一行「模型」，DeepSeek 这类固定适配隐藏
+  const rowMname = el('div', 'row', rows);
+  rowMname.id = 'row-model';
+  rowMname.hidden = true;
+  const mNameLabel = el('label', 'rl', rowMname);
+  mNameLabel.textContent = '模型';
+  mNameLabel.htmlFor = 'aa-model-name';
+  const rcMname = el('div', 'rc', rowMname);
+  const mname = el('input', '', rcMname);
   mname.id = 'aa-model-name';
   mname.type = 'text';
   mname.autocomplete = 'off';
   mname.spellcheck = false;
-  el('p', 'hint', fModelName).textContent = '留空即用该服务的默认模型';
 
-  // 编程题语言：默认跟随编辑器当前语言；select 选项 = 本题集允许语言（exams 白名单 + 静态显示名映射）
-  const fLang = el('div', 'field', pageAnswer);
-  el('label', 'flabel', fLang).textContent = '语言（编程题）';
-  fLang.querySelector('label').htmlFor = 'aa-lang';
-  const lsel = el('select', '', fLang);
-  lsel.id = 'aa-lang';
-  const oFollow = el('option', '', lsel);
-  oFollow.value = '';
-  oFollow.textContent = '跟随编辑器当前语言';
-  el('p', 'hint', fLang).textContent = '本题集允许的语言；作答按所选语言出码并提交评测。函数题的编译器由题目固定，此配置对函数题不生效';
-
-  // 编码题并发数：同时向模型发起的请求数（批量作答 v0.12.0）。收题/提交仍是串行页面操作，
-  // 并发只加速「等模型」这段；网关限流时请求会按引擎口径自动退避重试。
-  const fConc = el('div', 'field', pageAnswer);
-  el('label', 'flabel', fConc).textContent = '并发数（编码题）';
-  fConc.querySelector('label').htmlFor = 'aa-concurrency';
-  const csel = el('select', '', fConc);
-  csel.id = 'aa-concurrency';
-  for (const n of [1, 2, 3, 4, 5, 6]) {
-    const o = el('option', '', csel);
-    o.value = String(n);
-    o.textContent = `${n} 路`;
-  }
-  el('p', 'hint', fConc).textContent = '编码题同时请求模型的路数，越高越快；实测 OpenCode Go 6 路无 429，慢模型/限流严格的服务建议 1–3';
-
-  const fKey = el('div', 'field', pageModel);
-  el('label', 'flabel', fKey).textContent = 'API Key';
-  fKey.querySelector('label').htmlFor = 'aa-key';
-  const keyrow = el('div', 'keyrow', fKey);
-  const key = el('input', '', keyrow);
-  key.id = 'aa-key';
-  // 必须 type=text：真密码框会触发浏览器密码管理器的「要更新密码吗？」（API Key 被当成
-  // PTA 账号新密码）；遮罩走 .keyrow input 的 -webkit-text-security，「显示」切 reveal 类
-  key.type = 'text';
-  key.placeholder = 'sk-…';
-  key.autocomplete = 'off';
-  key.spellcheck = false;
-  const peek = el('button', 'peek', keyrow);
-  peek.type = 'button';
-  peek.id = 'aa-peek';
-  peek.textContent = '显示';
-  peek.setAttribute('aria-label', '显示或隐藏 API Key');
-  el('p', 'hint', fKey).textContent = '每个服务各存一把 Key，切服务自动带出；仅保存在本机浏览器';
-
-  // 已答题处理：三态策略（v0.12.2）。「仅重做错误」按 PTA 判分状态只重做未通过的编码题；
-  // 客观题答题中不判分，仍按跳过已答处理。
-  const fRedo = el('div', 'field', pageAnswer);
-  el('label', 'flabel', fRedo).textContent = '已答题处理';
-  fRedo.querySelector('label').htmlFor = 'aa-redo';
-  const rsel = el('select', '', fRedo);
+  // 已答处理：三态（v0.12.2）。判分口径细节放 title 与引擎日志，不占版面
+  const rowRedo = el('div', 'row', rows);
+  const redoLabel = el('label', 'rl', rowRedo);
+  redoLabel.textContent = '已答处理';
+  redoLabel.htmlFor = 'aa-redo';
+  const rcRedo = el('div', 'rc', rowRedo);
+  const rsel = el('select', '', rcRedo);
   rsel.id = 'aa-redo';
+  rsel.title = '「仅重做错误题」按平台判分只重做答错的编码题（未提交草稿也重做）；客观题答题中不判分，一律按跳过处理';
   for (const [value, label] of [
-    ['skip', '跳过已答（默认）'],
+    ['skip', '跳过已答'],
     ['wrong', '仅重做错误题'],
-    ['all', '全部重做（覆盖）'],
+    ['all', '全部重做'],
   ]) {
     const o = el('option', '', rsel);
     o.value = value;
     o.textContent = label;
   }
-  el('p', 'hint', fRedo).textContent = '仅重做错误：按 PTA 判分状态只重做答错的编码题（未提交草稿也会重做）；客观题答题中不判分，仍按跳过处理';
 
-  const swImg = el('label', 'switchrow', pageAnswer);
+  // 含图题：默认开（默认服务 DeepSeek 的 deepseek-flash 是视觉模型，默认组合开箱即用；
+  // 非视觉模型会逐题报错，此时关掉开关或换模型）。要求写在 title 悬停里。
+  const swImg = el('label', 'switchrow', rows);
   swImg.htmlFor = 'aa-images';
-  const stxtImg = el('span', 'stxt', swImg);
-  el('b', '', stxtImg).textContent = '作答含图题';
-  el('small', '', stxtImg).textContent = '需视觉模型（如 deepseek-flash），默认跳过；客观题与编程/函数题';
+  swImg.title = '开启后题干图片随题面交给模型作答，需要能看图的模型（DeepSeek 官方默认模型支持）；看不了图的模型会逐题报错';
+  const imgLabel = el('span', 'rl', swImg);
+  imgLabel.textContent = '含图题';
   const imgs = el('input', 'switch', swImg);
   imgs.id = 'aa-images';
   imgs.type = 'checkbox';
 
-  const start = el('button', 'start', pageAnswer);
+  // —— 高级设置抽屉：低频调参默认收起，右侧小字常显当前值（renderAdvCur） ——
+  const adv = el('details', 'adv', rows);
+  const advSummary = el('summary', '', adv);
+  advSummary.innerHTML = '<svg class="chev" width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 1.5 7.5 5 3 8.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+  el('span', '', advSummary).textContent = '高级设置';
+  const advCur = el('span', 'adv-cur', advSummary);
+  advCur.id = 'aa-adv-cur';
+  const advBody = el('div', 'adv-body', adv);
+
+  // 编程题语言：默认跟随编辑器当前语言；选项 = 本题集允许语言（exams 白名单 + 静态显示名
+  // 映射），异步填充（refreshLangOptions）。函数题编译器由题目固定，此配置不生效。
+  const rowLang = el('div', 'row', advBody);
+  const langLabel = el('label', 'rl', rowLang);
+  langLabel.textContent = '语言';
+  langLabel.htmlFor = 'aa-lang';
+  const rcLang = el('div', 'rc', rowLang);
+  const lsel = el('select', '', rcLang);
+  lsel.id = 'aa-lang';
+  lsel.title = '编程题按此语言出码并提交评测；函数题的编译器由题目固定。选项为本题集允许的语言';
+  const oFollow = el('option', '', lsel);
+  oFollow.value = '';
+  oFollow.textContent = '跟随编辑器';
+
+  // 编码题并发数（v0.12.0）：同时向模型发起的请求数。收题/提交仍是串行页面操作，
+  // 并发只加速「等模型」这段；被限流时引擎按自己的口径自动退避重试。
+  const rowConc = el('div', 'row', advBody);
+  const concLabel = el('label', 'rl', rowConc);
+  concLabel.textContent = '并发';
+  concLabel.htmlFor = 'aa-concurrency';
+  const rcConc = el('div', 'rc', rowConc);
+  const csel = el('select', '', rcConc);
+  csel.id = 'aa-concurrency';
+  csel.title = '编码题同时请求模型的路数，越高越快；对限流严格的服务建议 1–3 路';
+  for (const n of [1, 2, 3, 4, 5, 6]) {
+    const o = el('option', '', csel);
+    o.value = String(n);
+    o.textContent = `${n} 路`;
+  }
+
+  // —— 主行动 + 运行监视 ——
+  const start = el('button', 'start', page);
   start.id = 'start';
   start.type = 'button';
   start.textContent = '开始答题';
 
-  const logsHead = el('div', 'logs-head', pageAnswer);
+  const logsHead = el('div', 'logs-head', page);
   el('b', '', logsHead).textContent = '日志';
   const clear = el('button', 'clear', logsHead);
   clear.id = 'clear';
   clear.type = 'button';
   clear.textContent = '清空';
-  const logs = el('div', 'logs', pageAnswer);
+  const logs = el('div', 'logs', page);
   logs.id = 'logs';
   logs.setAttribute('role', 'log');
   logs.setAttribute('aria-live', 'polite');
 
-  el('p', 'foot', pageAnswer).textContent = '实验功能：客观题答题中平台不反馈对错，编码题提交即评测；完成后请自行核对结果。';
-  el('p', 'foot', pageAnswer).textContent = '文本模型看不见图片：含图题（客观题与编程/函数题）要么跳过，要么切到视觉模型（如 deepseek-flash）并开启「作答含图题」；开启后编码题会把题干图片随题面交给模型，再照常水合提交评测。';
-  el('p', 'foot', pageAnswer).textContent = '编程题提交即评测：作答会实时生成提交记录与作答度，成绩由评测结果决定，与客观题判分路径不同。';
+  el('p', 'foot', page).textContent = '实验功能 · 编程题提交即评测，成绩以评测结果为准';
 
   // —— 事件绑定 ——
   // 拖拽与点击共用球：pointer 位移超过阈值才算拖动（拖完抑制紧随的 click，防松手把面板又开合一次）
@@ -691,22 +717,6 @@ function mount() {
   });
   collapse.addEventListener('click', closePanel);
   panel.addEventListener('keydown', e => { if (e.key === 'Escape') closePanel(); });
-  // 分区标签：点击换页（完整 tabs 语义 = roving tabindex + 方向键/Home/End）
-  tabAnswer.addEventListener('click', () => switchTab('answer'));
-  tabModel.addEventListener('click', () => switchTab('model'));
-  tabbar.addEventListener('keydown', e => {
-    const cur = activePage === 'model' ? tabModel : tabAnswer;
-    let next = null;
-    if (e.key === 'ArrowRight' || e.key === 'ArrowDown') next = cur === tabAnswer ? tabModel : tabAnswer;
-    else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') next = cur === tabModel ? tabAnswer : tabModel;
-    else if (e.key === 'Home') next = tabAnswer;
-    else if (e.key === 'End') next = tabModel;
-    if (!next || next === cur) return;
-    e.preventDefault();
-    switchTab(next === tabModel ? 'model' : 'answer');
-    next.focus();
-  });
-  switchTab(activePage); // 恢复上次所在分区（须在两个分页字段建好之后调用）
   peek.addEventListener('click', () => {
     const show = !key.classList.contains('reveal');
     key.classList.toggle('reveal', show);
@@ -714,13 +724,11 @@ function mount() {
   });
   const applyPreset = () => {
     const p = PRESETS[sel.value] || PRESETS.deepseek;
-    fModel.querySelector('.hint').textContent = p.hint || '';
-    fBase.hidden = !p.customEndpoint;
-    fModelName.hidden = !p.editableModel;
-    mname.placeholder = p.customEndpoint ? 'gpt-4o-mini' : (p.model || '');
-    fModelName.querySelector('.hint').textContent = p.editableModel
-      ? (p.customEndpoint ? '填该服务可用的模型 id' : '留空即用该服务的默认模型')
-      : '';
+    sel.title = p.hint || '';
+    rowBase.hidden = !p.customEndpoint;
+    rowMname.hidden = !p.editableModel;
+    mname.placeholder = p.customEndpoint ? 'gpt-4o-mini' : `留空用默认 ${p.model || ''}`;
+    mname.title = p.customEndpoint ? '填该服务可用的模型 id' : '留空用该服务的默认模型';
   };
   // 恢复上次的选择：sync() 先行传入的 settings 已含全部 autoAnswer* 字段
   if (settings && PRESETS[settings.autoAnswerGateway]) sel.value = settings.autoAnswerGateway;
@@ -733,6 +741,7 @@ function mount() {
   csel.value = String(clampConcurrency((settings || {}).autoAnswerConcurrency, 6));
   // 语言选项异步填充（拉本题集白名单后再恢复上次固定值）
   refreshLangOptions();
+  renderAdvCur();
   applyPreset();
   // 服务切换：手头输入先归档给切换前的服务（keyOwner），再换上新服务的 Key；其余字段照旧 persist
   let keyOwner = sel.value;
@@ -747,10 +756,10 @@ function mount() {
   burl.addEventListener('change', persist);
   mname.addEventListener('change', persist);
   key.addEventListener('change', persist);
-  lsel.addEventListener('change', persist);
   rsel.addEventListener('change', persist);
   imgs.addEventListener('change', persist);
-  csel.addEventListener('change', persist);
+  lsel.addEventListener('change', () => { persist(); renderAdvCur(); });
+  csel.addEventListener('change', () => { persist(); renderAdvCur(); });
   clear.addEventListener('click', () => {
     clearPersistedLog(); // 清空要跨页生效，否则下一页又把历史回放回来
     logLines.length = 0;
@@ -798,7 +807,10 @@ function unmount() {
 let langPsId = null; // 已填充过选项的题集 key（3s 轮询防重拉）
 async function refreshLangOptions() {
   if (!shadow) return;
-  const psId = (location.pathname.match(EXAM_PROBLEMS_RE) || [])[1];
+  // __BPS_FORCE_PANEL__（preview.html 面板预览钩子）：没有真实路由，给假 psId
+  // 让 fetch 落到 mock 上、取不到 compilers 时退化静态语言表
+  const psId = (location.pathname.match(EXAM_PROBLEMS_RE) || [])[1]
+    || (window.__BPS_FORCE_PANEL__ ? 'preview' : null);
   if (!psId || langPsId === psId) return;
   langPsId = psId;
   const lsel = shadow.getElementById('aa-lang');
@@ -818,6 +830,19 @@ async function refreshLangOptions() {
   if (want && lsel.value !== want) {
     appendLog('warn', `上次固定语言「${COMPILER_LABELS[want] || want}」不在本题集允许列表，已改回跟随当前`);
   }
+  renderAdvCur();
+}
+
+/* 高级设置抽屉收起态的当前值摘要：语言显示名 · 并发 N 路。
+ * 收起时也看得见「里面是什么、现在选了什么」，不必展开翻找。 */
+function renderAdvCur() {
+  if (!shadow) return;
+  const cur = shadow.getElementById('aa-adv-cur');
+  const lsel = shadow.getElementById('aa-lang');
+  const csel = shadow.getElementById('aa-concurrency');
+  if (!cur || !lsel || !csel) return;
+  const lang = lsel.options[lsel.selectedIndex]?.textContent?.trim() || '跟随编辑器';
+  cur.textContent = `${lang} · ${csel.value} 路`;
 }
 
 function togglePanel() {
@@ -825,24 +850,11 @@ function togglePanel() {
   open ? closePanel() : openPanel();
 }
 
-/* ---------- 分区切换（答题配置 / 模型配置） ---------- */
-
-function switchTab(name) {
-  if (!shadow) return;
-  activePage = name === 'model' ? 'model' : 'answer';
-  const model = activePage === 'model';
-  const a = shadow.getElementById('page-answer');
-  const m = shadow.getElementById('page-model');
-  if (a) a.hidden = model;
-  if (m) m.hidden = !model;
-  const tA = shadow.getElementById('tab-answer');
-  const tM = shadow.getElementById('tab-model');
-  if (tA) { tA.setAttribute('aria-selected', String(!model)); tA.tabIndex = model ? -1 : 0; }
-  if (tM) { tM.setAttribute('aria-selected', String(model)); tM.tabIndex = model ? 0 : -1; }
-}
-
 // 面板随球所在象限换边：球在右半屏 → 默认朝左展开，左半屏 → 朝右；
-// 下半屏 → 默认往上弹，上半屏 → 往下弹（CSS 的 pos-left / pos-top）
+// 下半屏 → 默认往上弹，上半屏 → 往下弹（CSS 的 pos-left / pos-top）。
+// 单页版面板比旧页签版高（~550px），球拖到中上部时向上弹会顶出视口——
+// 按展开方向的可用空间夹 inline max-height（面板底/顶缘距球心 33px，再留 12px 边距），
+// 内容超出交给 .page 内部滚动；默认右下角时算出的空间大于 CSS 的 100vh-90px 上限，不生效。
 function placePanel() {
   if (!shadow) return;
   const wrapEl = shadow.querySelector('.wrap');
@@ -850,7 +862,11 @@ function placePanel() {
   const cx = window.innerWidth - (ballPos?.r ?? 18) - BALL_SIZE / 2;
   const cy = window.innerHeight - (ballPos?.b ?? 18) - BALL_SIZE / 2;
   wrapEl.classList.toggle('pos-left', cx < window.innerWidth / 2);
-  wrapEl.classList.toggle('pos-top', cy < window.innerHeight / 2);
+  const opensDown = wrapEl.classList.toggle('pos-top', cy < window.innerHeight / 2);
+  const up = cy - 45; // 向上弹：面板底缘在球心上方 33px
+  const down = window.innerHeight - cy - 45; // 向下弹：面板顶缘在球心下方 33px
+  const panel = shadow.getElementById('panel');
+  if (panel) panel.style.maxHeight = `${Math.max(240, Math.floor(opensDown ? down : up))}px`;
 }
 
 function openPanel() {
@@ -862,9 +878,7 @@ function openPanel() {
   ball.setAttribute('aria-expanded', 'true');
   open = true;
   updateRunUI();
-  // 聚焦当前分区页的第一个控件（答题配置=语言 select，模型配置=服务 select）
-  const pane = shadow.getElementById(activePage === 'model' ? 'page-model' : 'page-answer');
-  const first = pane?.querySelector('select, input, button');
+  const first = shadow.getElementById('aa-model'); // 第一个配置控件 = 服务下拉
   if (first) first.focus();
 }
 
@@ -924,21 +938,18 @@ async function startRun() {
   const baseUrl = preset.customEndpoint ? normalizeBaseUrl(burl?.value) : preset.baseUrl;
   if (preset.customEndpoint && !baseUrl) {
     appendLog('err', '请先填写 OpenAI 兼容端点（填到 /v1）');
-    switchTab('model'); // 出错字段在模型配置页：先切过去再聚焦
-    burl?.focus();
+    burl?.focus(); // 单页后必填字段都在可见处，缺哪个聚焦哪个
     return;
   }
   const model = resolveModel(preset, shadow.getElementById('aa-model-name')?.value);
   if (preset.customEndpoint && !model) {
     appendLog('err', '请先填写模型 id');
-    switchTab('model');
     shadow.getElementById('aa-model-name').focus();
     return;
   }
   const apiKey = shadow.getElementById('aa-key').value.trim();
   if (!apiKey) {
     appendLog('err', '请先填写 API Key（仅保存在本机）');
-    switchTab('model');
     shadow.getElementById('aa-key').focus();
     return;
   }
@@ -966,7 +977,9 @@ async function startRun() {
 // 由 index.js 驱动：init 后、设置变更后、路由兜底轮询时各调一次
 export function sync(s) {
   settings = s || settings;
-  const shouldShow = !!settings && !!settings.autoAnswer && EXAM_PROBLEMS_RE.test(location.pathname);
+  // __BPS_FORCE_PANEL__：preview.html 的面板预览钩子（预览路由匹配不到 exam/problems）
+  const forced = !!window.__BPS_FORCE_PANEL__;
+  const shouldShow = !!settings && !!settings.autoAnswer && (forced || EXAM_PROBLEMS_RE.test(location.pathname));
   if (shouldShow && !host) mount();
   if (shouldShow) refreshLangOptions(); // 换题集后语言白名单要重拉（内部有 psId 防抖）
   if (!shouldShow && host) {

@@ -176,6 +176,7 @@
   <button class="b-on" onclick="BPS.setView({grouped:true})">分组视图</button>
   <button class="b-plain" onclick="BPS.setView({grouped:false})">平铺列表</button>
   <button class="b-plain" onclick="BPS.setSettings({enabled:false})">关闭插件</button>
+  <button class="b-plain" onclick="openAAPanel()">答题面板</button>
   <button class="b-plain" id="theme-toggle"
           onclick="document.body.classList.toggle('dark'); this.textContent = document.body.classList.contains('dark') ? '亮色' : '暗色';">暗色</button>
 </div>
@@ -295,6 +296,13 @@
 
   // 预览页不是真实 PTA 路由，放开路径限制以便本地验证
   window.__BPS_FORCE_LIST__ = true;
+
+  /* 答题面板预览：__BPS_FORCE_PANEL__ 放开面板的路由限制（预览路由匹配不到 exam/problems），
+     总开关顺手打开，悬浮球由 aaPanel.sync 挂出（面板本体见 src/content/autoanswer-panel.js） */
+  function openAAPanel() {
+    window.__BPS_FORCE_PANEL__ = true;
+    BPS.setSettings({ autoAnswer: true });
+  }
 
   /* BPS_SYNC 仿真：记录扩展运行时的提醒上报（预览页本无 chrome，补一个最小 stub），
      回归「已完成的不再提醒」用——payload 里的 sets 应当剔除了进度假数据判「已完成」的条目；

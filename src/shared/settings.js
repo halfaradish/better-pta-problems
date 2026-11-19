@@ -29,13 +29,13 @@ export const DEFAULTS = {
   autoAnswerModel: '',        // 可自填网关的模型名（OpenCode Go / 自定义）；空 = 用适配预设的默认模型
   autoAnswerBaseUrl: '',      // 「自定义」服务的 OpenAI 兼容端点（填到 /v1；仅选自定义时用）
   autoAnswerRedo: 'skip',     // 已答题处理：skip=跳过已答；wrong=仅重做判分未通过的编码题；all=全部重做（v0.12.2 起替代布尔 autoAnswerOverwrite）
-  autoAnswerImages: false,    // 含图题作答（需视觉模型如 deepseek-flash：图片下载编码进 prompt；默认关闭=含图题跳过；v0.12.1 起客观题与编码题都生效）
+  autoAnswerImages: true,     // 含图题作答（v0.12.4 起默认开启：默认服务 DeepSeek 的 deepseek-flash 是视觉模型，默认组合开箱即用；非视觉模型会逐题报错，用户可关）
   autoAnswerLanguage: '',     // 编程题固定语言（exams 接口白名单的编译器 id）；空 = 跟随各题编辑器当前语言
   autoAnswerConcurrency: 3,   // 编码题并发作答路数（1–6，默认 3）：同时向模型发起的请求数；收题/提交仍是串行页面操作
   settingsVersion: 0,     // 0 = 旧版设置；v4 起「列表/分组」不再持久化（改为按路由的会话内状态）
 };
 
-export const SETTINGS_VERSION = 8;
+export const SETTINGS_VERSION = 9;
 
 // 扩展环境用 chrome.storage.sync（跨设备同步）；预览页 / 独立打开的弹窗退化为内存
 export const HAS_CHROME_STORAGE = typeof chrome !== 'undefined' && !!chrome.storage?.sync;
@@ -67,6 +67,10 @@ export function migrate(raw) {
       ? (raw.autoAnswerOverwrite ? 'all' : 'skip')
       : 'skip';
     delete s.autoAnswerOverwrite;
+    // v9：「作答含图题」默认改为开启。旧默认是关，且面板每次保存都会把 false 显式落盘——
+    // 只翻 DEFAULTS 对老用户无效。迁移一次性归位到新默认 true：显式开启的仍是 true；
+    // 显式关闭的（0.12.1–0.12.3 三天的量，几乎只有作者自己）会被重开一次，开关仍在原位。
+    if ((s.settingsVersion || 0) < 9) s.autoAnswerImages = true;
     s.settingsVersion = SETTINGS_VERSION;
   }
   // v8 起旧键不再使用；即使 settingsVersion 已是 8（手改/混入旧导出），读设置时也顺手清掉

@@ -43,8 +43,8 @@
     // 「自定义」服务的 OpenAI 兼容端点（填到 /v1；仅选自定义时用）
     autoAnswerRedo: "skip",
     // 已答题处理：skip=跳过已答；wrong=仅重做判分未通过的编码题；all=全部重做（v0.12.2 起替代布尔 autoAnswerOverwrite）
-    autoAnswerImages: false,
-    // 含图题作答（需视觉模型如 deepseek-flash：图片下载编码进 prompt；默认关闭=含图题跳过；v0.12.1 起客观题与编码题都生效）
+    autoAnswerImages: true,
+    // 含图题作答（v0.12.4 起默认开启：默认服务 DeepSeek 的 deepseek-flash 是视觉模型，默认组合开箱即用；非视觉模型会逐题报错，用户可关）
     autoAnswerLanguage: "",
     // 编程题固定语言（exams 接口白名单的编译器 id）；空 = 跟随各题编辑器当前语言
     autoAnswerConcurrency: 3,
@@ -52,7 +52,7 @@
     settingsVersion: 0
     // 0 = 旧版设置；v4 起「列表/分组」不再持久化（改为按路由的会话内状态）
   };
-  var SETTINGS_VERSION = 8;
+  var SETTINGS_VERSION = 9;
   var HAS_CHROME_STORAGE = typeof chrome !== "undefined" && !!chrome.storage?.sync;
   function needsMigration(raw) {
     return (raw?.settingsVersion || 0) < SETTINGS_VERSION;
@@ -69,6 +69,7 @@
       delete s.reminderEnabled;
       s.autoAnswerRedo = typeof raw?.autoAnswerOverwrite === "boolean" ? raw.autoAnswerOverwrite ? "all" : "skip" : "skip";
       delete s.autoAnswerOverwrite;
+      if ((s.settingsVersion || 0) < 9) s.autoAnswerImages = true;
       s.settingsVersion = SETTINGS_VERSION;
     }
     delete s.autoAnswerOverwrite;

@@ -44,8 +44,8 @@
     // 「自定义」服务的 OpenAI 兼容端点（填到 /v1；仅选自定义时用）
     autoAnswerRedo: "skip",
     // 已答题处理：skip=跳过已答；wrong=仅重做判分未通过的编码题；all=全部重做（v0.12.2 起替代布尔 autoAnswerOverwrite）
-    autoAnswerImages: false,
-    // 含图题作答（需视觉模型如 deepseek-flash：图片下载编码进 prompt；默认关闭=含图题跳过；v0.12.1 起客观题与编码题都生效）
+    autoAnswerImages: true,
+    // 含图题作答（v0.12.4 起默认开启：默认服务 DeepSeek 的 deepseek-flash 是视觉模型，默认组合开箱即用；非视觉模型会逐题报错，用户可关）
     autoAnswerLanguage: "",
     // 编程题固定语言（exams 接口白名单的编译器 id）；空 = 跟随各题编辑器当前语言
     autoAnswerConcurrency: 3,
@@ -53,7 +53,7 @@
     settingsVersion: 0
     // 0 = 旧版设置；v4 起「列表/分组」不再持久化（改为按路由的会话内状态）
   };
-  var SETTINGS_VERSION = 8;
+  var SETTINGS_VERSION = 9;
   var HAS_CHROME_STORAGE = typeof chrome !== "undefined" && !!chrome.storage?.sync;
   function needsMigration(raw) {
     return (raw?.settingsVersion || 0) < SETTINGS_VERSION;
@@ -70,6 +70,7 @@
       delete s.reminderEnabled;
       s.autoAnswerRedo = typeof raw?.autoAnswerOverwrite === "boolean" ? raw.autoAnswerOverwrite ? "all" : "skip" : "skip";
       delete s.autoAnswerOverwrite;
+      if ((s.settingsVersion || 0) < 9) s.autoAnswerImages = true;
       s.settingsVersion = SETTINGS_VERSION;
     }
     delete s.autoAnswerOverwrite;
@@ -2472,7 +2473,7 @@ ${failDetails(s.failed)}`;
       model: "deepseek-flash",
       // 视觉模型；deepseek-chat 已下架（2026-10-13）
       gateway: "deepseek",
-      hint: "\u5B98\u65B9 API \xB7 api.deepseek.com \xB7 \u6A21\u578B deepseek-flash\uFF08\u89C6\u89C9\uFF09"
+      hint: "\u5B98\u65B9 API \xB7 api.deepseek.com \xB7 \u9ED8\u8BA4\u6A21\u578B deepseek-flash\uFF08\u89C6\u89C9\uFF09"
     },
     opencode: {
       label: "OpenCode Go",
@@ -2555,18 +2556,7 @@ ${failDetails(s.failed)}`;
 .panel[hidden] { display: none; }
 @keyframes aa-pop { from { transform: scale(.94) translateY(5px); opacity: 0; } }
 
-/* ---------- \u5206\u533A\u6807\u7B7E\uFF08\u7B54\u9898\u914D\u7F6E / \u6A21\u578B\u914D\u7F6E\uFF09---------- 
-   \u5F62\u5236\u53D6 PTA \u7684\u9875\u7B7E\uFF08\u6D3B\u8DC3\u9898\u76EE\u96C6 / \u6240\u6709\u9898\u76EE\u96C6\uFF09\uFF1A2px \u4E0B\u8FB9\u6846 + \u4E3B\u8272\uFF0C\u975E\u9009\u4E2D\u9879\u60AC\u505C\u4E5F\u8F6C\u4E3B\u8272 */
-.tabs { display: flex; gap: 8px; padding: 0 14px; }
-.tabs[role="tablist"] { border-bottom: 1px solid var(--hairline); }
-.tab { flex: 1; min-height: 38px; padding: 8px; margin-bottom: -1px;
-  border: 0; border-bottom: 2px solid transparent; border-radius: 0;
-  background: none; color: var(--text); font: inherit; font-size: 15px;
-  cursor: pointer; transition: color var(--trs), border-color var(--trs); }
-.tab:hover { color: var(--accent); border-bottom-color: var(--accent); }
-.tab[aria-selected="true"] { color: var(--accent); border-bottom-color: var(--accent); }
-.tab:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-
+/* ---------- \u5934\u90E8\uFF1A\u6807\u9898 + \u72B6\u6001\u80F6\u56CA + \u6536\u8D77 ---------- */
 .head { display: flex; align-items: center; gap: 8px; padding: 12px 14px;
   border-bottom: 1px solid var(--hairline); }
 .head .title { font-weight: 700; font-size: 15px; }
@@ -2585,16 +2575,23 @@ ${failDetails(s.failed)}`;
 .collapse:hover { background: var(--bg-light); color: var(--text); }
 .collapse:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
-/* ---------- \u5206\u9875\u5BB9\u5668\uFF08\u4E24\u4E2A\u5206\u533A\u5171\u7528\u5206\u9875\u6EDA\u52A8\uFF09 ---------- */
-.pages { flex: 1; min-height: 0; display: flex; flex-direction: column; }
-.pages > .page[hidden] { display: none; }
+/* ---------- \u5355\u9875\u884C\u5F0F\u63A7\u5236\u53F0 ----------
+   \u5DE6\u5217 56px \u77ED\u6807\u7B7E + \u53F3\u5217 PTA \u8868\u5355\u63A7\u4EF6\uFF0C\u884C\u9AD8\u5373\u63A7\u4EF6\u9AD8\uFF0832px\uFF09\uFF1B\u8BF4\u660E\u4E0D\u8FDB\u7248\u9762
+   \uFF08\u5B57\u6BB5\u89E3\u91CA\u653E\u4EE3\u7801\u6CE8\u91CA\u4E0E title \u60AC\u505C\uFF0C\u8FD0\u884C\u7EC6\u8282\u7531\u5F15\u64CE\u65E5\u5FD7\u73B0\u62A5\uFF09\u3002
+   \u4F4E\u9891\u8C03\u53C2\uFF08\u8BED\u8A00/\u5E76\u53D1\uFF09\u6536\u8FDB\u300C\u9AD8\u7EA7\u8BBE\u7F6E\u300D\u62BD\u5C49\uFF0C\u6536\u8D77\u6001\u53F3\u4FA7\u5C0F\u5B57\u5E38\u663E\u5F53\u524D\u503C\u3002 */
 .page { flex: 1; min-height: 0; padding: 12px 14px; overflow: auto;
   display: flex; flex-direction: column; gap: 12px; }
-/* \u5206\u533A\u662F\u53EF\u6EDA\u52A8\u7684 flex \u5217\uFF1A\u5B50\u9879\u4E00\u5F8B\u4E0D\u53C2\u4E0E\u6536\u7F29\uFF0C\u5426\u5219\u5B9A\u9AD8\u7684\u6309\u94AE/\u8F93\u5165\u6846/\u65E5\u5FD7\u4F1A\u88AB\u538B\u6241
+/* \u9875\u9762\u662F\u53EF\u6EDA\u52A8\u7684 flex \u5217\uFF1A\u5B50\u9879\u4E00\u5F8B\u4E0D\u53C2\u4E0E\u6536\u7F29\uFF0C\u5426\u5219\u5B9A\u9AD8\u7684\u6309\u94AE/\u8F93\u5165\u6846/\u65E5\u5FD7\u4F1A\u88AB\u538B\u6241
    \uFF08\u5B9E\u6D4B\u4E0D\u5199\u8FD9\u6761\u65F6 32px \u7684\u4E3B\u6309\u94AE\u88AB\u6324\u6210 24.5px\uFF09\uFF0C\u8D85\u51FA\u90E8\u5206\u4EA4\u7ED9 overflow \u6EDA\u52A8 */
 .page > * { flex: none; }
 
-.field .flabel { display: block; margin-bottom: 4px; font-size: 13px; line-height: 16px; color: var(--text-2); }
+.rows { display: flex; flex-direction: column; gap: 10px; }
+.row { display: flex; align-items: center; gap: 10px; }
+.row > .rl { flex: none; width: 56px; font-size: 13px; line-height: 16px; color: var(--text-2); }
+.row > .rc { flex: 1; min-width: 0; }
+/* \u300C\u7AEF\u70B9/\u6A21\u578B\u300D\u884C\u6309\u9884\u8BBE\u6761\u4EF6\u663E\u9690\uFF1Adisplay:flex \u4F1A\u76D6\u8FC7 UA \u7684 [hidden]\uFF0C\u5FC5\u987B\u663E\u5F0F\u6536\u56DE */
+.row[hidden] { display: none; }
+
 /* \u5C3A\u5BF8\u53D6 PTA \u7684\u8868\u5355\u63A7\u4EF6\uFF1A32px \u9AD8 / 4px \u5706\u89D2 / #ced4da \u8FB9\u6846 / \u805A\u7126\u300C\u4E3B\u8272\u8FB9\u6846 + 2px \u73AF\u300D */
 select { appearance: none; -webkit-appearance: none; width: 100%; height: 32px; padding: 0 30px 0 12px;
   border: 1px solid var(--input-border); border-radius: 4px;
@@ -2603,31 +2600,30 @@ select { appearance: none; -webkit-appearance: none; width: 100%; height: 32px; 
   transition: border-color var(--trs), box-shadow var(--trs); }
 select:focus-visible { outline: none; border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-ring); }
 select:disabled { background: var(--bg-light); cursor: not-allowed; }
-.hint { margin: 4px 0 0; font-size: 13px; line-height: 16px; color: var(--text-3); }
 
-.keyrow { position: relative; }
-.keyrow input, .mrow input { width: 100%; height: 32px; padding: 0 12px; border: 1px solid var(--input-border);
+.rc input { width: 100%; height: 32px; padding: 0 12px; border: 1px solid var(--input-border);
   border-radius: 4px; background: var(--bg); color: var(--text); font: inherit;
   transition: border-color var(--trs), box-shadow var(--trs); }
+.rc input::placeholder { color: var(--text-3); font-style: italic; } /* PTA \u7684\u5360\u4F4D\u7B26\u6837\u5F0F */
+.rc input:focus-visible { outline: none; border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-ring); }
+.rc input:disabled { background: var(--bg-light); cursor: not-allowed; }
+
+.keyrow { position: relative; }
 .keyrow input { padding-right: 56px; /* \u53F3\u4FA7\u7559\u7ED9\u663E\u793A/\u9690\u85CF\u6309\u94AE */
   /* \u7528 text-security \u906E\u7F69\u800C\u4E0D\u662F type=password\uFF1AChrome \u5BC6\u7801\u7BA1\u7406\u5668\u53EA\u76EF\u771F\u5BC6\u7801\u6846\uFF0C
    * \u771F\u5BC6\u7801\u6846\u7684\u503C\u4E00\u53D8\u5C31\u5F39\u300C\u8981\u66F4\u65B0\u5BC6\u7801\u5417\uFF1F\u300D\uFF08\u628A API Key \u5F53\u6210 PTA \u8D26\u53F7\u7684\u65B0\u5BC6\u7801\uFF09 */
   -webkit-text-security: disc; }
 .keyrow input.reveal { -webkit-text-security: none; } /* \u300C\u663E\u793A\u300D\u6001\uFF1A\u660E\u6587\u56DE\u663E */
-.keyrow input::placeholder, .mrow input::placeholder { color: var(--text-3); font-style: italic; } /* PTA \u7684\u5360\u4F4D\u7B26\u6837\u5F0F */
-.keyrow input:focus-visible, .mrow input:focus-visible { outline: none; border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-ring); }
-.keyrow input:disabled, .mrow input:disabled { background: var(--bg-light); cursor: not-allowed; }
 .keyrow .peek { position: absolute; right: 4px; top: 50%; transform: translateY(-50%);
   height: 24px; padding: 0 8px; border: none; border-radius: 4px; background: none;
   color: var(--text-3); font-size: 13px; cursor: pointer;
   transition: background-color var(--trs), color var(--trs); }
 .keyrow .peek:hover { color: var(--accent); background: var(--bg-light); }
+.keyrow .peek:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
-.switchrow { display: flex; align-items: center; justify-content: space-between; gap: 12px;
-  cursor: pointer; min-height: 26px; }
-.switchrow .stxt { display: flex; flex-direction: column; }
-.switchrow .stxt b { font-weight: 400; font-size: 15px; line-height: 20px; } /* PTA \u884C\u6807\u9898\uFF1A15/20\u3001\u5E38\u89C4\u5B57\u91CD */
-.switchrow .stxt small { font-size: 13px; line-height: 16px; color: var(--text-3); }
+.switchrow { display: flex; align-items: center; gap: 10px; cursor: pointer; min-height: 32px; }
+.switchrow .rl { flex: none; width: 56px; font-size: 13px; line-height: 16px; color: var(--text-2); }
+.switchrow .switch { margin-left: auto; }
 .switch { appearance: none; -webkit-appearance: none; flex: none; width: 36px; height: 20px;
   margin: 0; border-radius: 9999px; background: var(--bg-normal); cursor: pointer; position: relative;
   transition: background var(--trs); }
@@ -2639,8 +2635,21 @@ select:disabled { background: var(--bg-light); cursor: not-allowed; }
 .switch:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 input:disabled, button:disabled { opacity: .6; cursor: not-allowed; } /* PTA \u7684\u7981\u7528\u53E3\u5F84 */
 
-/* \u4E3B\u6309\u94AE\uFF1APTA \u7684\u5B9E\u5FC3\u6309\u94AE\uFF08\u4E3B\u8272\u5E95\u767D\u5B57 / 2rem \u9AD8 / 4px \u5706\u89D2\uFF09\uFF0C\u60AC\u505C\u538B\u6697\u3001\u6309\u4E0B 1px */
-.start { width: 100%; height: 32px; padding: 0 15px; border: 1px solid transparent; border-radius: 4px;
+/* \u9AD8\u7EA7\u8BBE\u7F6E\u62BD\u5C49\uFF1A<details> \u81EA\u5E26\u5C55\u5F00\u8BED\u4E49\uFF1B\u6536\u8D77\u6001\u53F3\u4FA7 12px \u5C0F\u5B57\u663E\u793A\u8BED\u8A00/\u5E76\u53D1\u5F53\u524D\u503C */
+.adv summary { display: flex; align-items: center; gap: 6px; min-height: 24px; padding: 2px 0;
+  cursor: pointer; list-style: none; user-select: none;
+  color: var(--text-2); font-size: 13px; transition: color var(--trs); }
+.adv summary::-webkit-details-marker { display: none; }
+.adv summary:hover { color: var(--accent); }
+.adv summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+.adv .chev { flex: none; transition: transform var(--trs); }
+.adv[open] .chev { transform: rotate(90deg); }
+.adv .adv-cur { margin-left: auto; font-size: 12px; line-height: 16px; color: var(--text-3); }
+.adv-body { display: flex; flex-direction: column; gap: 10px; padding: 6px 0 2px; }
+
+/* \u4E3B\u6309\u94AE\uFF1APTA \u7684\u5B9E\u5FC3\u6309\u94AE\uFF08\u4E3B\u8272\u5E95\u767D\u5B57 / 4px \u5706\u89D2\uFF09\uFF0C\u60AC\u505C\u538B\u6697\u3001\u6309\u4E0B 1px\uFF1B
+   36px \u6BD4\u8868\u5355\u63A7\u4EF6\u9AD8\u4E00\u6863\u2014\u2014\u9762\u677F\u552F\u4E00\u7684\u91CD\u91CF\u7EA7\u5143\u7D20 */
+.start { width: 100%; height: 36px; padding: 0 15px; border: 1px solid transparent; border-radius: 4px;
   background: var(--accent); color: #fff; font: inherit; font-size: 15px; cursor: pointer;
   filter: brightness(var(--brightness, 1));
   transition: filter .2s ease; }
@@ -2663,16 +2672,19 @@ input:disabled, button:disabled { opacity: .6; cursor: not-allowed; } /* PTA \u7
   font: 12px/1.7 ui-monospace, "Cascadia Mono", Consolas, monospace;
   white-space: pre-wrap; word-break: break-all; color: var(--text-2); }
 .logs .line { margin: 0 0 1px; }
-.logs .line::-webkit-scrollbar, .body::-webkit-scrollbar { width: 8px; }
-.logs::-webkit-scrollbar-thumb, .body::-webkit-scrollbar-thumb { background: var(--scroll); border-radius: 4px; }
+.logs::-webkit-scrollbar { width: 8px; }
+.logs::-webkit-scrollbar-thumb { background: var(--scroll); border-radius: 4px; }
 .logs .t { color: var(--text-3); font-size: 11px; margin-right: 6px; }
 .logs .lv-ok { color: var(--ok); }
 .logs .lv-err { color: var(--err); }
 .logs .lv-warn { color: var(--warn); }
-.foot { margin: 0; font-size: 13px; line-height: 16px; color: var(--text-3); }
+
+/* \u9875\u811A\u53EA\u7559\u4E00\u884C\u5FC5\u8981\u8B66\u793A\uFF08\u65E7\u7248\u4E09\u6BB5\u7070\u5B57\u8BF4\u660E\u5DF2\u5220\uFF0C\u7EC6\u8282\u7531\u5F15\u64CE\u65E5\u5FD7\u73B0\u62A5\uFF09 */
+.foot { margin: 0; padding-top: 10px; border-top: 1px solid var(--hairline);
+  font-size: 12px; line-height: 16px; color: var(--text-3); }
 
 @media (prefers-reduced-motion: reduce) {
-  .ball, .tab, .collapse, .switch, .peek, .clear { transition: none; }
+  .ball, .collapse, .switch, .peek, .clear, .adv summary, .adv .chev { transition: none; }
   .panel { animation: none; }
   .wrap.dragging .ball { transition: none; }
   .pill.run::before { animation: none; }
@@ -2720,7 +2732,6 @@ input:disabled, button:disabled { opacity: .6; cursor: not-allowed; } /* PTA \u7
   var shadow = null;
   var settings = null;
   var open = false;
-  var activePage = "answer";
   var themeObserver = null;
   var ballPos = null;
   var BALL_SIZE = 46;
@@ -2833,6 +2844,14 @@ input:disabled, button:disabled { opacity: .6; cursor: not-allowed; } /* PTA \u7
       }
     }
   }
+  var LOCK_IDS = ["aa-model", "aa-key", "aa-peek", "aa-base", "aa-model-name", "aa-redo", "aa-images", "aa-lang", "aa-concurrency"];
+  function lockConfig(running2) {
+    if (!shadow) return;
+    for (const id of LOCK_IDS) {
+      const n = shadow.getElementById(id);
+      if (n) n.disabled = running2;
+    }
+  }
   function updateRunUI() {
     if (!shadow) return;
     const running2 = isRunning();
@@ -2854,6 +2873,7 @@ input:disabled, button:disabled { opacity: .6; cursor: not-allowed; } /* PTA \u7
       start.classList.toggle("stop", running2);
       start.textContent = running2 ? "\u4E2D\u6B62\u7B54\u9898" : "\u5F00\u59CB\u7B54\u9898";
     }
+    lockConfig(running2);
   }
   function syncTheme() {
     if (!host) return;
@@ -2891,32 +2911,14 @@ input:disabled, button:disabled { opacity: .6; cursor: not-allowed; } /* PTA \u7
     collapse.id = "collapse";
     collapse.setAttribute("aria-label", "\u6536\u8D77\u9762\u677F");
     collapse.textContent = "\u2014";
-    const tabbar = el("div", "tabs", panel);
-    tabbar.setAttribute("role", "tablist");
-    tabbar.setAttribute("aria-label", "\u9762\u677F\u5206\u533A");
-    const tabAnswer = el("button", "tab", tabbar);
-    tabAnswer.id = "tab-answer";
-    tabAnswer.setAttribute("role", "tab");
-    tabAnswer.setAttribute("aria-controls", "page-answer");
-    tabAnswer.textContent = "\u7B54\u9898\u914D\u7F6E";
-    const tabModel = el("button", "tab", tabbar);
-    tabModel.id = "tab-model";
-    tabModel.setAttribute("role", "tab");
-    tabModel.setAttribute("aria-controls", "page-model");
-    tabModel.textContent = "\u6A21\u578B\u914D\u7F6E";
-    const pages = el("div", "pages", panel);
-    const pageAnswer = el("div", "page", pages);
-    pageAnswer.id = "page-answer";
-    pageAnswer.setAttribute("role", "tabpanel");
-    pageAnswer.setAttribute("aria-labelledby", "tab-answer");
-    const pageModel = el("div", "page", pages);
-    pageModel.id = "page-model";
-    pageModel.setAttribute("role", "tabpanel");
-    pageModel.setAttribute("aria-labelledby", "tab-model");
-    const fModel = el("div", "field", pageModel);
-    el("label", "flabel", fModel).textContent = "\u670D\u52A1";
-    fModel.querySelector("label").htmlFor = "aa-model";
-    const sel = el("select", "", fModel);
+    const page = el("div", "page", panel);
+    const rows = el("div", "rows", page);
+    const rowSvc = el("div", "row", rows);
+    const svcLabel = el("label", "rl", rowSvc);
+    svcLabel.textContent = "\u670D\u52A1";
+    svcLabel.htmlFor = "aa-model";
+    const rcSvc = el("div", "rc", rowSvc);
+    const sel = el("select", "", rcSvc);
     sel.id = "aa-model";
     for (const [key2, p] of Object.entries(PRESETS)) {
       const o = el("option", "", sel);
@@ -2924,108 +2926,120 @@ input:disabled, button:disabled { opacity: .6; cursor: not-allowed; } /* PTA \u7
       o.textContent = p.label;
       if (p.disabled) o.disabled = true;
     }
-    el("p", "hint", fModel);
-    const fBase = el("div", "field", pageModel);
-    fBase.id = "aa-base-field";
-    fBase.hidden = true;
-    el("label", "flabel", fBase).textContent = "\u7AEF\u70B9";
-    fBase.querySelector("label").htmlFor = "aa-base";
-    const brow = el("div", "mrow", fBase);
-    const burl = el("input", "", brow);
-    burl.id = "aa-base";
-    burl.type = "text";
-    burl.placeholder = "https://api.example.com/v1";
-    burl.autocomplete = "off";
-    burl.spellcheck = false;
-    el("p", "hint", fBase).textContent = "OpenAI \u517C\u5BB9\u6839\u5730\u5740\uFF0C\u586B\u5230 /v1 \u5373\u53EF\uFF08\u8BEF\u7C98 /chat/completions \u4F1A\u81EA\u52A8\u5265\u6389\uFF09";
-    const fModelName = el("div", "field", pageModel);
-    fModelName.id = "aa-model-field";
-    fModelName.hidden = true;
-    el("label", "flabel", fModelName).textContent = "\u6A21\u578B";
-    fModelName.querySelector("label").htmlFor = "aa-model-name";
-    const mrow = el("div", "mrow", fModelName);
-    const mname = el("input", "", mrow);
-    mname.id = "aa-model-name";
-    mname.type = "text";
-    mname.autocomplete = "off";
-    mname.spellcheck = false;
-    el("p", "hint", fModelName).textContent = "\u7559\u7A7A\u5373\u7528\u8BE5\u670D\u52A1\u7684\u9ED8\u8BA4\u6A21\u578B";
-    const fLang = el("div", "field", pageAnswer);
-    el("label", "flabel", fLang).textContent = "\u8BED\u8A00\uFF08\u7F16\u7A0B\u9898\uFF09";
-    fLang.querySelector("label").htmlFor = "aa-lang";
-    const lsel = el("select", "", fLang);
-    lsel.id = "aa-lang";
-    const oFollow = el("option", "", lsel);
-    oFollow.value = "";
-    oFollow.textContent = "\u8DDF\u968F\u7F16\u8F91\u5668\u5F53\u524D\u8BED\u8A00";
-    el("p", "hint", fLang).textContent = "\u672C\u9898\u96C6\u5141\u8BB8\u7684\u8BED\u8A00\uFF1B\u4F5C\u7B54\u6309\u6240\u9009\u8BED\u8A00\u51FA\u7801\u5E76\u63D0\u4EA4\u8BC4\u6D4B\u3002\u51FD\u6570\u9898\u7684\u7F16\u8BD1\u5668\u7531\u9898\u76EE\u56FA\u5B9A\uFF0C\u6B64\u914D\u7F6E\u5BF9\u51FD\u6570\u9898\u4E0D\u751F\u6548";
-    const fConc = el("div", "field", pageAnswer);
-    el("label", "flabel", fConc).textContent = "\u5E76\u53D1\u6570\uFF08\u7F16\u7801\u9898\uFF09";
-    fConc.querySelector("label").htmlFor = "aa-concurrency";
-    const csel = el("select", "", fConc);
-    csel.id = "aa-concurrency";
-    for (const n of [1, 2, 3, 4, 5, 6]) {
-      const o = el("option", "", csel);
-      o.value = String(n);
-      o.textContent = `${n} \u8DEF`;
-    }
-    el("p", "hint", fConc).textContent = "\u7F16\u7801\u9898\u540C\u65F6\u8BF7\u6C42\u6A21\u578B\u7684\u8DEF\u6570\uFF0C\u8D8A\u9AD8\u8D8A\u5FEB\uFF1B\u5B9E\u6D4B OpenCode Go 6 \u8DEF\u65E0 429\uFF0C\u6162\u6A21\u578B/\u9650\u6D41\u4E25\u683C\u7684\u670D\u52A1\u5EFA\u8BAE 1\u20133";
-    const fKey = el("div", "field", pageModel);
-    el("label", "flabel", fKey).textContent = "API Key";
-    fKey.querySelector("label").htmlFor = "aa-key";
-    const keyrow = el("div", "keyrow", fKey);
-    const key = el("input", "", keyrow);
+    const rowKey = el("div", "row", rows);
+    const keyLabel = el("label", "rl", rowKey);
+    keyLabel.textContent = "API Key";
+    keyLabel.htmlFor = "aa-key";
+    const rcKey = el("div", "rc keyrow", rowKey);
+    const key = el("input", "", rcKey);
     key.id = "aa-key";
     key.type = "text";
     key.placeholder = "sk-\u2026";
     key.autocomplete = "off";
     key.spellcheck = false;
-    const peek = el("button", "peek", keyrow);
+    key.title = "\u6BCF\u4E2A\u670D\u52A1\u5404\u5B58\u4E00\u628A\uFF0C\u5207\u6362\u670D\u52A1\u81EA\u52A8\u5E26\u51FA\uFF1B\u4EC5\u4FDD\u5B58\u5728\u672C\u673A\u6D4F\u89C8\u5668";
+    const peek = el("button", "peek", rcKey);
     peek.type = "button";
     peek.id = "aa-peek";
     peek.textContent = "\u663E\u793A";
     peek.setAttribute("aria-label", "\u663E\u793A\u6216\u9690\u85CF API Key");
-    el("p", "hint", fKey).textContent = "\u6BCF\u4E2A\u670D\u52A1\u5404\u5B58\u4E00\u628A Key\uFF0C\u5207\u670D\u52A1\u81EA\u52A8\u5E26\u51FA\uFF1B\u4EC5\u4FDD\u5B58\u5728\u672C\u673A\u6D4F\u89C8\u5668";
-    const fRedo = el("div", "field", pageAnswer);
-    el("label", "flabel", fRedo).textContent = "\u5DF2\u7B54\u9898\u5904\u7406";
-    fRedo.querySelector("label").htmlFor = "aa-redo";
-    const rsel = el("select", "", fRedo);
+    const rowBase = el("div", "row", rows);
+    rowBase.id = "row-base";
+    rowBase.hidden = true;
+    const baseLabel = el("label", "rl", rowBase);
+    baseLabel.textContent = "\u7AEF\u70B9";
+    baseLabel.htmlFor = "aa-base";
+    const rcBase = el("div", "rc", rowBase);
+    const burl = el("input", "", rcBase);
+    burl.id = "aa-base";
+    burl.type = "text";
+    burl.placeholder = "https://api.example.com/v1";
+    burl.autocomplete = "off";
+    burl.spellcheck = false;
+    burl.title = "OpenAI \u517C\u5BB9\u6839\u5730\u5740\uFF0C\u586B\u5230 /v1 \u5373\u53EF\uFF08\u8BEF\u7C98 /chat/completions \u4F1A\u81EA\u52A8\u5265\u6389\uFF09";
+    const rowMname = el("div", "row", rows);
+    rowMname.id = "row-model";
+    rowMname.hidden = true;
+    const mNameLabel = el("label", "rl", rowMname);
+    mNameLabel.textContent = "\u6A21\u578B";
+    mNameLabel.htmlFor = "aa-model-name";
+    const rcMname = el("div", "rc", rowMname);
+    const mname = el("input", "", rcMname);
+    mname.id = "aa-model-name";
+    mname.type = "text";
+    mname.autocomplete = "off";
+    mname.spellcheck = false;
+    const rowRedo = el("div", "row", rows);
+    const redoLabel = el("label", "rl", rowRedo);
+    redoLabel.textContent = "\u5DF2\u7B54\u5904\u7406";
+    redoLabel.htmlFor = "aa-redo";
+    const rcRedo = el("div", "rc", rowRedo);
+    const rsel = el("select", "", rcRedo);
     rsel.id = "aa-redo";
+    rsel.title = "\u300C\u4EC5\u91CD\u505A\u9519\u8BEF\u9898\u300D\u6309\u5E73\u53F0\u5224\u5206\u53EA\u91CD\u505A\u7B54\u9519\u7684\u7F16\u7801\u9898\uFF08\u672A\u63D0\u4EA4\u8349\u7A3F\u4E5F\u91CD\u505A\uFF09\uFF1B\u5BA2\u89C2\u9898\u7B54\u9898\u4E2D\u4E0D\u5224\u5206\uFF0C\u4E00\u5F8B\u6309\u8DF3\u8FC7\u5904\u7406";
     for (const [value, label] of [
-      ["skip", "\u8DF3\u8FC7\u5DF2\u7B54\uFF08\u9ED8\u8BA4\uFF09"],
+      ["skip", "\u8DF3\u8FC7\u5DF2\u7B54"],
       ["wrong", "\u4EC5\u91CD\u505A\u9519\u8BEF\u9898"],
-      ["all", "\u5168\u90E8\u91CD\u505A\uFF08\u8986\u76D6\uFF09"]
+      ["all", "\u5168\u90E8\u91CD\u505A"]
     ]) {
       const o = el("option", "", rsel);
       o.value = value;
       o.textContent = label;
     }
-    el("p", "hint", fRedo).textContent = "\u4EC5\u91CD\u505A\u9519\u8BEF\uFF1A\u6309 PTA \u5224\u5206\u72B6\u6001\u53EA\u91CD\u505A\u7B54\u9519\u7684\u7F16\u7801\u9898\uFF08\u672A\u63D0\u4EA4\u8349\u7A3F\u4E5F\u4F1A\u91CD\u505A\uFF09\uFF1B\u5BA2\u89C2\u9898\u7B54\u9898\u4E2D\u4E0D\u5224\u5206\uFF0C\u4ECD\u6309\u8DF3\u8FC7\u5904\u7406";
-    const swImg = el("label", "switchrow", pageAnswer);
+    const swImg = el("label", "switchrow", rows);
     swImg.htmlFor = "aa-images";
-    const stxtImg = el("span", "stxt", swImg);
-    el("b", "", stxtImg).textContent = "\u4F5C\u7B54\u542B\u56FE\u9898";
-    el("small", "", stxtImg).textContent = "\u9700\u89C6\u89C9\u6A21\u578B\uFF08\u5982 deepseek-flash\uFF09\uFF0C\u9ED8\u8BA4\u8DF3\u8FC7\uFF1B\u5BA2\u89C2\u9898\u4E0E\u7F16\u7A0B/\u51FD\u6570\u9898";
+    swImg.title = "\u5F00\u542F\u540E\u9898\u5E72\u56FE\u7247\u968F\u9898\u9762\u4EA4\u7ED9\u6A21\u578B\u4F5C\u7B54\uFF0C\u9700\u8981\u80FD\u770B\u56FE\u7684\u6A21\u578B\uFF08DeepSeek \u5B98\u65B9\u9ED8\u8BA4\u6A21\u578B\u652F\u6301\uFF09\uFF1B\u770B\u4E0D\u4E86\u56FE\u7684\u6A21\u578B\u4F1A\u9010\u9898\u62A5\u9519";
+    const imgLabel = el("span", "rl", swImg);
+    imgLabel.textContent = "\u542B\u56FE\u9898";
     const imgs = el("input", "switch", swImg);
     imgs.id = "aa-images";
     imgs.type = "checkbox";
-    const start = el("button", "start", pageAnswer);
+    const adv = el("details", "adv", rows);
+    const advSummary = el("summary", "", adv);
+    advSummary.innerHTML = '<svg class="chev" width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 1.5 7.5 5 3 8.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+    el("span", "", advSummary).textContent = "\u9AD8\u7EA7\u8BBE\u7F6E";
+    const advCur = el("span", "adv-cur", advSummary);
+    advCur.id = "aa-adv-cur";
+    const advBody = el("div", "adv-body", adv);
+    const rowLang = el("div", "row", advBody);
+    const langLabel = el("label", "rl", rowLang);
+    langLabel.textContent = "\u8BED\u8A00";
+    langLabel.htmlFor = "aa-lang";
+    const rcLang = el("div", "rc", rowLang);
+    const lsel = el("select", "", rcLang);
+    lsel.id = "aa-lang";
+    lsel.title = "\u7F16\u7A0B\u9898\u6309\u6B64\u8BED\u8A00\u51FA\u7801\u5E76\u63D0\u4EA4\u8BC4\u6D4B\uFF1B\u51FD\u6570\u9898\u7684\u7F16\u8BD1\u5668\u7531\u9898\u76EE\u56FA\u5B9A\u3002\u9009\u9879\u4E3A\u672C\u9898\u96C6\u5141\u8BB8\u7684\u8BED\u8A00";
+    const oFollow = el("option", "", lsel);
+    oFollow.value = "";
+    oFollow.textContent = "\u8DDF\u968F\u7F16\u8F91\u5668";
+    const rowConc = el("div", "row", advBody);
+    const concLabel = el("label", "rl", rowConc);
+    concLabel.textContent = "\u5E76\u53D1";
+    concLabel.htmlFor = "aa-concurrency";
+    const rcConc = el("div", "rc", rowConc);
+    const csel = el("select", "", rcConc);
+    csel.id = "aa-concurrency";
+    csel.title = "\u7F16\u7801\u9898\u540C\u65F6\u8BF7\u6C42\u6A21\u578B\u7684\u8DEF\u6570\uFF0C\u8D8A\u9AD8\u8D8A\u5FEB\uFF1B\u5BF9\u9650\u6D41\u4E25\u683C\u7684\u670D\u52A1\u5EFA\u8BAE 1\u20133 \u8DEF";
+    for (const n of [1, 2, 3, 4, 5, 6]) {
+      const o = el("option", "", csel);
+      o.value = String(n);
+      o.textContent = `${n} \u8DEF`;
+    }
+    const start = el("button", "start", page);
     start.id = "start";
     start.type = "button";
     start.textContent = "\u5F00\u59CB\u7B54\u9898";
-    const logsHead = el("div", "logs-head", pageAnswer);
+    const logsHead = el("div", "logs-head", page);
     el("b", "", logsHead).textContent = "\u65E5\u5FD7";
     const clear = el("button", "clear", logsHead);
     clear.id = "clear";
     clear.type = "button";
     clear.textContent = "\u6E05\u7A7A";
-    const logs = el("div", "logs", pageAnswer);
+    const logs = el("div", "logs", page);
     logs.id = "logs";
     logs.setAttribute("role", "log");
     logs.setAttribute("aria-live", "polite");
-    el("p", "foot", pageAnswer).textContent = "\u5B9E\u9A8C\u529F\u80FD\uFF1A\u5BA2\u89C2\u9898\u7B54\u9898\u4E2D\u5E73\u53F0\u4E0D\u53CD\u9988\u5BF9\u9519\uFF0C\u7F16\u7801\u9898\u63D0\u4EA4\u5373\u8BC4\u6D4B\uFF1B\u5B8C\u6210\u540E\u8BF7\u81EA\u884C\u6838\u5BF9\u7ED3\u679C\u3002";
-    el("p", "foot", pageAnswer).textContent = "\u6587\u672C\u6A21\u578B\u770B\u4E0D\u89C1\u56FE\u7247\uFF1A\u542B\u56FE\u9898\uFF08\u5BA2\u89C2\u9898\u4E0E\u7F16\u7A0B/\u51FD\u6570\u9898\uFF09\u8981\u4E48\u8DF3\u8FC7\uFF0C\u8981\u4E48\u5207\u5230\u89C6\u89C9\u6A21\u578B\uFF08\u5982 deepseek-flash\uFF09\u5E76\u5F00\u542F\u300C\u4F5C\u7B54\u542B\u56FE\u9898\u300D\uFF1B\u5F00\u542F\u540E\u7F16\u7801\u9898\u4F1A\u628A\u9898\u5E72\u56FE\u7247\u968F\u9898\u9762\u4EA4\u7ED9\u6A21\u578B\uFF0C\u518D\u7167\u5E38\u6C34\u5408\u63D0\u4EA4\u8BC4\u6D4B\u3002";
-    el("p", "foot", pageAnswer).textContent = "\u7F16\u7A0B\u9898\u63D0\u4EA4\u5373\u8BC4\u6D4B\uFF1A\u4F5C\u7B54\u4F1A\u5B9E\u65F6\u751F\u6210\u63D0\u4EA4\u8BB0\u5F55\u4E0E\u4F5C\u7B54\u5EA6\uFF0C\u6210\u7EE9\u7531\u8BC4\u6D4B\u7ED3\u679C\u51B3\u5B9A\uFF0C\u4E0E\u5BA2\u89C2\u9898\u5224\u5206\u8DEF\u5F84\u4E0D\u540C\u3002";
+    el("p", "foot", page).textContent = "\u5B9E\u9A8C\u529F\u80FD \xB7 \u7F16\u7A0B\u9898\u63D0\u4EA4\u5373\u8BC4\u6D4B\uFF0C\u6210\u7EE9\u4EE5\u8BC4\u6D4B\u7ED3\u679C\u4E3A\u51C6";
     let drag = null;
     let suppressClickUntil = 0;
     ball.addEventListener("pointerdown", (e) => {
@@ -3075,21 +3089,6 @@ input:disabled, button:disabled { opacity: .6; cursor: not-allowed; } /* PTA \u7
     panel.addEventListener("keydown", (e) => {
       if (e.key === "Escape") closePanel();
     });
-    tabAnswer.addEventListener("click", () => switchTab("answer"));
-    tabModel.addEventListener("click", () => switchTab("model"));
-    tabbar.addEventListener("keydown", (e) => {
-      const cur = activePage === "model" ? tabModel : tabAnswer;
-      let next = null;
-      if (e.key === "ArrowRight" || e.key === "ArrowDown") next = cur === tabAnswer ? tabModel : tabAnswer;
-      else if (e.key === "ArrowLeft" || e.key === "ArrowUp") next = cur === tabModel ? tabAnswer : tabModel;
-      else if (e.key === "Home") next = tabAnswer;
-      else if (e.key === "End") next = tabModel;
-      if (!next || next === cur) return;
-      e.preventDefault();
-      switchTab(next === tabModel ? "model" : "answer");
-      next.focus();
-    });
-    switchTab(activePage);
     peek.addEventListener("click", () => {
       const show = !key.classList.contains("reveal");
       key.classList.toggle("reveal", show);
@@ -3097,11 +3096,11 @@ input:disabled, button:disabled { opacity: .6; cursor: not-allowed; } /* PTA \u7
     });
     const applyPreset = () => {
       const p = PRESETS[sel.value] || PRESETS.deepseek;
-      fModel.querySelector(".hint").textContent = p.hint || "";
-      fBase.hidden = !p.customEndpoint;
-      fModelName.hidden = !p.editableModel;
-      mname.placeholder = p.customEndpoint ? "gpt-4o-mini" : p.model || "";
-      fModelName.querySelector(".hint").textContent = p.editableModel ? p.customEndpoint ? "\u586B\u8BE5\u670D\u52A1\u53EF\u7528\u7684\u6A21\u578B id" : "\u7559\u7A7A\u5373\u7528\u8BE5\u670D\u52A1\u7684\u9ED8\u8BA4\u6A21\u578B" : "";
+      sel.title = p.hint || "";
+      rowBase.hidden = !p.customEndpoint;
+      rowMname.hidden = !p.editableModel;
+      mname.placeholder = p.customEndpoint ? "gpt-4o-mini" : `\u7559\u7A7A\u7528\u9ED8\u8BA4 ${p.model || ""}`;
+      mname.title = p.customEndpoint ? "\u586B\u8BE5\u670D\u52A1\u53EF\u7528\u7684\u6A21\u578B id" : "\u7559\u7A7A\u7528\u8BE5\u670D\u52A1\u7684\u9ED8\u8BA4\u6A21\u578B";
     };
     if (settings && PRESETS[settings.autoAnswerGateway]) sel.value = settings.autoAnswerGateway;
     burl.value = ((settings || {}).autoAnswerBaseUrl || "").trim();
@@ -3112,6 +3111,7 @@ input:disabled, button:disabled { opacity: .6; cursor: not-allowed; } /* PTA \u7
     imgs.checked = !!(settings || {}).autoAnswerImages;
     csel.value = String(clampConcurrency((settings || {}).autoAnswerConcurrency, 6));
     refreshLangOptions();
+    renderAdvCur();
     applyPreset();
     let keyOwner = sel.value;
     sel.addEventListener("change", async () => {
@@ -3125,10 +3125,16 @@ input:disabled, button:disabled { opacity: .6; cursor: not-allowed; } /* PTA \u7
     burl.addEventListener("change", persist);
     mname.addEventListener("change", persist);
     key.addEventListener("change", persist);
-    lsel.addEventListener("change", persist);
     rsel.addEventListener("change", persist);
     imgs.addEventListener("change", persist);
-    csel.addEventListener("change", persist);
+    lsel.addEventListener("change", () => {
+      persist();
+      renderAdvCur();
+    });
+    csel.addEventListener("change", () => {
+      persist();
+      renderAdvCur();
+    });
     clear.addEventListener("click", () => {
       clearPersistedLog();
       logLines.length = 0;
@@ -3168,7 +3174,7 @@ input:disabled, button:disabled { opacity: .6; cursor: not-allowed; } /* PTA \u7
   var langPsId = null;
   async function refreshLangOptions() {
     if (!shadow) return;
-    const psId = (location.pathname.match(EXAM_PROBLEMS_RE) || [])[1];
+    const psId = (location.pathname.match(EXAM_PROBLEMS_RE) || [])[1] || (window.__BPS_FORCE_PANEL__ ? "preview" : null);
     if (!psId || langPsId === psId) return;
     langPsId = psId;
     const lsel = shadow.getElementById("aa-lang");
@@ -3191,29 +3197,20 @@ input:disabled, button:disabled { opacity: .6; cursor: not-allowed; } /* PTA \u7
     if (want && lsel.value !== want) {
       appendLog("warn", `\u4E0A\u6B21\u56FA\u5B9A\u8BED\u8A00\u300C${COMPILER_LABELS[want] || want}\u300D\u4E0D\u5728\u672C\u9898\u96C6\u5141\u8BB8\u5217\u8868\uFF0C\u5DF2\u6539\u56DE\u8DDF\u968F\u5F53\u524D`);
     }
+    renderAdvCur();
+  }
+  function renderAdvCur() {
+    if (!shadow) return;
+    const cur = shadow.getElementById("aa-adv-cur");
+    const lsel = shadow.getElementById("aa-lang");
+    const csel = shadow.getElementById("aa-concurrency");
+    if (!cur || !lsel || !csel) return;
+    const lang = lsel.options[lsel.selectedIndex]?.textContent?.trim() || "\u8DDF\u968F\u7F16\u8F91\u5668";
+    cur.textContent = `${lang} \xB7 ${csel.value} \u8DEF`;
   }
   function togglePanel() {
     if (!shadow) return;
     open ? closePanel() : openPanel();
-  }
-  function switchTab(name) {
-    if (!shadow) return;
-    activePage = name === "model" ? "model" : "answer";
-    const model = activePage === "model";
-    const a = shadow.getElementById("page-answer");
-    const m = shadow.getElementById("page-model");
-    if (a) a.hidden = model;
-    if (m) m.hidden = !model;
-    const tA = shadow.getElementById("tab-answer");
-    const tM = shadow.getElementById("tab-model");
-    if (tA) {
-      tA.setAttribute("aria-selected", String(!model));
-      tA.tabIndex = model ? -1 : 0;
-    }
-    if (tM) {
-      tM.setAttribute("aria-selected", String(model));
-      tM.tabIndex = model ? 0 : -1;
-    }
   }
   function placePanel() {
     if (!shadow) return;
@@ -3222,7 +3219,11 @@ input:disabled, button:disabled { opacity: .6; cursor: not-allowed; } /* PTA \u7
     const cx = window.innerWidth - (ballPos?.r ?? 18) - BALL_SIZE / 2;
     const cy = window.innerHeight - (ballPos?.b ?? 18) - BALL_SIZE / 2;
     wrapEl.classList.toggle("pos-left", cx < window.innerWidth / 2);
-    wrapEl.classList.toggle("pos-top", cy < window.innerHeight / 2);
+    const opensDown = wrapEl.classList.toggle("pos-top", cy < window.innerHeight / 2);
+    const up = cy - 45;
+    const down = window.innerHeight - cy - 45;
+    const panel = shadow.getElementById("panel");
+    if (panel) panel.style.maxHeight = `${Math.max(240, Math.floor(opensDown ? down : up))}px`;
   }
   function openPanel() {
     if (!shadow) return;
@@ -3233,8 +3234,7 @@ input:disabled, button:disabled { opacity: .6; cursor: not-allowed; } /* PTA \u7
     ball.setAttribute("aria-expanded", "true");
     open = true;
     updateRunUI();
-    const pane = shadow.getElementById(activePage === "model" ? "page-model" : "page-answer");
-    const first = pane?.querySelector("select, input, button");
+    const first = shadow.getElementById("aa-model");
     if (first) first.focus();
   }
   function closePanel() {
@@ -3289,21 +3289,18 @@ input:disabled, button:disabled { opacity: .6; cursor: not-allowed; } /* PTA \u7
     const baseUrl = preset.customEndpoint ? normalizeBaseUrl(burl?.value) : preset.baseUrl;
     if (preset.customEndpoint && !baseUrl) {
       appendLog("err", "\u8BF7\u5148\u586B\u5199 OpenAI \u517C\u5BB9\u7AEF\u70B9\uFF08\u586B\u5230 /v1\uFF09");
-      switchTab("model");
       burl?.focus();
       return;
     }
     const model = resolveModel(preset, shadow.getElementById("aa-model-name")?.value);
     if (preset.customEndpoint && !model) {
       appendLog("err", "\u8BF7\u5148\u586B\u5199\u6A21\u578B id");
-      switchTab("model");
       shadow.getElementById("aa-model-name").focus();
       return;
     }
     const apiKey = shadow.getElementById("aa-key").value.trim();
     if (!apiKey) {
       appendLog("err", "\u8BF7\u5148\u586B\u5199 API Key\uFF08\u4EC5\u4FDD\u5B58\u5728\u672C\u673A\uFF09");
-      switchTab("model");
       shadow.getElementById("aa-key").focus();
       return;
     }
@@ -3327,7 +3324,8 @@ input:disabled, button:disabled { opacity: .6; cursor: not-allowed; } /* PTA \u7
   }
   function sync(s) {
     settings = s || settings;
-    const shouldShow = !!settings && !!settings.autoAnswer && EXAM_PROBLEMS_RE.test(location.pathname);
+    const forced = !!window.__BPS_FORCE_PANEL__;
+    const shouldShow = !!settings && !!settings.autoAnswer && (forced || EXAM_PROBLEMS_RE.test(location.pathname));
     if (shouldShow && !host) mount();
     if (shouldShow) refreshLangOptions();
     if (!shouldShow && host) {
@@ -4253,6 +4251,7 @@ input:disabled, button:disabled { opacity: .6; cursor: not-allowed; } /* PTA \u7
       settings2 = { ...settings2, ...patch };
       await saveSettings(settings2);
       sync2(true);
+      sync(settings2);
     },
     // 会话内视图模式（等同于点筛选条上的「切换为分组/列表」），预览页与自动化测试用
     setView: (patch) => {

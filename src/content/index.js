@@ -170,6 +170,7 @@ window.BPS = {
     settings = { ...settings, ...patch };
     await saveSettings(settings);
     sync(true);
+    aaPanel.sync(settings); // 与 onSettingsChanged 同口径：悬浮球显隐跟着设置走（预览页/回归用）
   },
   // 会话内视图模式（等同于点筛选条上的「切换为分组/列表」），预览页与自动化测试用
   setView: patch => {
