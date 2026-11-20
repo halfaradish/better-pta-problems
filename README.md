@@ -10,16 +10,19 @@
 - **自动答题**（实验，v0.9，默认关）——用你自己的 LLM 账号作答判断 / 单选 / 填空 / 编程题 / 函数题（编码题批量并行：一次收题 → 并发请求模型 → 逐题真实提交；v0.12.1 起题干/选项含图题（含纯图片编程题）支持视觉模型识别；v0.12.2 起可只重做判分错误的编码题，已通过的题不再消耗 token；v0.12.3 起流式生成只要还在出字就不再按 300s 总上限中断；v0.12.4 面板改版：单页行式布局 + 高级设置抽屉，说明文字改为悬停提示，「含图题」默认开启）；
 - 另有「新标签页打开题目集」（默认开）等小开关。
 
-当前版本 **v0.12.4**：**自动答题面板改版**——拆掉「答题配置 / 模型配置」两页签改为单页行式布局，语言 / 并发收进「高级设置」抽屉（收起态常显当前值），面板上不再有整段灰字说明（字段解释改为悬停提示与运行日志，页脚只留一行提交即评测警示），「含图题」默认开启（默认服务 DeepSeek 的默认模型是视觉模型，粘上 Key 即可开跑），运行中配置控件锁定。v0.12.3 的**流式生成不按 300s 总上限误杀**、「已答题处理」三态、题干图片识别、批量并行等详见逐版本历史[《路线图》](./docs/路线图.md)，文档索引见文末。
+当前版本 **v0.12.4**：**自动答题面板改版**——拆掉「答题配置 / 模型配置」两页签改为单页行式布局，版面按「模型配置 / 答题配置」两组分界，语言 / 并发收进「高级设置」抽屉（收起态常显当前值），面板上不再有整段灰字说明（字段解释改为悬停提示与运行日志，页脚只留一行提交即评测警示），「含图题」默认开启（默认服务 DeepSeek 的默认模型是视觉模型，粘上 Key 即可开跑），运行中配置控件锁定。v0.12.3 的**流式生成不按 300s 总上限误杀**、「已答题处理」三态、题干图片识别、批量并行等详见逐版本历史[《路线图》](./docs/路线图.md)，文档索引见文末。
+
+商店发布：已支持 Chrome / Edge / Firefox 三份 manifest 与 `--target` 多目标构建，商店 zip、Firefox `web-ext lint`、manifest 校验都进了 CI；提交步骤见[《商店上架》](./docs/商店上架.md)，数据口径见[《隐私政策》](./docs/隐私政策.md)。
 
 ## 目录结构
 
 ```
 better-pta-problems/
 ├── src/                      # 扩展源码（构建入口）
-│   ├── shared/               # 内容脚本与弹窗共用：设置定义与迁移、提醒通道判定、通知档位判定、PTA URL 形状、时间、小工具
+│   ├── manifest/             # base.json + chrome/edge/firefox 三份 overlay（单一版本来源）
+│   ├── shared/               # 内容脚本与弹窗共用：ext() 跨浏览器 API、设置定义与迁移、提醒通道判定、通知档位判定、PTA URL 形状、时间、小工具
 │   ├── content/              # 内容脚本：课程识别与归并、跨页聚合、答题进度、视图渲染、原生卡片装饰、提醒上报
-│   ├── background/           # 后台 service worker：浏览器通知（alarms 扫描 + notifications）与邮件（→ 用户自建后端）
+│   ├── background/           # 后台（Chrome service worker / Firefox 事件页）：浏览器通知、邮件转发、OpenCode 网关转发
 │   └── popup/                # 工具栏弹窗（主页面＝开关列表 + 三个入口行；提醒 / 课程规则 / 配置导入导出各为右滑子页面）
 ├── extension/                # 构建产物 + 静态资源（发版 zip 里的 extension/ 子文件夹来源，可直接加载）
 │   ├── manifest.json         # MV3 清单
@@ -29,9 +32,10 @@ better-pta-problems/
 │   │   └── styles.css        # 注入样式（PTA 令牌，明暗跟随页面主题）
 │   ├── popup/                # ← popup.js 由 src/popup/ 构建
 │   └── icons/                # 扩展图标
-├── test/                     # node:test 单元测试（识别/归并/整组分页/时间文案/设置迁移/数据源记账/答题进度口径/通知档位）
+├── dist/                     # 构建/打包产物（gitignore）：edge/、firefox/、store/*.zip
+├── test/                     # node:test 单元测试（识别/归并/整组分页/时间文案/设置迁移/数据源记账/答题进度口径/通知档位/三份 manifest）
 ├── preview.html              # 设计预览页（复刻 PTA DOM + mock 接口 + 实际运行 core.js 产物）
-├── package.json              # 构建（esbuild）与测试脚本
+├── package.json              # 构建（esbuild）、manifest 校验、商店打包与测试脚本
 ├── server/                   # 邮件提醒通道的后端（Node + node:sqlite + Nodemailer，部署见其 README）
 ├── docs/                     # 设计文档与使用指南（索引见文末《文档》）
 │   ├── 安装教程.md
@@ -42,13 +46,17 @@ better-pta-problems/
 │   ├── 自动答题初探.md
 │   ├── 提醒.md
 │   ├── 路线图.md
-│   └── 发版流程.md
-└── tools/                    # 构建脚本、发行包打包（zip.mjs / package.mjs）、图标生成、本地预览服务器
+│   ├── 发版流程.md
+│   ├── 商店上架.md
+│   └── 隐私政策.md
+└── tools/                    # 多目标构建、三份 manifest、商店/GitHub 打包、图标生成、本地预览服务器
 ```
 
 ## 安装与更新
 
 **普通用户**：到 [Releases](https://github.com/halfaradish/better-pta-problems/releases) 下载最新的 `better-pta-problems-v*.zip`，解压到一个固定位置，双击里面的 `安装教程.html` 跟着做即可。压缩包解压后是一个目录，里面是扩展本体 `extension/` 与《安装教程》——在 `chrome://extensions`（Edge 为 `edge://extensions`）打开开发者模式，点「加载已解压的扩展程序」，**选解压目录里的 `extension` 子文件夹**。升级时把新包里的 `extension` 覆盖到同一位置、回扩展页在卡片上点「刷新」（↻），设置不会丢。完整说明见[《安装教程》](./docs/安装教程.md)（同一份正文打包时渲染成压缩包里的 `安装教程.html`）。
+
+**从商店安装**（Chrome Web Store / Edge Add-ons / Firefox AMO）：上架后可直接在商店搜索“更好的题目集”。商店版与 sideload 版的扩展 ID 不同，`chrome.storage` 不会自动迁移——从旧版升级前先在弹窗「配置导入导出」里导出，装好商店版再导入。提交与上架进度见[《商店上架》](./docs/商店上架.md)。
 
 **从仓库源码**（开发者）：`chrome://extensions` → 开发者模式 →「加载已解压的扩展程序」→ 选仓库里的 `extension/` 目录（构建产物已随仓库提交，克隆后无需先构建）。
 
@@ -56,20 +64,30 @@ better-pta-problems/
 
 ## 开发
 
-源码在 `src/`，用 [esbuild](https://esbuild.github.io/) 打包成单文件写回 `extension/` 的**原有路径**——`manifest.json`、`preview.html` 与发版流程因此都不用改，产物也提交进仓库，克隆后可直接加载。
+源码在 `src/`，用 [esbuild](https://esbuild.github.io/) 打包。`extension/` 是**提交进仓库的 Chrome 构建**（漂移守卫对象，`preview.html` 与 GitHub 发行包都用它）；Edge / Firefox 构建在 `dist/` 下按目标生成，不提交。
 
 ```bash
 npm install
-npm run build     # 一次性构建（改完 src/ 必须跑一次）
-npm run dev       # 监听源码变化自动重建
-npm run package   # 组装发行 zip（extension/ + 安装教程）到 dist/
-npm test          # node:test 单测：识别/归并/整组分页/时间文案/设置迁移/数据源记账/答题进度口径/通知档位/发行包
+npm run build                          # 默认 --target chrome，写回 extension/
+npm run build -- --target chrome       # extension/
+npm run build -- --target edge         # dist/edge/
+npm run build -- --target firefox      # dist/firefox/
+npm run build -- --target all          # 三份都出
+npm run dev                            # 监听重建 Chrome
+npm run validate:manifests             # 三份 manifest 的公共字段 + Chromium/Firefox 专属键
+npm run lint:firefox                   # web-ext lint（AMO 上传前置检查）
+npm run package:store -- --target all  # dist/store/ 三个商店 zip（根目录 manifest）
+npm run package                        # GitHub Release 用的 extension/ + 安装教程 zip
+npm test                               # 172 例单测（含三份 manifest 契约与 ext() 跨浏览器口）
 ```
 
 - 改代码改 `src/` 下的文件；`extension/` 里的 `content/core.js`、`background.js`、`popup/popup.js` 是产物（首行有「构建产物」标记），不要直接编辑。
-- 发行包由 [tools/package.mjs](./tools/package.mjs) 组装：`extension/` + 由 `docs/安装教程.md` 渲染出的 `安装教程.html`（教程正文只维护 Markdown 一份，打包时渲染；zip 由 [tools/zip.mjs](./tools/zip.mjs) 写，显式带 UTF-8 文件名标志位）。
-- CI（[check.yml](./.github/workflows/check.yml)）在每次推送/PR 跑单测、校验产物与源码一致、并给发行包做一次打包冒烟，出问题会直接失败。
-- 发版（维护者）见[《发版流程》](./docs/发版流程.md)。
+- 三份 manifest 的唯一来源是 `src/manifest/base.json` + `chrome/edge/firefox.json` overlay；版本号只改 `base.json`，重新构建后会写进 `extension/manifest.json`。
+- 跨浏览器 API 统一走 `src/shared/ext.js` 的 `ext()`：Chrome/Edge 用 `chrome.*`，Firefox 用 `browser.*`；不要在业务代码里直接写 `chrome.`。
+- 发行包由 [tools/package.mjs](./tools/package.mjs) 组装；商店包由 [tools/package-store.mjs](./tools/package-store.mjs) 组装（zip 根目录直接是 `manifest.json`，不带父目录与安装教程）。
+- CI（[check.yml](./.github/workflows/check.yml)）在每次推送/PR 跑单测、`build --target all`、产物漂移守卫、三份 manifest 校验、Firefox `web-ext lint`、GitHub 发行包与三个商店包的打包冒烟。
+- Firefox 构建要求 Firefox 140+（`data_collection_permissions` 与运行时同意 API），使用 `background.scripts` 事件页；Chrome/Edge 使用 `background.service_worker`。
+- 发版（维护者）见[《发版流程》](./docs/发版流程.md)；商店提交见[《商店上架》](./docs/商店上架.md)。
 
 ## 已知限制
 
@@ -82,6 +100,8 @@ npm test          # node:test 单测：识别/归并/整组分页/时间文案/�
 - **暗色模式**：设置弹窗跟随系统（暗色取 PTA `.dark` 的实际取值）；注入的列表页 UI 与悬浮答题面板跟随 **PTA 自己的主题开关**（实测它的 `dark` 类挂在 `<body>` 上，所以是页面主题说了算，不是系统）。
 - **提醒的同步时机**：打开 PTA 任意页面约 2 秒后自动上报一次；「进行中」页的聚合刷新可在会话中途捕获教师改期；配置变更即时推送。两个通道各自独立开关（v0.7.1 起不再依赖「启用增强」，关掉页面增强也能收提醒）。
 - **浏览器通知只在浏览器运行时才会响**（v0.10）：完全退出期间不弹，重新打开浏览器后会补判一轮（只要还没到截止时间，错过的档位会补上）；系统通知被关（专注助手等）时也不会弹，弹窗入口行会红字提示「系统通知已关」。要覆盖关机时段请用邮件通道。
+- **Firefox 140+**：启动 Firefox 构建要求 140 或更高（数据收集声明与运行时同意 API）。Firefox 的通知不支持按钮，提醒只能点通知正文打开；host 权限可被用户撤销，开启自动答题/邮件提醒时弹窗会补请权限与数据收集同意。
+- **商店版与 sideload 版扩展 ID 不同**：`chrome.storage` 不随安装方式迁移；换渠道前先用「配置导入导出」备份。
 
 ## 文档
 
@@ -96,3 +116,5 @@ npm test          # node:test 单测：识别/归并/整组分页/时间文案/�
 | [提醒](./docs/提醒.md) | 两条提醒通道（浏览器通知 / 邮件）的开关与配置步骤、提醒范围、边界与「已完成的不再提醒」 |
 | [路线图](./docs/路线图.md) | 已完成版本（逐版本登记）、计划中的 v1.0 |
 | [发版流程](./docs/发版流程.md) | 维护者：tag 自动发版、发行包结构、本地打包与校验、tag 重发 |
+| [商店上架](./docs/商店上架.md) | 维护者：Chrome/Edge/Firefox 提交清单、权限理由、数据披露、审核风险与更新流程 |
+| [隐私政策](./docs/隐私政策.md) | 读取哪些数据、何时外发、第三方服务、用户控制与联系方式 |

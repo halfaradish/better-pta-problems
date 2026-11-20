@@ -22,6 +22,7 @@
  * 宁可多提醒，不漏提醒。
  */
 import { reminderChannels } from '../shared/settings.js';
+import { ext, sendMessage } from '../shared/ext.js';
 import { ACTIVE_PATH_RE } from '../shared/paths.js';
 import { aggregateAll, aggregateItems } from './aggregate.js';
 import { ensureProgressAsync, isReminderDone } from './progress.js';
@@ -81,14 +82,14 @@ function logSyncResult(res, count) {
 }
 
 function pushReminders(cfg, items, force = false) {
-  if (typeof chrome === 'undefined' || !chrome.runtime?.sendMessage) return; // 预览页无扩展运行时
-  if (!anyChannel(cfg)) return;                                             // 两个通道都关：完全不上报
+  if (!ext()?.runtime?.sendMessage) return; // 预览页无扩展运行时
+  if (!anyChannel(cfg)) return;             // 两个通道都关：完全不上报
   const now = Date.now();
   const sets = buildSyncSets(items, cfg);
   const sig = JSON.stringify([cfg.browser, cfg.email, sets]);
   if (!force && sig === lastPush.sig && now - lastPush.at < PUSH_MIN_INTERVAL) return;
   lastPush = { sig, at: now }; // 记在发送前：失败也等下一轮节流窗口，避免高频重试
-  chrome.runtime.sendMessage({
+  sendMessage({
     type: 'BPS_SYNC',
     browser: cfg.browser,
     // 邮件通道关闭时不上报服务器/邮箱（内容脚本是外发数据的唯一出口，这里做减法）

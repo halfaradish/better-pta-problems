@@ -2,15 +2,21 @@
   "name": "better-pta-problems",
   "private": true,
   "type": "module",
-  "description": "PTA 题目集列表增强浏览器扩展——构建脚本与单元测试（源码在 src/，产物在 extension/）",
+  "description": "PTA 题目集列表增强浏览器扩展——多目标构建（Chrome/Edge/Firefox）与单元测试（源码在 src/，产物在 extension/ 与 dist/）",
   "scripts": {
     "build": "node tools/build.mjs",
+    "build:all": "node tools/build.mjs --target all",
     "dev": "node tools/build.mjs --watch",
     "package": "node tools/build.mjs && node tools/package.mjs",
+    "package:store": "node tools/package-store.mjs",
+    "validate:manifests": "node tools/validate-manifests.mjs",
+    "lint:firefox": "web-ext lint --source-dir dist/firefox",
+    "check:store": "npm run build:all && npm run validate:manifests && npm run lint:firefox && npm run package:store",
     "test": "node --test"
   },
   "devDependencies": {
     "esbuild": "^0.28.2",
-    "markdown-it": "^15.0.2"
+    "markdown-it": "^15.0.2",
+    "web-ext": "^10.8.0"
   }
 }

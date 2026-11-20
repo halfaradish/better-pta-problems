@@ -5,6 +5,9 @@ import {
   DEFAULTS, HAS_CHROME_STORAGE, SETTINGS_VERSION,
   loadSettings, migrate, sanitizeSettings, saveSettings, unwrapExport,
 } from '../shared/settings.js';
+import {
+  FIREFOX_DATA, ext, isFirefox, requestDataConsent, requestHostPermissions, sendMessage,
+} from '../shared/ext.js';
 import { compareVersions, pickReleaseInfo } from '../shared/update.js';
 import { fmtAgoShort } from '../shared/time.js';
 
@@ -161,7 +164,9 @@ function applyReminderSwitches() {
 
 function readTestSentAt() {
   try {
-    return chrome.storage?.session?.get({ testSentAt: 0 })
+    const api = ext();
+    if (!api?.storage?.session) return Promise.resolve(0);
+    return api.storage.session.get({ testSentAt: 0 })
       .then(v => v.testSentAt || 0)
       .catch(() => 0);
   } catch (_) {
@@ -200,7 +205,8 @@ async function checkNotifyPermission() {
   const state = $('notifyState');
   notifyDenied = false;
   try {
-    notifyDenied = (await chrome.notifications.getPermissionLevel()) === 'denied';
+    // Firefox 没有 getPermissionLevel：可选调用返回 undefined，按正常态渲染。
+    notifyDenied = (await ext()?.notifications?.getPermissionLevel?.()) === 'denied';
   } catch (_) { /* 无扩展环境/无该 API：按正常态渲染 */ }
   if (notifyDenied) {
     state.textContent = '系统通知已关';
@@ -227,7 +233,7 @@ const showReminderStatus = (text, cls) => setStatus($('reminderStatus'), text, c
 // 迟迟不回就当场报错——否则按钮永远卡在「发送中…」，再点还被 notifyBusy 挡住，表现就是「点了没反应」
 function sendToBackground(msg, ms = 12000) {
   return Promise.race([
-    chrome.runtime.sendMessage(msg),
+    sendMessage(msg),
     new Promise((_, reject) => setTimeout(() => reject(new Error('后台没有响应，请重试')), ms)),
   ]);
 }
@@ -251,14 +257,69 @@ $('testNotify').addEventListener('click', async () => {
   }
 });
 
-for (const k of ['enabled', 'badge', 'countdown', 'mergeSimilar', 'openInNewTab', 'progress', 'autoAnswer']) $(k).addEventListener('change', save);
+// Firefox 的可选数据收集同意：必须在用户手势里请求（这里是开关的 change 处理器）。
+// 自动答题会把页面内容与 API Key 发给模型服务；邮件提醒会把邮箱发给用户自建后端。
+// 非 Firefox 直接放行——Chrome/Edge 在安装时披露，没有运行时同意这一层。
+async function ensureFirefoxConsent(kinds) {
+  if (!isFirefox()) return true;
+  const categories = [];
+  if (kinds.includes('autoAnswer')) categories.push(...FIREFOX_DATA.autoAnswer);
+  if (kinds.includes('email')) categories.push(...FIREFOX_DATA.email);
+  const uniq = [...new Set(categories)];
+  try {
+    const ok = await requestDataConsent(uniq);
+    if (!ok) return false;
+    // host 权限（题目页/图源/OpenCode）可被用户在 about:addons 里撤销；一并补请，
+    // 失败不阻断数据同意——具体功能会各自报「权限不足」。
+    if (kinds.includes('autoAnswer')) await requestHostPermissions();
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+for (const k of ['enabled', 'badge', 'countdown', 'mergeSimilar', 'openInNewTab', 'progress']) $(k).addEventListener('change', save);
 $('separators').addEventListener('input', save);
 $('rules').addEventListener('input', () => { save(); renderRulesSummary(); });
 $('reminderServer').addEventListener('input', () => { save(); renderRemindersSummary(); });
 $('reminderEmail').addEventListener('input', () => { save(); renderRemindersSummary(); });
+
+// 邮件开关默认开：用户可能直接把地址/邮箱填齐而不碰开关。blur（change）时若通道
+// 已经生效但还没同意，就补一次数据收集请求；拒绝也不清空输入，后台会拒绝外发并报错。
+async function ensureEmailConsentIfActive() {
+  const active = $('reminderEmailEnabled').checked
+    && $('reminderServer').value.trim() && $('reminderEmail').value.trim();
+  if (!active) return;
+  if (!(await ensureFirefoxConsent(['email']))) {
+    showReminderStatus('未授予数据收集权限，邮件提醒不会发送', 'err');
+  }
+}
+$('reminderServer').addEventListener('change', ensureEmailConsentIfActive);
+$('reminderEmail').addEventListener('change', ensureEmailConsentIfActive);
 $('reminderBrowser').addEventListener('change', () => { save(); applyReminderSwitches(); renderRemindersSummary(); });
-$('reminderEmailEnabled').addEventListener('change', () => { save(); applyReminderSwitches(); renderRemindersSummary(); });
 $('reminderSkipDone').addEventListener('change', save);
+
+$('autoAnswer').addEventListener('change', async () => {
+  if ($('autoAnswer').checked && !(await ensureFirefoxConsent(['autoAnswer']))) {
+    $('autoAnswer').checked = false;
+    alert('未授予数据收集权限，自动答题面板保持关闭。\n可在 Firefox 的「扩展管理 → 更好的题目集 → 权限和数据」里重新开启。');
+    return;
+  }
+  save();
+});
+
+$('reminderEmailEnabled').addEventListener('change', async () => {
+  if ($('reminderEmailEnabled').checked && !(await ensureFirefoxConsent(['email']))) {
+    $('reminderEmailEnabled').checked = false;
+    applyReminderSwitches();
+    renderRemindersSummary();
+    showReminderStatus('未授予数据收集权限，邮件提醒保持关闭', 'err');
+    return;
+  }
+  save();
+  applyReminderSwitches();
+  renderRemindersSummary();
+});
 
 $('testReminder').addEventListener('click', async () => {
   if (testBusy || $('testReminder').disabled) return;
@@ -268,13 +329,16 @@ $('testReminder').addEventListener('click', async () => {
     const email = $('reminderEmail').value.trim();
     if (!server) return showReminderStatus('请先填写服务器地址', 'err');
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return showReminderStatus('邮箱格式不正确', 'err');
+    if (!(await ensureFirefoxConsent(['email']))) {
+      return showReminderStatus('未授予数据收集权限，不能发送测试邮件', 'err');
+    }
     const sentAt = await readTestSentAt();
     const waitLeft = Math.ceil((sentAt + TEST_COOLDOWN_MS - Date.now()) / 1000);
     if (waitLeft > 0) return showReminderStatus(`请 ${waitLeft} 秒后再试`, 'err');
     save(); // 先落盘，再让 background 发起测试
     showReminderStatus('发送中…');
     try {
-      await chrome.storage.session.set({ testSentAt: Date.now() }); // 冷却起点：请求发出即计时，SMTP 失败也要等
+      await ext().storage.session.set({ testSentAt: Date.now() }); // 冷却起点：请求发出即计时，SMTP 失败也要等
     } catch (_) { /* 无 session 存储，仅靠后端冷却 */ }
     startTestCooldown(TEST_COOLDOWN_MS / 1000);
     const res = await sendToBackground({ type: 'BPS_TEST', server, email });
@@ -340,9 +404,21 @@ $('importFile').addEventListener('change', async e => {
     const parsed = JSON.parse(await file.text());
     // 信封/裸对象两种形态 → 旧版字段走迁移 → 只收认识且同型的字段
     const next = sanitizeSettings(migrate(unwrapExport(parsed)));
+    // Firefox：导入的配置若打开了会外发数据的功能，仍在这次用户手势里补一次同意。
+    const kinds = [];
+    if (next.autoAnswer) kinds.push('autoAnswer');
+    if (next.reminderEmailEnabled && next.reminderServer && next.reminderEmail) kinds.push('email');
+    let consentDenied = false;
+    if (kinds.length && !(await ensureFirefoxConsent(kinds))) {
+      next.autoAnswer = false;
+      next.reminderEmailEnabled = false;
+      consentDenied = true;
+    }
     await saveSettings(next);
     await load(); // 重渲染弹窗为新配置
-    showBackup('已导入并生效', 'ok');
+    showBackup(consentDenied
+      ? '已导入；未授予数据收集权限，自动答题/邮件提醒已关闭'
+      : '已导入并生效', consentDenied ? 'err' : 'ok');
   } catch (err) {
     showBackup('导入失败：' + (err?.message || '文件不是有效的配置'), 'err');
   }
@@ -351,7 +427,7 @@ $('importFile').addEventListener('change', async e => {
 /* ---------- 检查更新（GitHub Releases） ---------- */
 /* GitHub API 带 Access-Control-Allow-Origin: *，弹窗直连即可，不需要 host_permissions
  * （加了反而会让已安装的扩展因权限变更在更新时被禁用等用户重新批准）。
- * 结果存 chrome.storage.local：打开弹窗先渲染缓存结论，超过 6h 再静默复查一次——
+ * 结果存 storage.local：打开弹窗先渲染缓存结论，超过 6h 再静默复查一次——
  * 静默检查失败不打扰（保持缓存或初始态），点行才算显式检查、失败当场报。 */
 const UPDATE = {
   API: 'https://api.github.com/repos/halfaradish/better-pta-problems/releases/latest',
@@ -361,7 +437,7 @@ const UPDATE = {
   TIMEOUT: 10000,
 };
 const CURRENT_VERSION = (() => {
-  try { return chrome.runtime.getManifest().version; } catch (_) {
+  try { return ext().runtime.getManifest().version; } catch (_) {
     return ($('version').textContent || '').replace(/^v/, '') || '0.0.0';
   }
 })();
@@ -437,7 +513,7 @@ function applyUpdateResult(info) {
 
 async function readUpdateCache() {
   try {
-    const cache = (await chrome.storage.local.get(UPDATE.KEY))[UPDATE.KEY];
+    const cache = (await ext().storage.local.get(UPDATE.KEY))[UPDATE.KEY];
     return cache && cache.current === CURRENT_VERSION ? cache : null; // 版本变了（刚升级过）：旧结论作废
   } catch (_) {
     return null;
@@ -446,7 +522,7 @@ async function readUpdateCache() {
 
 async function writeUpdateCache() {
   try {
-    await chrome.storage.local.set({
+    await ext().storage.local.set({
       [UPDATE.KEY]: { checkedAt: updateCheckedAt, latest: updateLatest, current: CURRENT_VERSION },
     });
   } catch (_) { /* 无扩展环境：仅本次会话内有效 */ }
@@ -484,6 +560,13 @@ async function silentCheck() {
 
 // 打开弹窗：缓存没过期直接渲染；过期（或从未查过）就静默复查一轮
 async function initUpdateCheck() {
+  // Firefox 商店（AMO）负责分发与更新；不展示 GitHub Releases 入口，避免被理解为
+  // 引导用户绕过商店更新。curl 直连 GitHub 的能力仍保留给其他渠道。
+  if (isFirefox()) {
+    const row = $('checkUpdate');
+    if (row) row.hidden = true;
+    return;
+  }
   const cache = await readUpdateCache();
   if (cache) {
     updateLatest = cache.latest || null;
@@ -497,12 +580,15 @@ $('checkUpdate').addEventListener('click', () => {
   if (updateChecking) return;
   if (updateLatest && compareVersions(updateLatest.version, CURRENT_VERSION) > 0) {
     const url = updateLatest.url || UPDATE.RELEASES;
-    try { chrome.tabs.create({ url }); } catch (_) { window.open(url, '_blank', 'noreferrer'); }
+    try {
+      const p = ext().tabs.create({ url });
+      p?.catch?.(() => window.open(url, '_blank', 'noreferrer'));
+    } catch (_) { window.open(url, '_blank', 'noreferrer'); }
     return;
   }
   manualCheck();
 });
 
-try { $('version').textContent = 'v' + chrome.runtime.getManifest().version; } catch (_) { /* 非扩展环境保留静态文案 */ }
+try { $('version').textContent = 'v' + ext().runtime.getManifest().version; } catch (_) { /* 非扩展环境保留静态文案 */ }
 load();
 initUpdateCheck();

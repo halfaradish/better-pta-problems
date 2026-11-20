@@ -2,8 +2,9 @@
  *
  * 弹窗只保留总开关（settings.autoAnswer）；题目列表页（/exam/problems…）挂出悬浮球，
  * 点开为答题面板。面板是单页「行式控制台」：左列 56px 短标签 + 右列 PTA 表单控件，
- * 版面上只摆开箱即用的东西——服务、API Key、已答处理、含图题开关、开始按钮；
- * 语言/并发这类低频调参收进「高级设置」抽屉（<details>，收起态右侧小字常显当前值）。
+ * 版面按「模型配置 / 答题配置」两组分界摆开（两类配置不混排，第二组头顶有 hairline）——
+ * 模型组：服务 + API Key（自定义服务另出「端点/模型」行）；答题组：已答处理 + 含图题 +
+ * 高级设置抽屉（语言/并发这类低频调参收进 <details>，收起态右侧小字常显当前值）。
  * 面板不写说明文字：字段解释放代码注释与 title 悬停提示，运行细节由引擎日志现报
  * （旧版两页签 + 四条灰字 hint + 三段页脚「说明书」已在 v0.12.4 删净）。
  * 面板用 Shadow DOM 隔离——不吸 PTA 页面的样式，也不把自己的类名泄进页面；
@@ -15,6 +16,7 @@
  * 配置控件整体禁用（handleRun 开跑即快照全部配置，中途可改是假象，禁用才诚实）。
  */
 import { clampConcurrency } from '../shared/coding-batch.js';
+import { ext } from '../shared/ext.js';
 import { loadSettings, REDO_MODES, saveSettings } from '../shared/settings.js';
 import {
   abortRun, clearPersistedLog, COMPILER_LABELS, EXAM_PROBLEMS_RE, fetchAllowedCompilers,
@@ -155,6 +157,12 @@ const CSS = `
 .page > * { flex: none; }
 
 .rows { display: flex; flex-direction: column; gap: 10px; }
+/* 组标签：字号与弹窗 .block-head 同档（13/16、次级文字），字重要求加粗（用户指定，
+   弹窗的 .block-head 是 500，面板有意加重以撑起分组边界）。
+   模型配置与答题配置不是同一类东西，分组分界不混排；分界线只挂第二组（第一组头顶是面板头）。
+   分界线取 --bg-normal 而不是 --hairline：后者 6% 黑在面板里几乎不可见，压不住「分界」这层语义 */
+.group-label { font-size: 13px; line-height: 16px; font-weight: 700; color: var(--text-2); }
+.group-label.divided { padding-top: 8px; border-top: 1px solid var(--bg-normal); }
 .row { display: flex; align-items: center; gap: 10px; }
 .row > .rl { flex: none; width: 56px; font-size: 13px; line-height: 16px; color: var(--text-2); }
 .row > .rc { flex: 1; min-width: 0; }
@@ -346,12 +354,20 @@ function applyBallPos() {
 // 位置是设备/窗口属性，不随 settings 走 sync；非扩展环境（预览页）无记忆即默认位
 function loadBallPos() {
   try {
-    return chrome.storage.local.get({ [POS_KEY]: null }).then(v => v?.[POS_KEY] || null);
+    const api = ext();
+    if (!api?.storage?.local) return Promise.resolve(null);
+    return api.storage.local.get({ [POS_KEY]: null })
+      .then(v => v?.[POS_KEY] || null)
+      .catch(() => null);
   } catch (_) { return Promise.resolve(null); }
 }
 
 function saveBallPos() {
-  try { chrome.storage.local.set({ [POS_KEY]: ballPos }); } catch (_) { /* 记不住就只在本页生效 */ }
+  try {
+    const api = ext();
+    const p = api?.storage?.local?.set({ [POS_KEY]: ballPos });
+    p?.catch?.(() => { /* 记不住就只在本页生效 */ });
+  } catch (_) { /* 记不住就只在本页生效 */ }
 }
 
 function el(tag, cls, parent) {
@@ -522,11 +538,13 @@ function mount() {
 
   const page = el('div', 'page', panel);
 
-  // —— 行式配置区：开箱即用的字段 ——
-  const rows = el('div', 'rows', page);
+  // —— 行式配置区：模型配置（服务/Key/端点/模型）与答题配置（已答处理/含图题/调参）
+  //    是两类东西，分组分界，不混排 ——
+  el('div', 'group-label', page).textContent = '模型配置';
+  const rowsModel = el('div', 'rows', page);
 
   // 服务：PRESETS 的一项；服务解释放 select 的 title 悬停（applyPreset 按所选填）
-  const rowSvc = el('div', 'row', rows);
+  const rowSvc = el('div', 'row', rowsModel);
   const svcLabel = el('label', 'rl', rowSvc);
   svcLabel.textContent = '服务';
   svcLabel.htmlFor = 'aa-model';
@@ -541,7 +559,7 @@ function mount() {
   }
 
   // API Key：type=text + text-security 遮罩（真密码框会触发密码管理器「要更新密码吗？」）
-  const rowKey = el('div', 'row', rows);
+  const rowKey = el('div', 'row', rowsModel);
   const keyLabel = el('label', 'rl', rowKey);
   keyLabel.textContent = 'API Key';
   keyLabel.htmlFor = 'aa-key';
@@ -560,7 +578,7 @@ function mount() {
   peek.setAttribute('aria-label', '显示或隐藏 API Key');
 
   // 「自定义」服务多一行「端点」（任意 OpenAI 兼容根地址），预设服务隐藏（applyPreset 翻）
-  const rowBase = el('div', 'row', rows);
+  const rowBase = el('div', 'row', rowsModel);
   rowBase.id = 'row-base';
   rowBase.hidden = true;
   const baseLabel = el('label', 'rl', rowBase);
@@ -576,7 +594,7 @@ function mount() {
   burl.title = 'OpenAI 兼容根地址，填到 /v1 即可（误粘 /chat/completions 会自动剥掉）';
 
   // 可自填模型的网关 / 自定义服务（editableModel）多一行「模型」，DeepSeek 这类固定适配隐藏
-  const rowMname = el('div', 'row', rows);
+  const rowMname = el('div', 'row', rowsModel);
   rowMname.id = 'row-model';
   rowMname.hidden = true;
   const mNameLabel = el('label', 'rl', rowMname);
@@ -589,8 +607,11 @@ function mount() {
   mname.autocomplete = 'off';
   mname.spellcheck = false;
 
+  el('div', 'group-label divided', page).textContent = '答题配置';
+  const rowsAnswer = el('div', 'rows', page);
+
   // 已答处理：三态（v0.12.2）。判分口径细节放 title 与引擎日志，不占版面
-  const rowRedo = el('div', 'row', rows);
+  const rowRedo = el('div', 'row', rowsAnswer);
   const redoLabel = el('label', 'rl', rowRedo);
   redoLabel.textContent = '已答处理';
   redoLabel.htmlFor = 'aa-redo';
@@ -610,7 +631,7 @@ function mount() {
 
   // 含图题：默认开（默认服务 DeepSeek 的 deepseek-flash 是视觉模型，默认组合开箱即用；
   // 非视觉模型会逐题报错，此时关掉开关或换模型）。要求写在 title 悬停里。
-  const swImg = el('label', 'switchrow', rows);
+  const swImg = el('label', 'switchrow', rowsAnswer);
   swImg.htmlFor = 'aa-images';
   swImg.title = '开启后题干图片随题面交给模型作答，需要能看图的模型（DeepSeek 官方默认模型支持）；看不了图的模型会逐题报错';
   const imgLabel = el('span', 'rl', swImg);
@@ -620,7 +641,7 @@ function mount() {
   imgs.type = 'checkbox';
 
   // —— 高级设置抽屉：低频调参默认收起，右侧小字常显当前值（renderAdvCur） ——
-  const adv = el('details', 'adv', rows);
+  const adv = el('details', 'adv', rowsAnswer);
   const advSummary = el('summary', '', adv);
   advSummary.innerHTML = '<svg class="chev" width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 1.5 7.5 5 3 8.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
   el('span', '', advSummary).textContent = '高级设置';

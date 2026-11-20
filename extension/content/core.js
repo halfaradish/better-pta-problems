@@ -1,5 +1,59 @@
 /* 更好的题目集 · PTA 题目集列表增强（构建产物，请勿直接编辑；源码见 src/content/） */
 (() => {
+  // src/shared/ext.js
+  function ext() {
+    const g = globalThis;
+    if (typeof g.browser !== "undefined" && g.browser) return g.browser;
+    if (typeof g.chrome !== "undefined" && g.chrome) return g.chrome;
+    return null;
+  }
+  function isFirefox() {
+    try {
+      const api = ext();
+      if (!api) return false;
+      if (typeof api.runtime?.getBrowserInfo === "function") return true;
+      return !!api.runtime?.getManifest?.()?.browser_specific_settings?.gecko;
+    } catch (_) {
+      return false;
+    }
+  }
+  function sendMessage(msg) {
+    const api = ext();
+    if (!api?.runtime?.sendMessage) return Promise.resolve(void 0);
+    try {
+      const ret = api.runtime.sendMessage(msg);
+      return ret && typeof ret.then === "function" ? ret : Promise.resolve(ret);
+    } catch (err) {
+      return Promise.reject(err);
+    }
+  }
+  var FIREFOX_DATA = {
+    autoAnswer: ["websiteContent", "authenticationInfo"],
+    // 邮件 payload 同时包含邮箱（PII）与题目集标题/截止时间（网站内容），两类都要同意。
+    email: ["personallyIdentifyingInfo", "websiteContent"]
+  };
+  async function hasDataConsent(categories) {
+    if (!isFirefox() || !categories?.length) return true;
+    const api = ext();
+    if (typeof api?.permissions?.contains !== "function") return true;
+    try {
+      return !!await api.permissions.contains({ data_collection: categories });
+    } catch (_) {
+      return true;
+    }
+  }
+  async function hasDataConsentViaBackground(categories) {
+    if (!isFirefox() || !categories?.length) return true;
+    const api = ext();
+    if (typeof api?.permissions?.contains === "function") return hasDataConsent(categories);
+    try {
+      const rsp = await sendMessage({ type: "BPS_DATA_CONSENT", categories });
+      return rsp?.granted !== false;
+    } catch (_) {
+      return false;
+    }
+  }
+
   // src/shared/settings.js
   var REDO_MODES = ["skip", "wrong", "all"];
   var DEFAULTS = {
@@ -54,7 +108,7 @@
     // 0 = 旧版设置；v4 起「列表/分组」不再持久化（改为按路由的会话内状态）
   };
   var SETTINGS_VERSION = 9;
-  var HAS_CHROME_STORAGE = typeof chrome !== "undefined" && !!chrome.storage?.sync;
+  var HAS_CHROME_STORAGE = !!ext()?.storage?.sync;
   function needsMigration(raw) {
     return (raw?.settingsVersion || 0) < SETTINGS_VERSION;
   }
@@ -80,7 +134,7 @@
     async get() {
       try {
         if (HAS_CHROME_STORAGE) {
-          const { settings: settings3 } = await chrome.storage.sync.get({ settings: {} });
+          const { settings: settings3 } = await ext().storage.sync.get({ settings: {} });
           return { ...DEFAULTS, ...settings3 };
         }
       } catch (_) {
@@ -90,7 +144,7 @@
     async set(next) {
       try {
         if (HAS_CHROME_STORAGE) {
-          await chrome.storage.sync.set({ settings: next });
+          await ext().storage.sync.set({ settings: next });
           return;
         }
       } catch (_) {
@@ -108,8 +162,9 @@
     return storage.set(next);
   }
   function onSettingsChanged(cb) {
-    if (typeof chrome === "undefined" || !chrome.storage?.onChanged) return;
-    chrome.storage.onChanged.addListener((changes, area) => {
+    const api = ext();
+    if (!api?.storage?.onChanged) return;
+    api.storage.onChanged.addListener((changes, area) => {
       if (area === "sync" && changes.settings) cb({ ...DEFAULTS, ...changes.settings.newValue });
     });
   }
@@ -1105,7 +1160,7 @@
     err.status = 400;
     throw err;
   }
-  var hasBgFetch = typeof chrome !== "undefined" && !!chrome.runtime?.connect && !!chrome.runtime?.sendMessage;
+  var hasBgFetch = !!ext()?.runtime?.connect && !!ext()?.runtime?.sendMessage;
   function backgroundChat(msg, { timeoutMs = LLM_TOTAL_TIMEOUT_MS, signal, onProgress } = {}) {
     return new Promise((resolve, reject) => {
       let port = null;
@@ -1126,12 +1181,8 @@
         fn(value);
       };
       const onAbort = () => {
-        try {
-          chrome.runtime.sendMessage({ type: "BPS_LLM_ABORT", reqId: msg.reqId }, () => {
-            void chrome.runtime.lastError;
-          });
-        } catch (_) {
-        }
+        sendMessage({ type: "BPS_LLM_ABORT", reqId: msg.reqId }).catch(() => {
+        });
         finish(reject, abortedError());
       };
       const armTimer = () => {
@@ -1144,7 +1195,7 @@
       };
       armTimer();
       try {
-        port = chrome.runtime.connect({ name: "bps-llm" });
+        port = ext().runtime.connect({ name: "bps-llm" });
       } catch (err) {
         finish(reject, isInvalidatedMessage(err?.message) ? invalidatedError() : err);
         return;
@@ -1169,7 +1220,7 @@
       port.onDisconnect.addListener(() => {
         let lastMsg = "";
         try {
-          lastMsg = chrome.runtime.lastError?.message || "";
+          lastMsg = ext()?.runtime?.lastError?.message || "";
         } catch (_) {
           lastMsg = "Extension context invalidated";
         }
@@ -1225,6 +1276,11 @@
     return text;
   }
   async function chatOnce(cfg, messages, opts = {}) {
+    if (!await hasDataConsentViaBackground(FIREFOX_DATA.autoAnswer)) {
+      const err = new Error("Firefox \u9700\u8981\u5148\u5728\u6269\u5C55\u5F39\u7A97\u4E2D\u6388\u4E88\u300C\u9875\u9762\u5185\u5BB9 / \u8BA4\u8BC1\u4FE1\u606F\u300D\u6570\u636E\u6536\u96C6\u6743\u9650\uFF0C\u624D\u80FD\u8C03\u7528\u6A21\u578B");
+      err.kind = "fatal";
+      throw err;
+    }
     assertChatModel(cfg);
     if (cfg.gateway === "opencode") return chatViaBackground(cfg, messages, opts);
     const base = normalizeBaseUrl(cfg.baseUrl);
@@ -1317,15 +1373,16 @@
     if (!hasBgFetch) throw new Error("\u9875\u9762 fetch \u88AB\u62D2\u4E14\u65E0 background \u53EF\u8F6C\u53D6");
     const rsp = await new Promise((resolve, reject) => {
       let settled = false;
-      try {
-        chrome.runtime.sendMessage({ type: "BPS_FETCH_IMAGE", src }, (rsp2) => {
-          if (chrome.runtime.lastError) return reject(new Error(chrome.runtime.lastError.message));
+      sendMessage({ type: "BPS_FETCH_IMAGE", src }).then(
+        (r) => {
           settled = true;
-          resolve(rsp2);
-        });
-      } catch (err) {
-        return reject(err);
-      }
+          resolve(r);
+        },
+        (err) => {
+          settled = true;
+          reject(err);
+        }
+      );
       setTimeout(() => {
         if (!settled) reject(new Error("background \u8F6C\u53D6\u65E0\u54CD\u5E94"));
       }, 15e3);
@@ -2586,6 +2643,12 @@ ${failDetails(s.failed)}`;
 .page > * { flex: none; }
 
 .rows { display: flex; flex-direction: column; gap: 10px; }
+/* \u7EC4\u6807\u7B7E\uFF1A\u5B57\u53F7\u4E0E\u5F39\u7A97 .block-head \u540C\u6863\uFF0813/16\u3001\u6B21\u7EA7\u6587\u5B57\uFF09\uFF0C\u5B57\u91CD\u8981\u6C42\u52A0\u7C97\uFF08\u7528\u6237\u6307\u5B9A\uFF0C
+   \u5F39\u7A97\u7684 .block-head \u662F 500\uFF0C\u9762\u677F\u6709\u610F\u52A0\u91CD\u4EE5\u6491\u8D77\u5206\u7EC4\u8FB9\u754C\uFF09\u3002
+   \u6A21\u578B\u914D\u7F6E\u4E0E\u7B54\u9898\u914D\u7F6E\u4E0D\u662F\u540C\u4E00\u7C7B\u4E1C\u897F\uFF0C\u5206\u7EC4\u5206\u754C\u4E0D\u6DF7\u6392\uFF1B\u5206\u754C\u7EBF\u53EA\u6302\u7B2C\u4E8C\u7EC4\uFF08\u7B2C\u4E00\u7EC4\u5934\u9876\u662F\u9762\u677F\u5934\uFF09\u3002
+   \u5206\u754C\u7EBF\u53D6 --bg-normal \u800C\u4E0D\u662F --hairline\uFF1A\u540E\u8005 6% \u9ED1\u5728\u9762\u677F\u91CC\u51E0\u4E4E\u4E0D\u53EF\u89C1\uFF0C\u538B\u4E0D\u4F4F\u300C\u5206\u754C\u300D\u8FD9\u5C42\u8BED\u4E49 */
+.group-label { font-size: 13px; line-height: 16px; font-weight: 700; color: var(--text-2); }
+.group-label.divided { padding-top: 8px; border-top: 1px solid var(--bg-normal); }
 .row { display: flex; align-items: center; gap: 10px; }
 .row > .rl { flex: none; width: 56px; font-size: 13px; line-height: 16px; color: var(--text-2); }
 .row > .rc { flex: 1; min-width: 0; }
@@ -2766,14 +2829,19 @@ input:disabled, button:disabled { opacity: .6; cursor: not-allowed; } /* PTA \u7
   }
   function loadBallPos() {
     try {
-      return chrome.storage.local.get({ [POS_KEY]: null }).then((v) => v?.[POS_KEY] || null);
+      const api = ext();
+      if (!api?.storage?.local) return Promise.resolve(null);
+      return api.storage.local.get({ [POS_KEY]: null }).then((v) => v?.[POS_KEY] || null).catch(() => null);
     } catch (_) {
       return Promise.resolve(null);
     }
   }
   function saveBallPos() {
     try {
-      chrome.storage.local.set({ [POS_KEY]: ballPos });
+      const api = ext();
+      const p = api?.storage?.local?.set({ [POS_KEY]: ballPos });
+      p?.catch?.(() => {
+      });
     } catch (_) {
     }
   }
@@ -2912,8 +2980,9 @@ input:disabled, button:disabled { opacity: .6; cursor: not-allowed; } /* PTA \u7
     collapse.setAttribute("aria-label", "\u6536\u8D77\u9762\u677F");
     collapse.textContent = "\u2014";
     const page = el("div", "page", panel);
-    const rows = el("div", "rows", page);
-    const rowSvc = el("div", "row", rows);
+    el("div", "group-label", page).textContent = "\u6A21\u578B\u914D\u7F6E";
+    const rowsModel = el("div", "rows", page);
+    const rowSvc = el("div", "row", rowsModel);
     const svcLabel = el("label", "rl", rowSvc);
     svcLabel.textContent = "\u670D\u52A1";
     svcLabel.htmlFor = "aa-model";
@@ -2926,7 +2995,7 @@ input:disabled, button:disabled { opacity: .6; cursor: not-allowed; } /* PTA \u7
       o.textContent = p.label;
       if (p.disabled) o.disabled = true;
     }
-    const rowKey = el("div", "row", rows);
+    const rowKey = el("div", "row", rowsModel);
     const keyLabel = el("label", "rl", rowKey);
     keyLabel.textContent = "API Key";
     keyLabel.htmlFor = "aa-key";
@@ -2943,7 +3012,7 @@ input:disabled, button:disabled { opacity: .6; cursor: not-allowed; } /* PTA \u7
     peek.id = "aa-peek";
     peek.textContent = "\u663E\u793A";
     peek.setAttribute("aria-label", "\u663E\u793A\u6216\u9690\u85CF API Key");
-    const rowBase = el("div", "row", rows);
+    const rowBase = el("div", "row", rowsModel);
     rowBase.id = "row-base";
     rowBase.hidden = true;
     const baseLabel = el("label", "rl", rowBase);
@@ -2957,7 +3026,7 @@ input:disabled, button:disabled { opacity: .6; cursor: not-allowed; } /* PTA \u7
     burl.autocomplete = "off";
     burl.spellcheck = false;
     burl.title = "OpenAI \u517C\u5BB9\u6839\u5730\u5740\uFF0C\u586B\u5230 /v1 \u5373\u53EF\uFF08\u8BEF\u7C98 /chat/completions \u4F1A\u81EA\u52A8\u5265\u6389\uFF09";
-    const rowMname = el("div", "row", rows);
+    const rowMname = el("div", "row", rowsModel);
     rowMname.id = "row-model";
     rowMname.hidden = true;
     const mNameLabel = el("label", "rl", rowMname);
@@ -2969,7 +3038,9 @@ input:disabled, button:disabled { opacity: .6; cursor: not-allowed; } /* PTA \u7
     mname.type = "text";
     mname.autocomplete = "off";
     mname.spellcheck = false;
-    const rowRedo = el("div", "row", rows);
+    el("div", "group-label divided", page).textContent = "\u7B54\u9898\u914D\u7F6E";
+    const rowsAnswer = el("div", "rows", page);
+    const rowRedo = el("div", "row", rowsAnswer);
     const redoLabel = el("label", "rl", rowRedo);
     redoLabel.textContent = "\u5DF2\u7B54\u5904\u7406";
     redoLabel.htmlFor = "aa-redo";
@@ -2986,7 +3057,7 @@ input:disabled, button:disabled { opacity: .6; cursor: not-allowed; } /* PTA \u7
       o.value = value;
       o.textContent = label;
     }
-    const swImg = el("label", "switchrow", rows);
+    const swImg = el("label", "switchrow", rowsAnswer);
     swImg.htmlFor = "aa-images";
     swImg.title = "\u5F00\u542F\u540E\u9898\u5E72\u56FE\u7247\u968F\u9898\u9762\u4EA4\u7ED9\u6A21\u578B\u4F5C\u7B54\uFF0C\u9700\u8981\u80FD\u770B\u56FE\u7684\u6A21\u578B\uFF08DeepSeek \u5B98\u65B9\u9ED8\u8BA4\u6A21\u578B\u652F\u6301\uFF09\uFF1B\u770B\u4E0D\u4E86\u56FE\u7684\u6A21\u578B\u4F1A\u9010\u9898\u62A5\u9519";
     const imgLabel = el("span", "rl", swImg);
@@ -2994,7 +3065,7 @@ input:disabled, button:disabled { opacity: .6; cursor: not-allowed; } /* PTA \u7
     const imgs = el("input", "switch", swImg);
     imgs.id = "aa-images";
     imgs.type = "checkbox";
-    const adv = el("details", "adv", rows);
+    const adv = el("details", "adv", rowsAnswer);
     const advSummary = el("summary", "", adv);
     advSummary.innerHTML = '<svg class="chev" width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 1.5 7.5 5 3 8.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
     el("span", "", advSummary).textContent = "\u9AD8\u7EA7\u8BBE\u7F6E";
@@ -3779,14 +3850,14 @@ input:disabled, button:disabled { opacity: .6; cursor: not-allowed; } /* PTA \u7
     }
   }
   function pushReminders(cfg, items, force = false) {
-    if (typeof chrome === "undefined" || !chrome.runtime?.sendMessage) return;
+    if (!ext()?.runtime?.sendMessage) return;
     if (!anyChannel(cfg)) return;
     const now = Date.now();
     const sets = buildSyncSets(items, cfg);
     const sig = JSON.stringify([cfg.browser, cfg.email, sets]);
     if (!force && sig === lastPush.sig && now - lastPush.at < PUSH_MIN_INTERVAL) return;
     lastPush = { sig, at: now };
-    chrome.runtime.sendMessage({
+    sendMessage({
       type: "BPS_SYNC",
       browser: cfg.browser,
       // 邮件通道关闭时不上报服务器/邮箱（内容脚本是外发数据的唯一出口，这里做减法）

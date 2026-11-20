@@ -3,6 +3,8 @@
  * 拆分前 DEFAULTS 与版本迁移在 core.js 和 popup.js 各写一份，加一个开关要改两处，
  * 漏一处就是静默漂移——现在只有这里一份。
  */
+import { ext } from './ext.js';
+
 // 已答题处理策略：skip=跳过已答（默认）；wrong=仅重做判分未通过的编码题；all=全部重做（覆盖）
 export const REDO_MODES = ['skip', 'wrong', 'all'];
 
@@ -37,8 +39,9 @@ export const DEFAULTS = {
 
 export const SETTINGS_VERSION = 9;
 
-// 扩展环境用 chrome.storage.sync（跨设备同步）；预览页 / 独立打开的弹窗退化为内存
-export const HAS_CHROME_STORAGE = typeof chrome !== 'undefined' && !!chrome.storage?.sync;
+// 扩展环境用 storage.sync（跨设备同步）；预览页 / 独立打开的弹窗退化为内存。
+// 这是唯一的模块级快照：扩展宿主在脚本执行前就已注入 API，不存在晚到的情况。
+export const HAS_CHROME_STORAGE = !!ext()?.storage?.sync;
 
 export function needsMigration(raw) {
   return (raw?.settingsVersion || 0) < SETTINGS_VERSION;
@@ -82,7 +85,7 @@ export const storage = {
   async get() {
     try {
       if (HAS_CHROME_STORAGE) {
-        const { settings } = await chrome.storage.sync.get({ settings: {} });
+        const { settings } = await ext().storage.sync.get({ settings: {} });
         return { ...DEFAULTS, ...settings };
       }
     } catch (_) { /* fall through */ }
@@ -91,7 +94,7 @@ export const storage = {
   async set(next) {
     try {
       if (HAS_CHROME_STORAGE) {
-        await chrome.storage.sync.set({ settings: next });
+        await ext().storage.sync.set({ settings: next });
         return;
       }
     } catch (_) { /* fall through */ }
@@ -113,8 +116,9 @@ export function saveSettings(next) {
 }
 
 export function onSettingsChanged(cb) {
-  if (typeof chrome === 'undefined' || !chrome.storage?.onChanged) return;
-  chrome.storage.onChanged.addListener((changes, area) => {
+  const api = ext();
+  if (!api?.storage?.onChanged) return;
+  api.storage.onChanged.addListener((changes, area) => {
     if (area === 'sync' && changes.settings) cb({ ...DEFAULTS, ...changes.settings.newValue });
   });
 }

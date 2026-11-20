@@ -24,6 +24,7 @@
  * 不放行页面 fetch（实测 CORS 拒绝），host_permissions 已针对该域，由
  * service worker 带登录态取图转 data URL 交回内容脚本（自动答题含图链路）。
  */
+import { FIREFOX_DATA, ext, hasDataConsent, isFirefox } from '../shared/ext.js';
 import { loadSettings } from '../shared/settings.js';
 import {
   LLM_HEADERS_TIMEOUT_MS, LLM_IDLE_TIMEOUT_MS, LLM_KEEPALIVE_MS, LLM_PROGRESS_EVERY_MS, LLM_TOTAL_TIMEOUT_MS,
@@ -36,6 +37,8 @@ import {
 
 const ALARM_NAME = 'bps-reminder-scan';
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+// 内容脚本可能没有 permissions API，由后台代查时只接受声明过的类别。
+const DATA_CATEGORIES = new Set([...FIREFOX_DATA.autoAnswer, ...FIREFOX_DATA.email]);
 
 /* ---------- 通用小工具 ---------- */
 
@@ -87,6 +90,10 @@ function opencodeChatUrl(baseUrl) {
 // emit 用于把「首块/生成中」进度经端口送回内容脚本；返回结构与旧版一致，
 // 流式成功时把整段文本放在 content 字段（text 字段保留给非流式 JSON 透传）。
 async function relayLlmChat(msg, emit = () => {}) {
+  // Firefox：没有可选数据收集同意就不转发任何页面内容/Key（内容脚本也会先拦一次）。
+  if (!(await hasDataConsent(FIREFOX_DATA.autoAnswer))) {
+    return { ok: false, status: 0, reason: 'Firefox 未授予数据收集权限：请在扩展弹窗中重新开启自动答题', kind: 'fatal' };
+  }
   const url = opencodeChatUrl(msg.baseUrl);
   if (!url) return { ok: false, status: 400, reason: '仅支持转发 OpenCode Go 的 /inference/go/ 端点' };
   const apiKey = String(msg.apiKey || '').trim();
@@ -141,7 +148,16 @@ async function relayLlmChat(msg, emit = () => {}) {
   // worker 会被回收、端口在 ~30s 断开（7-9/7-10 真机故障）。每 20s 调一次轻量扩展 API
   // 顶住 idle 计时器，同时给内容脚本发一条「仍在等待」进度。
   const keepAliveTimer = setInterval(() => {
-    try { chrome.runtime.getPlatformInfo(() => { void chrome.runtime.lastError; }); } catch (_) { /* 扩展卸载中 */ }
+    // 等首块期间调一次轻量扩展 API 顶住 worker 的 idle 计时器。
+    // Chrome 110 / Firefox 140 都返回 Promise；万一宿主是回调式，回退到空回调。
+    const runtime = ext()?.runtime;
+    const fn = runtime?.getPlatformInfo;
+    if (!fn) return;
+    try {
+      const p = fn.call(runtime);
+      if (p?.catch) p.catch(() => { /* 扩展卸载中 */ });
+      else if (p === undefined) fn.call(runtime, () => { /* 回调式宿主 */ });
+    } catch (_) { /* 扩展卸载中 */ }
     if (firstAt) return; // 已经开始出答案，不再刷等待日志
     if (!streamOpen) progress('waiting', 0);
     else if (!firstThinkAt) progress('stream-wait', 0);
@@ -256,7 +272,7 @@ async function toDataUrl(src) {
 
 async function readState() {
   try {
-    const st = await chrome.storage.local.get(STATE_KEY);
+    const st = await ext().storage.local.get(STATE_KEY);
     return normalizeState(st?.[STATE_KEY]);
   } catch (_) {
     return normalizeState(null);
@@ -265,7 +281,7 @@ async function readState() {
 
 async function writeState(state) {
   try {
-    await chrome.storage.local.set({ [STATE_KEY]: state });
+    await ext().storage.local.set({ [STATE_KEY]: state });
   } catch (err) {
     console.warn('[更好的题目集] 提醒快照写入失败:', err?.message || err);
   }
@@ -274,28 +290,34 @@ async function writeState(state) {
 // 闹钟只按「缺则建」：create 会重置下一次触发（见文件头说明）
 async function ensureAlarm() {
   try {
-    const existing = await chrome.alarms.get(ALARM_NAME);
-    if (!existing) chrome.alarms.create(ALARM_NAME, { periodInMinutes: SCAN_PERIOD_MINUTES });
+    const existing = await ext().alarms.get(ALARM_NAME);
+    if (!existing) ext().alarms.create(ALARM_NAME, { periodInMinutes: SCAN_PERIOD_MINUTES });
   } catch (_) {
-    try { chrome.alarms.create(ALARM_NAME, { periodInMinutes: SCAN_PERIOD_MINUTES }); } catch (_) { /* 环境不支持就算了 */ }
+    try { ext().alarms.create(ALARM_NAME, { periodInMinutes: SCAN_PERIOD_MINUTES }); } catch (_) { /* 环境不支持就算了 */ }
   }
 }
 
 async function notifyPermission() {
-  try { return await chrome.notifications.getPermissionLevel(); } catch (_) { return 'granted'; }
+  try {
+    // Firefox 没有 getPermissionLevel：可选调用返回 undefined，按正常态处理。
+    return await ext()?.notifications?.getPermissionLevel?.() || 'granted';
+  } catch (_) { return 'granted'; }
 }
 
 async function showNotification({ id, title, message, buttonTitle }) {
   const options = {
     type: 'basic',
-    iconUrl: chrome.runtime.getURL('icons/icon128.png'),
+    iconUrl: ext().runtime.getURL('icons/icon128.png'),
     title,
     message,
-    contextMessage: '更好的题目集',
   };
-  if (buttonTitle) options.buttons = [{ title: buttonTitle }];
+  // Firefox 的通知只支持 type/title/message/iconUrl；buttons/contextMessage 显式不给。
+  if (!isFirefox()) {
+    options.contextMessage = '更好的题目集';
+    if (buttonTitle) options.buttons = [{ title: buttonTitle }];
+  }
   try {
-    await chrome.notifications.create(id, options);
+    await ext().notifications.create(id, options);
     return true;
   } catch (err) {
     console.warn('[更好的题目集] 浏览器通知创建失败:', err?.message || err);
@@ -346,11 +368,11 @@ async function openTarget(id) {
   }
   if (!url) return;
   try {
-    await chrome.tabs.create({ url });
+    await ext().tabs.create({ url });
   } catch (err) {
     console.warn('[更好的题目集] 打开题目集失败:', err?.message || err);
   }
-  try { await chrome.notifications.clear(id); } catch (_) { /* ignore */ }
+  try { await ext().notifications.clear(id); } catch (_) { /* ignore */ }
 }
 
 /* ---------- 消息处理 ---------- */
@@ -362,7 +384,7 @@ async function notifyTest() {
   }
   // 先清掉上一条测试通知：固定 id 直接 create 是「原地更新」，
   // 更新不会重新弹横幅——上一条还躺在通知中心时，用户就会觉得「说已发送但没弹窗」
-  try { await chrome.notifications.clear(TEST_NOTIFY_ID); } catch (_) { /* 没清掉也继续 */ }
+  try { await ext().notifications.clear(TEST_NOTIFY_ID); } catch (_) { /* 没清掉也继续 */ }
   const ok = await showNotification({
     id: TEST_NOTIFY_ID,
     title: '浏览器通知已开启',
@@ -391,6 +413,8 @@ async function syncChannels(msg) {
     out.email = { ok: false, error: '服务器地址无效' };
   } else if (!EMAIL_RE.test(email)) {
     out.email = { ok: false, error: '邮箱格式不正确' };
+  } else if (!(await hasDataConsent(FIREFOX_DATA.email))) {
+    out.email = { ok: false, error: 'Firefox 未授予数据收集权限：请在扩展弹窗中重新开启邮件提醒' };
   } else {
     try {
       const data = await post(server.base, server.token, '/api/subscriptions', { email, sets: msg.sets });
@@ -412,6 +436,9 @@ async function testMail(msg) {
   if (!base) return { ok: false, error: '服务器地址无效' };
   const email = String(msg.email || '').trim();
   if (!EMAIL_RE.test(email)) return { ok: false, error: '邮箱格式不正确' };
+  if (!(await hasDataConsent(FIREFOX_DATA.email))) {
+    return { ok: false, error: 'Firefox 未授予数据收集权限：请先在扩展弹窗中开启邮件提醒并同意' };
+  }
   await post(base.base, base.token, '/api/test', { email });
   return { ok: true };
 }
@@ -420,7 +447,7 @@ async function testMail(msg) {
  * 单条 sendMessage 等 2 分钟的模式在 worker 被回收时只会留下 message channel closed，
  * 端口模式能显式收到断开并让内容脚本按「可重试」处理；页面关闭/用户中止时后台
  * 通过 onDisconnect 连带取消在途生成，避免服务端空转。 */
-chrome.runtime.onConnect.addListener(port => {
+ext().runtime.onConnect.addListener(port => {
   if (!port || port.name !== 'bps-llm') return;
   const jobs = new Set();
   const post = obj => { try { port.postMessage(obj); } catch (_) { /* 端口已断 */ } };
@@ -444,12 +471,21 @@ chrome.runtime.onConnect.addListener(port => {
   });
 });
 
-chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+ext().runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg && msg.type === 'BPS_LLM_ABORT') {
     const entry = llmControllers.get(String(msg.reqId || ''));
     if (entry) entry.abort();
     sendResponse({ ok: !!entry });
     return false;
+  }
+  if (msg && msg.type === 'BPS_DATA_CONSENT') {
+    // 内容脚本代查 Firefox 可选数据收集同意（内容脚本上下文通常没有 permissions API）。
+    const categories = Array.isArray(msg.categories) ? msg.categories.filter(c => DATA_CATEGORIES.has(c)) : [];
+    hasDataConsent(categories).then(
+      granted => sendResponse({ granted }),
+      () => sendResponse({ granted: false }),
+    );
+    return true; // 异步 sendResponse
   }
   if (msg && msg.type === 'BPS_FETCH_IMAGE') {
     if (typeof msg.src !== 'string' || !/^https?:\/\//i.test(msg.src)) {
@@ -476,9 +512,10 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 void ensureAlarm();
 
 // 安装/更新、浏览器启动：补闹钟 + 立刻扫一轮（关机期间错过的档位在这里补齐）
-chrome.runtime.onInstalled.addListener(() => { void (async () => { await ensureAlarm(); await scanAndNotify('安装/更新'); })(); });
-chrome.runtime.onStartup.addListener(() => { void (async () => { await ensureAlarm(); await scanAndNotify('浏览器启动'); })(); });
-chrome.alarms.onAlarm.addListener(a => { if (a.name === ALARM_NAME) void scanAndNotify('定期扫描'); });
+ext().runtime.onInstalled.addListener(() => { void (async () => { await ensureAlarm(); await scanAndNotify('安装/更新'); })(); });
+ext().runtime.onStartup.addListener(() => { void (async () => { await ensureAlarm(); await scanAndNotify('浏览器启动'); })(); });
+ext().alarms.onAlarm.addListener(a => { if (a.name === ALARM_NAME) void scanAndNotify('定期扫描'); });
 
-chrome.notifications.onClicked.addListener(id => { void openTarget(id); });
-chrome.notifications.onButtonClicked.addListener(id => { void openTarget(id); });
+ext().notifications.onClicked.addListener(id => { void openTarget(id); });
+// Firefox 不支持通知按钮，也没有 onButtonClicked；有则挂，没有就算了（点击正文仍可打开）。
+ext().notifications.onButtonClicked?.addListener(id => { void openTarget(id); });

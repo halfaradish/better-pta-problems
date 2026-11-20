@@ -1,4 +1,5 @@
-# 每次推送 / PR：跑单元测试，校验 extension/ 的构建产物与 src/ 源码一致，并给发行包打包做一次冒烟。
+# 每次推送 / PR：跑单元测试、构建三份目标、校验三份 manifest、Firefox web-ext lint，
+# 并给 GitHub 发行包与三个商店包做打包冒烟。
 name: Check
 
 on: [push, pull_request]
@@ -21,13 +22,24 @@ jobs:
       - name: 单元测试
         run: npm test
 
+      - name: 多目标构建（Chrome / Edge / Firefox）
+        run: npm run build -- --target all
+
       - name: 构建产物与源码一致（漂移守卫）
         run: |
-          npm run build
           if ! git diff --exit-code -- extension; then
             echo "::error::extension/ 下的构建产物与 src/ 源码不一致；请在本地执行 npm run build 后把产物一并提交"
             exit 1
           fi
 
-      - name: 发行包冒烟（组装 extension/ + 安装教程并打包，回读自检，不发布）
+      - name: 三份 manifest 校验（公共字段 / Chromium 后台 / Firefox gecko 与数据声明）
+        run: npm run validate:manifests
+
+      - name: Firefox web-ext lint（AMO 上传前置检查）
+        run: npm run lint:firefox
+
+      - name: 发行包冒烟（GitHub Releases 用的 extension/ + 安装教程）
         run: npm run package
+
+      - name: 商店包冒烟（三份 zip 根目录 manifest.json，回读自检）
+        run: npm run package:store -- --target all

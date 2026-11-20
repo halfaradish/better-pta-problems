@@ -1,5 +1,38 @@
-/* 更好的题目集 · 后台消息转发（构建产物，请勿直接编辑；源码见 src/background/） */
+/* 更好的题目集 · 后台（Chrome service worker / Firefox 事件页；构建产物，源码见 src/background/） */
 (() => {
+  // src/shared/ext.js
+  function ext() {
+    const g = globalThis;
+    if (typeof g.browser !== "undefined" && g.browser) return g.browser;
+    if (typeof g.chrome !== "undefined" && g.chrome) return g.chrome;
+    return null;
+  }
+  function isFirefox() {
+    try {
+      const api = ext();
+      if (!api) return false;
+      if (typeof api.runtime?.getBrowserInfo === "function") return true;
+      return !!api.runtime?.getManifest?.()?.browser_specific_settings?.gecko;
+    } catch (_) {
+      return false;
+    }
+  }
+  var FIREFOX_DATA = {
+    autoAnswer: ["websiteContent", "authenticationInfo"],
+    // 邮件 payload 同时包含邮箱（PII）与题目集标题/截止时间（网站内容），两类都要同意。
+    email: ["personallyIdentifyingInfo", "websiteContent"]
+  };
+  async function hasDataConsent(categories) {
+    if (!isFirefox() || !categories?.length) return true;
+    const api = ext();
+    if (typeof api?.permissions?.contains !== "function") return true;
+    try {
+      return !!await api.permissions.contains({ data_collection: categories });
+    } catch (_) {
+      return true;
+    }
+  }
+
   // src/shared/settings.js
   var DEFAULTS = {
     enabled: true,
@@ -53,7 +86,7 @@
     // 0 = 旧版设置；v4 起「列表/分组」不再持久化（改为按路由的会话内状态）
   };
   var SETTINGS_VERSION = 9;
-  var HAS_CHROME_STORAGE = typeof chrome !== "undefined" && !!chrome.storage?.sync;
+  var HAS_CHROME_STORAGE = !!ext()?.storage?.sync;
   function needsMigration(raw) {
     return (raw?.settingsVersion || 0) < SETTINGS_VERSION;
   }
@@ -79,7 +112,7 @@
     async get() {
       try {
         if (HAS_CHROME_STORAGE) {
-          const { settings } = await chrome.storage.sync.get({ settings: {} });
+          const { settings } = await ext().storage.sync.get({ settings: {} });
           return { ...DEFAULTS, ...settings };
         }
       } catch (_) {
@@ -89,7 +122,7 @@
     async set(next) {
       try {
         if (HAS_CHROME_STORAGE) {
-          await chrome.storage.sync.set({ settings: next });
+          await ext().storage.sync.set({ settings: next });
           return;
         }
       } catch (_) {
@@ -296,6 +329,7 @@
   // src/background/index.js
   var ALARM_NAME = "bps-reminder-scan";
   var EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  var DATA_CATEGORIES = /* @__PURE__ */ new Set([...FIREFOX_DATA.autoAnswer, ...FIREFOX_DATA.email]);
   function normalizeServer(server) {
     const s = String(server || "").trim();
     if (!s) return null;
@@ -332,6 +366,9 @@
   }
   async function relayLlmChat(msg, emit = () => {
   }) {
+    if (!await hasDataConsent(FIREFOX_DATA.autoAnswer)) {
+      return { ok: false, status: 0, reason: "Firefox \u672A\u6388\u4E88\u6570\u636E\u6536\u96C6\u6743\u9650\uFF1A\u8BF7\u5728\u6269\u5C55\u5F39\u7A97\u4E2D\u91CD\u65B0\u5F00\u542F\u81EA\u52A8\u7B54\u9898", kind: "fatal" };
+    }
     const url = opencodeChatUrl(msg.baseUrl);
     if (!url) return { ok: false, status: 400, reason: "\u4EC5\u652F\u6301\u8F6C\u53D1 OpenCode Go \u7684 /inference/go/ \u7AEF\u70B9" };
     const apiKey = String(msg.apiKey || "").trim();
@@ -381,9 +418,14 @@
       }
     };
     const keepAliveTimer = setInterval(() => {
+      const runtime = ext()?.runtime;
+      const fn = runtime?.getPlatformInfo;
+      if (!fn) return;
       try {
-        chrome.runtime.getPlatformInfo(() => {
-          void chrome.runtime.lastError;
+        const p = fn.call(runtime);
+        if (p?.catch) p.catch(() => {
+        });
+        else if (p === void 0) fn.call(runtime, () => {
         });
       } catch (_) {
       }
@@ -490,7 +532,7 @@
   }
   async function readState() {
     try {
-      const st = await chrome.storage.local.get(STATE_KEY);
+      const st = await ext().storage.local.get(STATE_KEY);
       return normalizeState(st?.[STATE_KEY]);
     } catch (_) {
       return normalizeState(null);
@@ -498,25 +540,25 @@
   }
   async function writeState(state) {
     try {
-      await chrome.storage.local.set({ [STATE_KEY]: state });
+      await ext().storage.local.set({ [STATE_KEY]: state });
     } catch (err) {
       console.warn("[\u66F4\u597D\u7684\u9898\u76EE\u96C6] \u63D0\u9192\u5FEB\u7167\u5199\u5165\u5931\u8D25:", err?.message || err);
     }
   }
   async function ensureAlarm() {
     try {
-      const existing = await chrome.alarms.get(ALARM_NAME);
-      if (!existing) chrome.alarms.create(ALARM_NAME, { periodInMinutes: SCAN_PERIOD_MINUTES });
+      const existing = await ext().alarms.get(ALARM_NAME);
+      if (!existing) ext().alarms.create(ALARM_NAME, { periodInMinutes: SCAN_PERIOD_MINUTES });
     } catch (_) {
       try {
-        chrome.alarms.create(ALARM_NAME, { periodInMinutes: SCAN_PERIOD_MINUTES });
+        ext().alarms.create(ALARM_NAME, { periodInMinutes: SCAN_PERIOD_MINUTES });
       } catch (_2) {
       }
     }
   }
   async function notifyPermission() {
     try {
-      return await chrome.notifications.getPermissionLevel();
+      return await ext()?.notifications?.getPermissionLevel?.() || "granted";
     } catch (_) {
       return "granted";
     }
@@ -524,14 +566,16 @@
   async function showNotification({ id, title, message, buttonTitle }) {
     const options = {
       type: "basic",
-      iconUrl: chrome.runtime.getURL("icons/icon128.png"),
+      iconUrl: ext().runtime.getURL("icons/icon128.png"),
       title,
-      message,
-      contextMessage: "\u66F4\u597D\u7684\u9898\u76EE\u96C6"
+      message
     };
-    if (buttonTitle) options.buttons = [{ title: buttonTitle }];
+    if (!isFirefox()) {
+      options.contextMessage = "\u66F4\u597D\u7684\u9898\u76EE\u96C6";
+      if (buttonTitle) options.buttons = [{ title: buttonTitle }];
+    }
     try {
-      await chrome.notifications.create(id, options);
+      await ext().notifications.create(id, options);
       return true;
     } catch (err) {
       console.warn("[\u66F4\u597D\u7684\u9898\u76EE\u96C6] \u6D4F\u89C8\u5668\u901A\u77E5\u521B\u5EFA\u5931\u8D25:", err?.message || err);
@@ -574,12 +618,12 @@
     }
     if (!url) return;
     try {
-      await chrome.tabs.create({ url });
+      await ext().tabs.create({ url });
     } catch (err) {
       console.warn("[\u66F4\u597D\u7684\u9898\u76EE\u96C6] \u6253\u5F00\u9898\u76EE\u96C6\u5931\u8D25:", err?.message || err);
     }
     try {
-      await chrome.notifications.clear(id);
+      await ext().notifications.clear(id);
     } catch (_) {
     }
   }
@@ -588,7 +632,7 @@
       return { ok: false, error: "\u7CFB\u7EDF\u5DF2\u5173\u95ED\u6D4F\u89C8\u5668\u901A\u77E5\uFF08\u7CFB\u7EDF\u8BBE\u7F6E\u6216\u4E13\u6CE8\u52A9\u624B\uFF09\uFF0C\u8BF7\u5148\u5141\u8BB8\u540E\u91CD\u8BD5" };
     }
     try {
-      await chrome.notifications.clear(TEST_NOTIFY_ID);
+      await ext().notifications.clear(TEST_NOTIFY_ID);
     } catch (_) {
     }
     const ok = await showNotification({
@@ -613,6 +657,8 @@
       out.email = { ok: false, error: "\u670D\u52A1\u5668\u5730\u5740\u65E0\u6548" };
     } else if (!EMAIL_RE.test(email)) {
       out.email = { ok: false, error: "\u90AE\u7BB1\u683C\u5F0F\u4E0D\u6B63\u786E" };
+    } else if (!await hasDataConsent(FIREFOX_DATA.email)) {
+      out.email = { ok: false, error: "Firefox \u672A\u6388\u4E88\u6570\u636E\u6536\u96C6\u6743\u9650\uFF1A\u8BF7\u5728\u6269\u5C55\u5F39\u7A97\u4E2D\u91CD\u65B0\u5F00\u542F\u90AE\u4EF6\u63D0\u9192" };
     } else {
       try {
         const data = await post(server.base, server.token, "/api/subscriptions", { email, sets: msg.sets });
@@ -630,10 +676,13 @@
     if (!base) return { ok: false, error: "\u670D\u52A1\u5668\u5730\u5740\u65E0\u6548" };
     const email = String(msg.email || "").trim();
     if (!EMAIL_RE.test(email)) return { ok: false, error: "\u90AE\u7BB1\u683C\u5F0F\u4E0D\u6B63\u786E" };
+    if (!await hasDataConsent(FIREFOX_DATA.email)) {
+      return { ok: false, error: "Firefox \u672A\u6388\u4E88\u6570\u636E\u6536\u96C6\u6743\u9650\uFF1A\u8BF7\u5148\u5728\u6269\u5C55\u5F39\u7A97\u4E2D\u5F00\u542F\u90AE\u4EF6\u63D0\u9192\u5E76\u540C\u610F" };
+    }
     await post(base.base, base.token, "/api/test", { email });
     return { ok: true };
   }
-  chrome.runtime.onConnect.addListener((port) => {
+  ext().runtime.onConnect.addListener((port) => {
     if (!port || port.name !== "bps-llm") return;
     const jobs = /* @__PURE__ */ new Set();
     const post2 = (obj) => {
@@ -662,12 +711,20 @@
       }
     });
   });
-  chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  ext().runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     if (msg && msg.type === "BPS_LLM_ABORT") {
       const entry = llmControllers.get(String(msg.reqId || ""));
       if (entry) entry.abort();
       sendResponse({ ok: !!entry });
       return false;
+    }
+    if (msg && msg.type === "BPS_DATA_CONSENT") {
+      const categories = Array.isArray(msg.categories) ? msg.categories.filter((c) => DATA_CATEGORIES.has(c)) : [];
+      hasDataConsent(categories).then(
+        (granted) => sendResponse({ granted }),
+        () => sendResponse({ granted: false })
+      );
+      return true;
     }
     if (msg && msg.type === "BPS_FETCH_IMAGE") {
       if (typeof msg.src !== "string" || !/^https?:\/\//i.test(msg.src)) {
@@ -686,25 +743,25 @@
     return true;
   });
   void ensureAlarm();
-  chrome.runtime.onInstalled.addListener(() => {
+  ext().runtime.onInstalled.addListener(() => {
     void (async () => {
       await ensureAlarm();
       await scanAndNotify("\u5B89\u88C5/\u66F4\u65B0");
     })();
   });
-  chrome.runtime.onStartup.addListener(() => {
+  ext().runtime.onStartup.addListener(() => {
     void (async () => {
       await ensureAlarm();
       await scanAndNotify("\u6D4F\u89C8\u5668\u542F\u52A8");
     })();
   });
-  chrome.alarms.onAlarm.addListener((a) => {
+  ext().alarms.onAlarm.addListener((a) => {
     if (a.name === ALARM_NAME) void scanAndNotify("\u5B9A\u671F\u626B\u63CF");
   });
-  chrome.notifications.onClicked.addListener((id) => {
+  ext().notifications.onClicked.addListener((id) => {
     void openTarget(id);
   });
-  chrome.notifications.onButtonClicked.addListener((id) => {
+  ext().notifications.onButtonClicked?.addListener((id) => {
     void openTarget(id);
   });
 })();

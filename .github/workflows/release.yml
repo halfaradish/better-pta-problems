@@ -63,6 +63,14 @@ jobs:
           [ "$PKG_VERSION" = "${TAG#v}" ] || { echo "::error::包内版本 $PKG_VERSION 与 tag $TAG 不一致"; exit 1; }
           unzip -l "dist/better-pta-problems-${TAG}.zip"
 
+      - name: 构建三个商店包（zip 根目录 manifest.json）
+        run: |
+          npm run build -- --target all
+          npm run validate:manifests
+          npm run lint:firefox
+          npm run package:store -- --target all
+          ls -l dist/store
+
       - name: 提取 tag 信息作为 Release 说明，并追加安装提示
         run: |
           if [ "$(git cat-file -t "$TAG")" = "tag" ]; then
@@ -80,11 +88,13 @@ jobs:
           ---
 
           **怎么安装**：下载下面的 zip，解压到一个固定位置（以后升级覆盖同一位置即可保留设置），双击解压目录里的 `安装教程.html` 跟着做——在 `chrome://extensions`（Edge 为 `edge://extensions`）打开开发者模式，点「加载已解压的扩展程序」，选择解压目录里的 **`extension` 子文件夹**。
+
+          **商店包**：附件里的 `better-pta-problems-<browser>-v*.zip` 是提交 Chrome Web Store / Edge Add-ons / Firefox AMO 用的包（zip 根目录即 `manifest.json`），不是给普通用户手动安装的。
           EOF
 
       - name: 发布 GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "$TAG" "dist/better-pta-problems-${TAG}.zip" \
+          gh release create "$TAG" "dist/better-pta-problems-${TAG}.zip" dist/store/*.zip \
             --title "$TAG" --notes-file release_notes.md

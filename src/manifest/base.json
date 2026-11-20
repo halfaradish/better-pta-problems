@@ -1,0 +1,25 @@
+{
+  "manifest_version": 3,
+  "name": "更好的题目集（PTA 增强）",
+  "version": "0.12.4",
+  "description": "非官方扩展：在 PTA 题目集列表页按课程分组筛选，显示进度、截止倒计时与提醒；可选 AI 辅助作答（默认关闭，需自备 Key）。",
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "permissions": ["storage", "alarms", "notifications"],
+  "host_permissions": ["https://images.ptausercontent.com/*", "https://opencode.ai/*"],
+  "content_scripts": [
+    {
+      "matches": ["https://pintia.cn/*", "https://www.pintia.cn/*"],
+      "js": ["content/core.js"],
+      "css": ["content/styles.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_title": "更好的题目集",
+    "default_popup": "popup/popup.html"
+  }
+}

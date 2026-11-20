@@ -1,5 +1,63 @@
 /* 更好的题目集 · 设置弹窗（构建产物，请勿直接编辑；源码见 src/popup/） */
 (() => {
+  // src/shared/ext.js
+  function ext() {
+    const g = globalThis;
+    if (typeof g.browser !== "undefined" && g.browser) return g.browser;
+    if (typeof g.chrome !== "undefined" && g.chrome) return g.chrome;
+    return null;
+  }
+  function isFirefox() {
+    try {
+      const api = ext();
+      if (!api) return false;
+      if (typeof api.runtime?.getBrowserInfo === "function") return true;
+      return !!api.runtime?.getManifest?.()?.browser_specific_settings?.gecko;
+    } catch (_) {
+      return false;
+    }
+  }
+  function sendMessage(msg) {
+    const api = ext();
+    if (!api?.runtime?.sendMessage) return Promise.resolve(void 0);
+    try {
+      const ret = api.runtime.sendMessage(msg);
+      return ret && typeof ret.then === "function" ? ret : Promise.resolve(ret);
+    } catch (err) {
+      return Promise.reject(err);
+    }
+  }
+  var FIREFOX_DATA = {
+    autoAnswer: ["websiteContent", "authenticationInfo"],
+    // 邮件 payload 同时包含邮箱（PII）与题目集标题/截止时间（网站内容），两类都要同意。
+    email: ["personallyIdentifyingInfo", "websiteContent"]
+  };
+  var HOST_ORIGINS = [
+    "https://pintia.cn/*",
+    "https://www.pintia.cn/*",
+    "https://images.ptausercontent.com/*",
+    "https://opencode.ai/*"
+  ];
+  async function requestDataConsent(categories) {
+    if (!isFirefox() || !categories?.length) return true;
+    const api = ext();
+    if (typeof api?.permissions?.request !== "function") return true;
+    try {
+      return !!await api.permissions.request({ data_collection: categories });
+    } catch (_) {
+      return false;
+    }
+  }
+  async function requestHostPermissions(origins = HOST_ORIGINS) {
+    const api = ext();
+    if (typeof api?.permissions?.request !== "function") return true;
+    try {
+      return !!await api.permissions.request({ origins });
+    } catch (_) {
+      return false;
+    }
+  }
+
   // src/shared/settings.js
   var REDO_MODES = ["skip", "wrong", "all"];
   var DEFAULTS = {
@@ -54,7 +112,7 @@
     // 0 = 旧版设置；v4 起「列表/分组」不再持久化（改为按路由的会话内状态）
   };
   var SETTINGS_VERSION = 9;
-  var HAS_CHROME_STORAGE = typeof chrome !== "undefined" && !!chrome.storage?.sync;
+  var HAS_CHROME_STORAGE = !!ext()?.storage?.sync;
   function needsMigration(raw) {
     return (raw?.settingsVersion || 0) < SETTINGS_VERSION;
   }
@@ -80,7 +138,7 @@
     async get() {
       try {
         if (HAS_CHROME_STORAGE) {
-          const { settings } = await chrome.storage.sync.get({ settings: {} });
+          const { settings } = await ext().storage.sync.get({ settings: {} });
           return { ...DEFAULTS, ...settings };
         }
       } catch (_) {
@@ -90,7 +148,7 @@
     async set(next) {
       try {
         if (HAS_CHROME_STORAGE) {
-          await chrome.storage.sync.set({ settings: next });
+          await ext().storage.sync.set({ settings: next });
           return;
         }
       } catch (_) {
@@ -304,7 +362,9 @@
   }
   function readTestSentAt() {
     try {
-      return chrome.storage?.session?.get({ testSentAt: 0 }).then((v) => v.testSentAt || 0).catch(() => 0);
+      const api = ext();
+      if (!api?.storage?.session) return Promise.resolve(0);
+      return api.storage.session.get({ testSentAt: 0 }).then((v) => v.testSentAt || 0).catch(() => 0);
     } catch (_) {
       return Promise.resolve(0);
     }
@@ -336,7 +396,7 @@
     const state = $("notifyState");
     notifyDenied = false;
     try {
-      notifyDenied = await chrome.notifications.getPermissionLevel() === "denied";
+      notifyDenied = await ext()?.notifications?.getPermissionLevel?.() === "denied";
     } catch (_) {
     }
     if (notifyDenied) {
@@ -358,7 +418,7 @@
   var showReminderStatus = (text, cls) => setStatus($("reminderStatus"), text, cls);
   function sendToBackground(msg, ms = 12e3) {
     return Promise.race([
-      chrome.runtime.sendMessage(msg),
+      sendMessage(msg),
       new Promise((_, reject) => setTimeout(() => reject(new Error("\u540E\u53F0\u6CA1\u6709\u54CD\u5E94\uFF0C\u8BF7\u91CD\u8BD5")), ms))
     ]);
   }
@@ -380,7 +440,22 @@
       notifyBusy = false;
     }
   });
-  for (const k of ["enabled", "badge", "countdown", "mergeSimilar", "openInNewTab", "progress", "autoAnswer"]) $(k).addEventListener("change", save);
+  async function ensureFirefoxConsent(kinds) {
+    if (!isFirefox()) return true;
+    const categories = [];
+    if (kinds.includes("autoAnswer")) categories.push(...FIREFOX_DATA.autoAnswer);
+    if (kinds.includes("email")) categories.push(...FIREFOX_DATA.email);
+    const uniq = [...new Set(categories)];
+    try {
+      const ok = await requestDataConsent(uniq);
+      if (!ok) return false;
+      if (kinds.includes("autoAnswer")) await requestHostPermissions();
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+  for (const k of ["enabled", "badge", "countdown", "mergeSimilar", "openInNewTab", "progress"]) $(k).addEventListener("change", save);
   $("separators").addEventListener("input", save);
   $("rules").addEventListener("input", () => {
     save();
@@ -394,17 +469,41 @@
     save();
     renderRemindersSummary();
   });
+  async function ensureEmailConsentIfActive() {
+    const active = $("reminderEmailEnabled").checked && $("reminderServer").value.trim() && $("reminderEmail").value.trim();
+    if (!active) return;
+    if (!await ensureFirefoxConsent(["email"])) {
+      showReminderStatus("\u672A\u6388\u4E88\u6570\u636E\u6536\u96C6\u6743\u9650\uFF0C\u90AE\u4EF6\u63D0\u9192\u4E0D\u4F1A\u53D1\u9001", "err");
+    }
+  }
+  $("reminderServer").addEventListener("change", ensureEmailConsentIfActive);
+  $("reminderEmail").addEventListener("change", ensureEmailConsentIfActive);
   $("reminderBrowser").addEventListener("change", () => {
     save();
     applyReminderSwitches();
     renderRemindersSummary();
   });
-  $("reminderEmailEnabled").addEventListener("change", () => {
+  $("reminderSkipDone").addEventListener("change", save);
+  $("autoAnswer").addEventListener("change", async () => {
+    if ($("autoAnswer").checked && !await ensureFirefoxConsent(["autoAnswer"])) {
+      $("autoAnswer").checked = false;
+      alert("\u672A\u6388\u4E88\u6570\u636E\u6536\u96C6\u6743\u9650\uFF0C\u81EA\u52A8\u7B54\u9898\u9762\u677F\u4FDD\u6301\u5173\u95ED\u3002\n\u53EF\u5728 Firefox \u7684\u300C\u6269\u5C55\u7BA1\u7406 \u2192 \u66F4\u597D\u7684\u9898\u76EE\u96C6 \u2192 \u6743\u9650\u548C\u6570\u636E\u300D\u91CC\u91CD\u65B0\u5F00\u542F\u3002");
+      return;
+    }
+    save();
+  });
+  $("reminderEmailEnabled").addEventListener("change", async () => {
+    if ($("reminderEmailEnabled").checked && !await ensureFirefoxConsent(["email"])) {
+      $("reminderEmailEnabled").checked = false;
+      applyReminderSwitches();
+      renderRemindersSummary();
+      showReminderStatus("\u672A\u6388\u4E88\u6570\u636E\u6536\u96C6\u6743\u9650\uFF0C\u90AE\u4EF6\u63D0\u9192\u4FDD\u6301\u5173\u95ED", "err");
+      return;
+    }
     save();
     applyReminderSwitches();
     renderRemindersSummary();
   });
-  $("reminderSkipDone").addEventListener("change", save);
   $("testReminder").addEventListener("click", async () => {
     if (testBusy || $("testReminder").disabled) return;
     testBusy = true;
@@ -413,13 +512,16 @@
       const email = $("reminderEmail").value.trim();
       if (!server) return showReminderStatus("\u8BF7\u5148\u586B\u5199\u670D\u52A1\u5668\u5730\u5740", "err");
       if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return showReminderStatus("\u90AE\u7BB1\u683C\u5F0F\u4E0D\u6B63\u786E", "err");
+      if (!await ensureFirefoxConsent(["email"])) {
+        return showReminderStatus("\u672A\u6388\u4E88\u6570\u636E\u6536\u96C6\u6743\u9650\uFF0C\u4E0D\u80FD\u53D1\u9001\u6D4B\u8BD5\u90AE\u4EF6", "err");
+      }
       const sentAt = await readTestSentAt();
       const waitLeft = Math.ceil((sentAt + TEST_COOLDOWN_MS - Date.now()) / 1e3);
       if (waitLeft > 0) return showReminderStatus(`\u8BF7 ${waitLeft} \u79D2\u540E\u518D\u8BD5`, "err");
       save();
       showReminderStatus("\u53D1\u9001\u4E2D\u2026");
       try {
-        await chrome.storage.session.set({ testSentAt: Date.now() });
+        await ext().storage.session.set({ testSentAt: Date.now() });
       } catch (_) {
       }
       startTestCooldown(TEST_COOLDOWN_MS / 1e3);
@@ -478,9 +580,18 @@
     try {
       const parsed = JSON.parse(await file.text());
       const next = sanitizeSettings(migrate(unwrapExport(parsed)));
+      const kinds = [];
+      if (next.autoAnswer) kinds.push("autoAnswer");
+      if (next.reminderEmailEnabled && next.reminderServer && next.reminderEmail) kinds.push("email");
+      let consentDenied = false;
+      if (kinds.length && !await ensureFirefoxConsent(kinds)) {
+        next.autoAnswer = false;
+        next.reminderEmailEnabled = false;
+        consentDenied = true;
+      }
       await saveSettings(next);
       await load();
-      showBackup("\u5DF2\u5BFC\u5165\u5E76\u751F\u6548", "ok");
+      showBackup(consentDenied ? "\u5DF2\u5BFC\u5165\uFF1B\u672A\u6388\u4E88\u6570\u636E\u6536\u96C6\u6743\u9650\uFF0C\u81EA\u52A8\u7B54\u9898/\u90AE\u4EF6\u63D0\u9192\u5DF2\u5173\u95ED" : "\u5DF2\u5BFC\u5165\u5E76\u751F\u6548", consentDenied ? "err" : "ok");
     } catch (err) {
       showBackup("\u5BFC\u5165\u5931\u8D25\uFF1A" + (err?.message || "\u6587\u4EF6\u4E0D\u662F\u6709\u6548\u7684\u914D\u7F6E"), "err");
     }
@@ -494,7 +605,7 @@
   };
   var CURRENT_VERSION = (() => {
     try {
-      return chrome.runtime.getManifest().version;
+      return ext().runtime.getManifest().version;
     } catch (_) {
       return ($("version").textContent || "").replace(/^v/, "") || "0.0.0";
     }
@@ -565,7 +676,7 @@
   }
   async function readUpdateCache() {
     try {
-      const cache = (await chrome.storage.local.get(UPDATE.KEY))[UPDATE.KEY];
+      const cache = (await ext().storage.local.get(UPDATE.KEY))[UPDATE.KEY];
       return cache && cache.current === CURRENT_VERSION ? cache : null;
     } catch (_) {
       return null;
@@ -573,7 +684,7 @@
   }
   async function writeUpdateCache() {
     try {
-      await chrome.storage.local.set({
+      await ext().storage.local.set({
         [UPDATE.KEY]: { checkedAt: updateCheckedAt, latest: updateLatest, current: CURRENT_VERSION }
       });
     } catch (_) {
@@ -608,6 +719,11 @@
     if (!updateChecking) renderUpdate();
   }
   async function initUpdateCheck() {
+    if (isFirefox()) {
+      const row = $("checkUpdate");
+      if (row) row.hidden = true;
+      return;
+    }
     const cache = await readUpdateCache();
     if (cache) {
       updateLatest = cache.latest || null;
@@ -621,7 +737,8 @@
     if (updateLatest && compareVersions(updateLatest.version, CURRENT_VERSION) > 0) {
       const url = updateLatest.url || UPDATE.RELEASES;
       try {
-        chrome.tabs.create({ url });
+        const p = ext().tabs.create({ url });
+        p?.catch?.(() => window.open(url, "_blank", "noreferrer"));
       } catch (_) {
         window.open(url, "_blank", "noreferrer");
       }
@@ -630,7 +747,7 @@
     manualCheck();
   });
   try {
-    $("version").textContent = "v" + chrome.runtime.getManifest().version;
+    $("version").textContent = "v" + ext().runtime.getManifest().version;
   } catch (_) {
   }
   load();

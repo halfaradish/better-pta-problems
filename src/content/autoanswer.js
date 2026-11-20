@@ -20,6 +20,7 @@ import {
   buildVerifyPlan, classifyProblem, clampConcurrency, failDetails, flattenCodingTypes,
   isFreshStatement, pickCompiler, redoModeOf, resumeAction, runPool, slimDraftDetail, verdictOf,
 } from '../shared/coding-batch.js';
+import { FIREFOX_DATA, ext, hasDataConsentViaBackground, sendMessage } from '../shared/ext.js';
 
 // 失败明细的实现下沉到 shared/coding-batch（批量流程与客观题汇总共用）；导出位置保持不变
 export { failDetails };
@@ -858,7 +859,8 @@ export function assertChatModel(cfg) {
 
 // OpenCode 网关不返回 CORS 头（预检直接 404），页面 fetch 必被浏览器拦下；
 // 改由 background 转发（manifest host_permissions 已覆盖 opencode.ai）。
-const hasBgFetch = typeof chrome !== 'undefined' && !!chrome.runtime?.connect && !!chrome.runtime?.sendMessage;
+// Firefox 的 browser.* 与 Chrome 的 chrome.* 都提供 connect/sendMessage；用 ext() 取当前宿主。
+const hasBgFetch = !!ext()?.runtime?.connect && !!ext()?.runtime?.sendMessage;
 
 /* 后台转发走端口（bps-llm）：首块/生成进度是多次消息，最终结果一次 done。
  * 旧的单条 sendMessage 要横跨整段生成，worker 被回收时只剩 message channel closed；
@@ -881,9 +883,8 @@ export function backgroundChat(msg, { timeoutMs = LLM_TOTAL_TIMEOUT_MS, signal, 
       fn(value);
     };
     const onAbort = () => {
-      try {
-        chrome.runtime.sendMessage({ type: 'BPS_LLM_ABORT', reqId: msg.reqId }, () => { void chrome.runtime.lastError; });
-      } catch (_) { /* 后台不在也本地放弃 */ }
+      // Firefox 的 browser.runtime.sendMessage 返回 Promise；这里只关心「有没有发出去」。
+      sendMessage({ type: 'BPS_LLM_ABORT', reqId: msg.reqId }).catch(() => { /* 后台不在也本地放弃 */ });
       finish(reject, abortedError());
     };
     // 无进度兜底：每收到一条 progress（首块/思考中/流式心跳）就重新计时。
@@ -899,7 +900,7 @@ export function backgroundChat(msg, { timeoutMs = LLM_TOTAL_TIMEOUT_MS, signal, 
     };
     armTimer();
     try {
-      port = chrome.runtime.connect({ name: 'bps-llm' });
+      port = ext().runtime.connect({ name: 'bps-llm' });
     } catch (err) {
       finish(reject, isInvalidatedMessage(err?.message) ? invalidatedError() : err);
       return;
@@ -917,7 +918,8 @@ export function backgroundChat(msg, { timeoutMs = LLM_TOTAL_TIMEOUT_MS, signal, 
     });
     port.onDisconnect.addListener(() => {
       let lastMsg = '';
-      try { lastMsg = chrome.runtime.lastError?.message || ''; } catch (_) { lastMsg = 'Extension context invalidated'; }
+      // Chrome 的端口断开原因在 runtime.lastError；Firefox 走 Promise 拒绝，没有这个字段。
+      try { lastMsg = ext()?.runtime?.lastError?.message || ''; } catch (_) { lastMsg = 'Extension context invalidated'; }
       if (settled) return;
       if (isInvalidatedMessage(lastMsg)) { finish(reject, invalidatedError()); return; }
       const err = new Error('后台转发连接被回收（service worker 重启或扩展重载）');
@@ -964,6 +966,13 @@ async function chatViaBackground(cfg, messages, opts = {}) {
 }
 
 async function chatOnce(cfg, messages, opts = {}) {
+  // Firefox：页面内容与 API Key 属于可选数据收集，用户没在弹窗里授权前不发任何模型请求。
+  // 内容脚本可能没有 permissions API，这里由后台代查（见 ext.js）。
+  if (!(await hasDataConsentViaBackground(FIREFOX_DATA.autoAnswer))) {
+    const err = new Error('Firefox 需要先在扩展弹窗中授予「页面内容 / 认证信息」数据收集权限，才能调用模型');
+    err.kind = 'fatal';
+    throw err;
+  }
   assertChatModel(cfg);
   if (cfg.gateway === 'opencode') return chatViaBackground(cfg, messages, opts);
   const base = normalizeBaseUrl(cfg.baseUrl);
@@ -1044,7 +1053,7 @@ async function chatWithRetry(cfg, messages, opts = {}) {
 
 // 页面上下文带登录态取图并转 data URL（初探结论：ptausercontent 图源可直接带登录态获取）。
 // 页面 fetch 走 CORS——实测 ptausercontent 不放行页面 fetch，因此失败后转取：
-// 经 chrome.runtime 让 background fetch（该域已在 host_permissions，含图转取见 background/index.js）。
+// 经扩展后台让 background fetch（该域已在 host_permissions，含图转取见 background/index.js）。
 // 页面世界无 chrome.runtime（真机扩展才可用时 background 可用），两层都失败则该题报失败不拖累其他题。
 function toDataUrlPage(src) {
   return fetchBounded(src, { credentials: 'include' }, IMAGE_TIMEOUT_MS, runAbort?.signal ?? null).then(res => {
@@ -1068,13 +1077,10 @@ async function toDataUrl(src) {
   if (!hasBgFetch) throw new Error('页面 fetch 被拒且无 background 可转取');
   const rsp = await new Promise((resolve, reject) => {
     let settled = false;
-    try {
-      chrome.runtime.sendMessage({ type: 'BPS_FETCH_IMAGE', src }, rsp => {
-        if (chrome.runtime.lastError) return reject(new Error(chrome.runtime.lastError.message));
-        settled = true;
-        resolve(rsp);
-      });
-    } catch (err) { return reject(err); }
+    sendMessage({ type: 'BPS_FETCH_IMAGE', src }).then(
+      r => { settled = true; resolve(r); },
+      err => { settled = true; reject(err); },
+    );
     setTimeout(() => { if (!settled) reject(new Error('background 转取无响应')); }, 15000);
   });
   if (!rsp?.ok) throw new Error('background 转取失败：' + (rsp?.reason || 'no response'));
